@@ -132,7 +132,9 @@ def main():
    broker_config=json.loads(args.broker_config.read_text());roles=broker_config['roles']
    for role,entry in roles.items():
     if role.startswith('author-'):
-     for q in sorted((Path(entry['root'])/'selftest/inbox').glob('*.json')):
+     # Process newest submissions first. A stale long-running self-test must
+     # not block a current author handoff indefinitely.
+     for q in sorted((Path(entry['root'])/'selftest/inbox').glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
       if not re.fullmatch('[a-f0-9]{32}',q.stem):continue
       if not (STATE/q.stem).exists():
        from iteration_lifecycle import scan_clocks
