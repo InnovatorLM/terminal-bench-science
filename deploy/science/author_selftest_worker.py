@@ -53,7 +53,9 @@ def process(role,entry,request):
    if not isinstance(q['idea_id'],str) or not re.fullmatch('[a-z0-9][a-z0-9-]{0,95}',q['idea_id']):raise ValueError('Invalid stable idea ID')
    status['idea_id']=q['idea_id']
   if q.get('request_review') is not None and q['request_review'] is not True:raise ValueError('Invalid review request')
-  if q.get('request_review') and not(q.get('idea_id') and q.get('iteration')):raise ValueError('Review request requires idea and iteration linkage')
+  if q.get('request_review') and not q.get('idea_id'):raise ValueError('Review request requires stable idea ID')
+  if q.get('request_review') and not q.get('initial_review') and not q.get('iteration'):
+   raise ValueError('Non-initial review request requires iteration linkage')
   atomic_json(work/'request.json',q)
   if q['job_id']!=job or not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}',name) or not re.fullmatch('[a-f0-9]{40}',q['source_commit']):raise ValueError('Invalid request identity')
   frozen=work/'upload.tar';snapshot_upload(archive,entry['uid'],140*1024*1024,frozen)

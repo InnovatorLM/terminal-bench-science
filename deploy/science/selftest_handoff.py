@@ -29,7 +29,11 @@ def qualify(work, state, observation, template):
     bridge=prepare(work,status['source_commit'],status['source_task_path'],template)
     # Recheck previous frozen bytes and completed execution; do not trust an
     # earlier derived Boolean or the author's explanation alone.
-    linkage=validate(request.get('iteration'),status,state,role)
+    if request.get('initial_review') is True:
+        linkage={'initial_review':True,'changed_committed_task':False,
+                 'linked_execution_verified':False,'scientific_acceptance':False}
+    else:
+        linkage=validate(request.get('iteration'),status,state,role)
     from check_harbor_task import validate_mechanical_check
     mechanical=work/'mechanical.json'
     validate_mechanical_check(mechanical,Path(bridge['snapshot']),hashlib.sha256(read_operator_file(mechanical)).hexdigest())
