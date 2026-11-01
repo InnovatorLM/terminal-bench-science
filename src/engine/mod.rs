@@ -173,8 +173,17 @@ impl EngineOptions {
         // (B9-R-R).
         let configured = Settings::load(&settings::path_in(layout.root()))?;
         let workspaces = configured_workspaces(&layout, &configured)?;
-        let confinement =
+        let mut confinement =
             crate::confinement::detect(layout.root(), layout.state_root(), &data_root, &workspaces);
+        // The operator broker is authoritative for local runtimes.  A CPFS-derived
+        // layout can make the generic confinement detector reject an otherwise
+        // valid local workspace; verify the live broker directly before accepting
+        // the stronger method.
+        if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
+            && crate::role_broker::available(&workspaces)
+        {
+            confinement = crate::confinement::Method::RoleBroker;
+        }
         Ok(Self {
             layout,
             data_root,
