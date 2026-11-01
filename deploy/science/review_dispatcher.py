@@ -57,6 +57,9 @@ def publish_author_feedback(pr, row, config):
     payload={'key':str(row.get('pr'))+':'+str(row.get('commit')),'generation':row.get('generation',0),
              'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
              'task':row.get('task'),'evaluator':row.get('role'),
+             # The author is paused only after an evaluator owns the exact
+             # immutable version. waiting_platform means the author must still
+             # supply the missing registration/self-test evidence.
              'author_must_pause':row.get('state')=='reviewing','updated_at':time.time()}
     atomic(root/'review-feedback.json',payload); (root/'review-feedback.json').chmod(0o644)
 
