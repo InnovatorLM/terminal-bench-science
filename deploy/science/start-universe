@@ -70,10 +70,15 @@ SERVICE_STATE="$U/.state/gewu-multiverse"
 # The controller runs as nobody; its durable scheduler state must be writable.
 # Keep the runtime local and private while allowing controller-owned snapshots.
 mkdir -p "$SERVICE_STATE"
-chown -R 65534:65534 "$SERVICE_STATE"
-# Broker configuration is intentionally root-owned; restore its trust boundary.
+# Only per-agent scheduler snapshots are controller-owned. Service directories
+# retain their stricter root/nobody ownership contracts (queue, broker, locks).
+mkdir -p "$SERVICE_STATE/evaluator-01"
+chown 65534:65534 "$SERVICE_STATE/evaluator-01"
+chmod 0750 "$SERVICE_STATE/evaluator-01"
+chmod 0750 "$SERVICE_STATE"
+# Broker configuration is intentionally root-owned and trusted.
 chown root:root "$SERVICE_STATE/role-broker" "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
-chmod 0750 "$SERVICE_STATE" "$SERVICE_STATE/role-broker"
+chmod 0750 "$SERVICE_STATE/role-broker"
 chmod 0600 "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
 trap 'startup_code=$?; printf "{\"phase\":\"services\",\"line\":%s,\"exit_code\":%s,\"launcher_pid\":%s}\n" "$LINENO" "$startup_code" "$$" > "$SERVICE_STATE/startup-failure.json"' ERR
 QUEUE_CONFIG="$U/.config/science-evaluation/queue.json"
