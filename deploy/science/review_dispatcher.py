@@ -156,18 +156,26 @@ def reconcile(api,config,ledger):
             # Never silently change an active assignment to a different image/task.
             pending[key]=dict(pr=pr['number'],state='waiting_platform',stage='assignment_binding_mismatch',evaluator_assigned=False)
             continue
-        root=Path(config['roles'][row['role']]['root']);receipt=root/'home/role/review-status.json'
+        root=Path(config['roles'][row['role']]['root']);receipt=root/'home/role/review-status.json'; activity=root/'home/role/activity-receipt.json'
         if receipt.exists():
             try:
                 info=receipt.lstat();status=json.loads(receipt.read_text())
-                if info.st_uid==config['roles'][row['role']]['uid'] and not receipt.is_symlink() and status.get('key')==key and status.get('generation')==row['generation'] and status.get('state') in STATES:
+                activity_ok=False
+                if activity.exists():
+                    ai=activity.lstat(); av=json.loads(activity.read_text())
+                    activity_ok=(ai.st_uid==config['roles'][row['role']]['uid'] and not activity.is_symlink()
+                                 and av.get('receipt_type')=='evaluator-activity-v1'
+                                 and av.get('key')==key and av.get('generation')==row['generation'])
+                if (info.st_uid==config['roles'][row['role']]['uid'] and not receipt.is_symlink()
+                    and activity_ok and status.get('key')==key and status.get('generation')==row['generation']
+                    and status.get('state') in STATES):
                     row.update(state=status['state'],stage=str(status.get('stage',''))[:100],reason=str(status.get('reason',''))[:2000],updated_at=time.time())
             except (OSError,ValueError):pass
         # A reviewing row is only live when the assigned evaluator has left a
         # matching status receipt.  If the controller/runner disappeared,
         # release the author after a bounded interval instead of leaving a
         # permanent false pause.
-        if row['state']=='reviewing' and not receipt.exists():
+        if row['state']=='reviewing' and not (receipt.exists() and activity.exists()):
             assigned_at=float(row.get('updated_at',0) or 0)
             if assigned_at and time.time()-assigned_at > REVIEW_ACTIVITY_TIMEOUT:
                 row.update(state='waiting_platform',stage='evaluator_runner_startup',

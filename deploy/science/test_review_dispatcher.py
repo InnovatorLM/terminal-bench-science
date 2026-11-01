@@ -85,6 +85,7 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(row['snapshot_sha256'],'a'*64)
                 receipt=Path(cfg['roles'][row['role']]['root'])/'home/role/review-status.json'
                 receipt.write_text(json.dumps({'key':'30:abc','generation':0,'state':'waiting_author','stage':'completeness'}))
+                (receipt.parent/'activity-receipt.json').write_text(json.dumps({'receipt_type':'evaluator-activity-v1','key':'30:abc','generation':0}))
                 m.reconcile(api,cfg,ledger);self.assertEqual(api.issues[0]['state'],'closed')
                 api.comments=[{'id':1,'updated_at':'now','user':{'login':'gewu-evaluator-01'}}]
                 m.reconcile(api,cfg,ledger);self.assertEqual(len(api.issues),1)
