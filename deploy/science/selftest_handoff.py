@@ -50,8 +50,10 @@ def qualify(work, state, observation, template):
                author_difficulty_viability_claim='Explicit request for review after iteration; independently assessed by evaluator',
                scientific_acceptance=False)
     evidence=work/'handoff-evidence.json';atomic_json(evidence,proof)
-    previous=state/linkage['previous_job']/'status.json'
-    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,previous,clock,evidence]
+    previous = state/linkage['previous_job']/'status.json' if 'previous_job' in linkage else None
+    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,clock,evidence]
+    if previous is not None:
+        files.insert(4, previous)
     receipt=dict(schema_version=2,commit=status['source_commit'],task=status['source_task_path'],
                  snapshot_sha256=bridge['snapshot_sha256'],runtime_image=template['environment']['kwargs']['runtime_image'],
                  checks={key:True for key in REQUIRED_ORDER},pre_submission_order=list(REQUIRED_ORDER),
