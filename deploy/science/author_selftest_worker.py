@@ -130,20 +130,24 @@ def main():
   fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
   while True:
    broker_config=json.loads(args.broker_config.read_text());roles=broker_config['roles']
+   # Select one newest pending submission globally.  Iterating authors in
+   # config order lets one long image build starve every later author.
+   candidates=[]
    for role,entry in roles.items():
-    if role.startswith('author-'):
-     # Process newest submissions first. A stale long-running self-test must
-     # not block a current author handoff indefinitely.
-     for q in sorted((Path(entry['root'])/'selftest/inbox').glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
-      if not re.fullmatch('[a-f0-9]{32}',q.stem):continue
-      if not (STATE/q.stem).exists():
-       from iteration_lifecycle import scan_clocks
-       scan_clocks(dict(controller_uid=broker_config['controller_uid'],roles={role:entry}),state_root=STATE.parent,observation_root=STATE.parent/'command-watchdog/iteration-observations')
-      process(role,entry,q)
-      work=STATE/q.stem
-      if (work/'status.json').exists():
-       from selftest_handoff import reconcile
-       from deployment_paths import universe_root
-       reconcile(work,STATE,entry,universe_root(W))
+    if not role.startswith('author-'): continue
+    inbox=Path(entry['root'])/'selftest/inbox'
+    for q in inbox.glob('*.json'):
+     if re.fullmatch('[a-f0-9]{32}',q.stem) and not (STATE/q.stem).exists():
+      candidates.append((q.stat().st_mtime,role,entry,q))
+   if candidates:
+    _,role,entry,q=max(candidates,key=lambda item:item[0])
+    from iteration_lifecycle import scan_clocks
+    scan_clocks(dict(controller_uid=broker_config['controller_uid'],roles={role:entry}),state_root=STATE.parent,observation_root=STATE.parent/'command-watchdog/iteration-observations')
+    process(role,entry,q)
+    work=STATE/q.stem
+    if (work/'status.json').exists():
+     from selftest_handoff import reconcile
+     from deployment_paths import universe_root
+     reconcile(work,STATE,entry,universe_root(W))
    time.sleep(10)
 if __name__=='__main__':main()
