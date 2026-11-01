@@ -1,5 +1,5 @@
 """Operator-owned author selftest queue: frozen upload -> ACR -> ACS oracle/nop."""
-import json,os,re,subprocess,tarfile,hashlib,time,fcntl
+import json,os,re,subprocess,tarfile,hashlib,time,fcntl,tomllib
 from pathlib import Path,PurePosixPath
 from evaluation_queue import W,atomic_json,digest_tree
 from check_harbor_task import inspect_task
@@ -76,7 +76,20 @@ def process(role,entry,request):
   images=json.loads((work/'build/receipt.json').read_text())['images'];status['images']={k:v['published_digest'] for k,v in images.items()};status['trials']=[]
   for agent in ['oracle','nop']:
    status['status']='running_'+agent;save();c=json.loads((W/'.config/harbor-api/template.json').read_text());run='tbs-universe-linfeng-selftest-'+job[:12]+'-'+agent
-   c.update(job_name=run,jobs_dir=str(work/'runs'),n_attempts=1,n_concurrent_trials=1,datasets=[{'path':str(repo),'task_names':[name]}],agents=[{'name':agent,'override_timeout_sec':14400}]);c['retry']={'max_retries':0};c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[]);c['environment']['delete']=True;c['environment']['import_path']=None;c['environment']['override_cpus']=4;c['environment']['override_memory_mb']=8192
+   c.update(job_name=run,jobs_dir=str(work/'runs'),n_attempts=1,n_concurrent_trials=1,datasets=[{'path':str(repo),'task_names':[name]}],agents=[{'name':agent,'override_timeout_sec':14400}]);c['retry']={'max_retries':0};c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[])
+   # ACK/ACS cannot change a container's network policy after start. Always
+   # isolate verifier startup, and copy any explicit task verifier policy into
+   # that environment so Harbor has no phase switch to perform.
+   task_cfg=tomllib.loads((task/'task.toml').read_text())
+   task_verifier=task_cfg.get('verifier') or {}
+   c['verifier']['environment_mode']='separate'
+   verifier_env=dict(task_verifier.get('environment') or {})
+   if 'network_mode' in task_verifier:
+    verifier_env['network_mode']=task_verifier['network_mode']
+   if 'allow_internet' in task_verifier:
+    verifier_env['allow_internet']=task_verifier['allow_internet']
+   c['verifier']['environment']=verifier_env
+   c['environment']['delete']=True;c['environment']['override_cpus']=4;c['environment']['override_memory_mb']=8192
    # Always use the version-controlled adapter.  The historical default ACK
    # path could load a removed local import and, more importantly, did not
    # preserve the runtime/verifier digest contract.
