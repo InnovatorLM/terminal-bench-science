@@ -295,6 +295,16 @@ find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
   -type d -exec chmod 700 {} + 2>/dev/null || true
 find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
   -type f -exec chmod 600 {} + 2>/dev/null || true
+# Every chroot needs a writable null sink for git, shells, and non-PTY tools.
+# Older local runtimes may predate role provisioning, so repair it on every
+# startup rather than relying on a one-time bootstrap.
+for role_root in "$RUNTIME/.config/gewu-multiverse/agents"/*; do
+  [ -d "$role_root" ] || continue
+  mkdir -p "$role_root/dev"
+  [ -e "$role_root/dev/null" ] || : > "$role_root/dev/null"
+  chmod 755 "$role_root/dev"
+  chmod 666 "$role_root/dev/null"
+done
 backup() {
   # Archives contain controller credentials as well as public trajectories.
   # Do not inherit an interactive shell's world-readable umask.
