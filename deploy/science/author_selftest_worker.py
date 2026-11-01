@@ -1,5 +1,5 @@
 """Operator-owned author selftest queue: frozen upload -> ACR -> ACS oracle/nop."""
-import json,os,re,subprocess,tarfile,hashlib,time,fcntl
+import json,os,re,subprocess,tarfile,hashlib,time,fcntl,tomllib
 from pathlib import Path,PurePosixPath
 from evaluation_queue import W,atomic_json,digest_tree
 from check_harbor_task import inspect_task
@@ -76,7 +76,11 @@ def process(role,entry,request):
   images=json.loads((work/'build/receipt.json').read_text())['images'];status['images']={k:v['published_digest'] for k,v in images.items()};status['trials']=[]
   for agent in ['oracle','nop']:
    status['status']='running_'+agent;save();c=json.loads((W/'.config/harbor-api/template.json').read_text());run='tbs-universe-linfeng-selftest-'+job[:12]+'-'+agent
-   c.update(job_name=run,jobs_dir=str(work/'runs'),n_attempts=1,n_concurrent_trials=1,datasets=[{'path':str(repo),'task_names':[name]}],agents=[{'name':agent,'override_timeout_sec':14400}]);c['retry']={'max_retries':0};c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[]);c['environment']['delete']=True;c['environment']['import_path']=None;c['environment']['override_cpus']=4;c['environment']['override_memory_mb']=8192
+   c.update(job_name=run,jobs_dir=str(work/'runs'),n_attempts=1,n_concurrent_trials=1,datasets=[{'path':str(repo),'task_names':[name]}],agents=[{'name':agent,'override_timeout_sec':14400}]);c['retry']={'max_retries':0};c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[])
+   task_cfg=tomllib.loads((task/'task.toml').read_text())
+   if (task_cfg.get('verifier') or {}).get('network_mode') == 'no_network':
+    c['verifier'].update(environment_mode='separate', environment={'network_mode':'no_network'})
+   c['environment']['delete']=True;c['environment']['import_path']=None;c['environment']['override_cpus']=4;c['environment']['override_memory_mb']=8192
    kw=c['environment']['kwargs'];kw.update(use_sandbox_claim=False,runtime_image=images['official']['published_digest'],verifier_image=images['verifier']['published_digest']);kw.pop('verifier_image_manifest',None)
    spec=kw['pod_overrides']['spec'];spec.update(nodeName='virtual-kubelet-cn-beijing-i',activeDeadlineSeconds=14400);kw['pod_overrides'].setdefault('metadata',{}).setdefault('labels',{})['evaluation-run']=run
    for container in spec['containers']:
