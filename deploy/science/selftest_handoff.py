@@ -109,7 +109,23 @@ def handoff(work, state, entry, universe):
 def reconcile(work, state, entry, universe):
     work=Path(work)
     request=work/'request.json'
-    if not request.exists() or not json.loads(read_operator_file(request)).get('request_review'):return
+    if not request.exists():
+        return
+    request_data=json.loads(read_operator_file(request))
+    if not request_data.get('request_review'):
+        # A successful author self-test is not silently dropped.  Publish a
+        # durable, actionable handoff receipt so the author can explicitly
+        # request independent review with the required iteration linkage.
+        status=json.loads(read_operator_file(work/'status.json')) if (work/'status.json').exists() else {}
+        if status.get('status')=='selftest_passed':
+            result={'state':'waiting_author','stage':'review_request_required',
+                    'reason':'ACS selftest passed; submit an explicit review request with a stable idea ID and result-driven iteration linkage before evaluator assignment.',
+                    'scientific_acceptance':False}
+            atomic_json(work/'handoff.json',result)
+            status['review_handoff']=result
+            destination=Path(entry['root'])/'selftest/results'/(status['job_id']+'.json')
+            atomic_json(destination,status,0o640); os.chown(destination,0,entry['gid'])
+        return
     output=work/'handoff.json'
     if output.exists() and json.loads(read_operator_file(output)).get('state')=='ready_for_independent_review':return
     status=json.loads(read_operator_file(work/'status.json'))
