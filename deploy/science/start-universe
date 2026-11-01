@@ -222,8 +222,11 @@ elif [[ "${GEWU_ALLOW_NONINTERACTIVE:-}" == 1 ]]; then
     # controlling tty. The controller has no interactive input requirement;
     # explicitly opt in rather than silently weakening the interactive path.
     controller_log="$SERVICE_STATE/controller.log"
+    # Keep the PTY supplied by `script`/a service wrapper.  The board checks
+    # both stdin and stdout with isatty(); redirecting stdin to /dev/null made
+    # the advertised noninteractive mode fail before the controller started.
     setpriv --reuid=65534 --regid=65534 --clear-groups "$PRODUCT" "$@" \
-        </dev/null >>"$controller_log" 2>&1 &
+        >>"$controller_log" 2>&1 &
 else
     echo 'The universe controller requires a terminal; set GEWU_ALLOW_NONINTERACTIVE=1 for supervised service mode.' >&2
     exit 2
