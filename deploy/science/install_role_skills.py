@@ -5,9 +5,9 @@ SOURCE=Path(__file__).with_name('skills')
 BEGIN='<!-- managed-role-skills:start -->'
 END='<!-- managed-role-skills:end -->'
 def selected(role):
-    if role.startswith('author-'):return ['harbor-acs-evaluation']
-    if role.startswith('evaluator-'):return ['harbor-acs-evaluation','acs-quality-rollout-review']
-    if role=='curator':return ['acs-review-coordination']
+    if role.startswith('author-'):return ['acs-task-pipeline','harbor-acs-evaluation']
+    if role.startswith('evaluator-'):return ['acs-task-pipeline','harbor-acs-evaluation','acs-quality-rollout-review']
+    if role=='curator':return ['acs-task-pipeline','acs-review-coordination']
     raise ValueError('Unsupported role')
 def install(root,role,owner=65534):
     root=Path(root);names=selected(role);skills=root/'skills';skills.mkdir(exist_ok=True)
