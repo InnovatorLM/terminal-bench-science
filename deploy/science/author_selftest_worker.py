@@ -8,6 +8,7 @@ from build_task_images import validate_dockerfile
 from selftest_source import verify_source
 from selftest_logs import credential_values, publish as publish_logs
 from selftest_upload import snapshot_upload
+from acs_result_diagnostics import classify_trial
 STATE=Path(os.environ.get('GEWU_AUTHOR_SELFTEST_STATE',W/'.state/science-author-selftest'))
 PYTHON=W/'acs-harbor-test/.venv/bin/python'
 BASE='public.ecr.aws/docker/library/python@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377'
@@ -88,9 +89,20 @@ def process(role,entry,request):
    if d.get('result_path'):
     for f in Path(d['result_path']).parent.glob('*/result.json'):
      t=json.loads(f.read_text());trials.append({'rewards':(t.get('verifier_result') or {}).get('rewards'),'exception_type':(t.get('exception_info') or {}).get('exception_type')})
-   status['trials'].append({'acs_started_at':acs_started_at,'acs_finished_at':time.time(),'agent':agent,'exit_code':r.returncode,'cleanup_confirmed':d.get('cleanup',{}).get('confirmed',False),'results':trials});save()
+   status['trials'].append({'acs_started_at':acs_started_at,'acs_finished_at':time.time(),'agent':agent,'exit_code':r.returncode,'cleanup_confirmed':d.get('cleanup',{}).get('confirmed',False),'results':trials,
+                            'diagnostics':[classify_trial(t) for t in trials]});save()
   def valid(t,reward):return t['exit_code']==0 and t['cleanup_confirmed'] and len(t['results'])==1 and not t['results'][0]['exception_type'] and (t['results'][0]['rewards'] or {}).get('reward')==reward
-  status['status']='selftest_passed' if valid(status['trials'][0],1) and valid(status['trials'][1],0) else 'selftest_failed'
+  if valid(status['trials'][0],1) and valid(status['trials'][1],0):
+   status['status']='selftest_passed'
+  elif any(item.get('diagnostic') == 'platform_dynamic_network_policy_mismatch'
+           for trial in status['trials'] for item in trial.get('diagnostics', [])):
+   status['status']='platform_failed'
+   status['error_class']='platform_dynamic_network_policy_mismatch'
+  elif any(not item.get('scored') for trial in status['trials'] for item in trial.get('diagnostics', [])):
+   status['status']='selftest_infrastructure_failed'
+   status['error_class']='verifier_result_missing_or_invalid'
+  else:
+   status['status']='selftest_failed'
   status['note']='Author selftest only; iteration/rerun and independent evaluation still required.'
  except KeyboardInterrupt:
   status.update(status='interrupted',error='Worker stopped; inspect preserved logs and cloud cleanup.');save();raise
