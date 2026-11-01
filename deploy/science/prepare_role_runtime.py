@@ -40,8 +40,15 @@ for index, role in enumerate(roles):
     # Immutable system tools can share root-owned inodes, not role-owned state.
     for name in ['bin', 'usr', 'lib', 'lib64', 'etc']:
         if (source / name).exists():
+            # Local /tmp runtime may be on a different device than the durable
+            # workspace, so hard-linking is invalid. Copy files when devices
+            # differ; same-device deployments may still hard-link safely.
+            def copy_or_link(a, b):
+                if Path(b).exists(): return b
+                try: os.link(a, b); return b
+                except OSError: shutil.copy2(a, b); return b
             shutil.copytree(source / name, root / name, dirs_exist_ok=True,
-                            copy_function=lambda a, b: os.link(a, b) if not Path(b).exists() else b)
+                            copy_function=copy_or_link)
     for name in ['workspace', 'runs', 'cache', 'skills', 'home/role', 'tmp', 'dev']:
         target = root / name
         target.mkdir(parents=True, exist_ok=True)

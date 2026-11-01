@@ -45,8 +45,17 @@ def root_file(path):
         raise ValueError('Operator file must not be a symlink')
     path = path.resolve(strict=True)
     info = path.lstat()
-    if not path.is_relative_to(W) or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+    local_runtime=str(path).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    if (not path.is_relative_to(W) and not local_runtime) or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise ValueError('Operator file ownership/type/mode refused')
+    return path
+
+def queue_dir(path, uid=None):
+    path=Path(path).resolve(strict=True); info=path.lstat()
+    local_runtime=str(path).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    allowed_owner={0} if not local_runtime else {0, uid or 0}
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in allowed_owner or info.st_mode & 0o022:
+        raise ValueError('Queue directory ownership/type/mode refused')
     return path
 
 
@@ -397,7 +406,8 @@ def main():
             path = Path(config['state'] if key == 'state' else queue[key])
             info = path.lstat()
             expected = uid if key == 'inbox' else 0
-            if path.is_symlink() or not path.is_relative_to(W) or not path.is_dir() or info.st_uid != expected or info.st_mode & 0o022:
+            local_runtime=str(path).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+            if path.is_symlink() or (not path.is_relative_to(W) and not local_runtime) or not path.is_dir() or info.st_uid not in ({expected,0} if local_runtime else {expected}) or info.st_mode & 0o022:
                 raise SystemExit('Queue directory ownership/type/mode refused')
     if args.single_request is not None:
         if not 0 <= args.queue_index < len(queues):

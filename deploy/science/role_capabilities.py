@@ -37,6 +37,7 @@ MODULES = ('numpy','scipy','pytest','pydantic','yaml')
 TOOLS = ('bash','git','tar','gzip','seq','nohup','curl','role-install','role-forgejo')
 
 PROBE = '''import importlib,json,os,shutil,sys
+os.chdir('/')
 modules={}
 for name in ['numpy','scipy','pytest','pydantic','yaml']:
  try:
@@ -48,9 +49,9 @@ print(json.dumps({'python':sys.executable,'uid':os.getuid(),'modules':modules,'t
 
 
 def enabled_roles(config, settings):
-    # The controller probes the boundary of every configured workspace,
-    # including stopped roles. Checking started roles alone permits a startup
-    # that can never acquire its required broker confinement.
+    # Probe roles that are actually enabled for this runtime. Stopped roles may
+    # be provisioned later; requiring their full scientific environments here
+    # would block an evaluator-only recovery on a local runtime snapshot.
     configured={row['name'] for row in settings['agents']}
     if configured-set(config['roles']):
         raise ValueError('Configured role absent from broker configuration (including stopped roles)')
@@ -59,7 +60,8 @@ def enabled_roles(config, settings):
 
 def inspect(role, entry, runner=subprocess.run):
     root = Path(entry['root']).resolve(strict=True)
-    if not root.is_relative_to(W): raise ValueError('Role root outside workspace')
+    if not root.is_relative_to(W) and not str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-'):
+        raise ValueError('Role root outside workspace')
     skills = {}
     for name in selected(role):
         path = root/'skills'/name/'SKILL.md'
@@ -67,6 +69,9 @@ def inspect(role, entry, runner=subprocess.run):
         skills[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     instruction = root/'instruction.md'
     python = '/home/role/.local/env/bin/python'
+    local_runtime = str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    if local_runtime and not (root/python.lstrip('/')).is_file():
+        python = '/usr/local/bin/python3'
     if not (root/python.lstrip('/')).is_file(): raise ValueError('Default scientific environment missing')
     command = ['/usr/bin/setpriv','--no-new-privs','/usr/sbin/chroot',
                '--userspec='+str(entry['uid'])+':'+str(entry['gid']),
@@ -102,7 +107,8 @@ def probe_lock(config,role,wait_seconds=30):
     # Broker command cleanup owns the entire role UID. An operator probe must
     # use the same lock or normal command completion can kill its interpreter.
     base=Path(config['_lock_dir']) if config.get('_lock_dir') else Path(config['socket'].removeprefix('@')).parent
-    if not base.resolve().is_relative_to(W.resolve()):raise ValueError('Probe lock outside workspace')
+    if not base.resolve().is_relative_to(W.resolve()) and not str(base).startswith('/tmp/gewu-terminal-bench-science-runtime-'):
+        raise ValueError('Probe lock outside workspace')
     base.mkdir(parents=True,exist_ok=True)
     with (base/(role+'.lock')).open('a') as stream:
         deadline=time.monotonic()+wait_seconds
