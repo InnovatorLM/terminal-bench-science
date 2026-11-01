@@ -61,6 +61,17 @@ def publish_author_feedback(pr, row, config):
              # immutable version. waiting_platform means the author must still
              # supply the missing registration/self-test evidence.
              'author_must_pause':row.get('state')=='reviewing','updated_at':time.time()}
+    # A platform-waiting author is not paused: it has a concrete, bounded
+    # action to complete before evaluator ownership can exist. Persist that
+    # action beside the status so a fresh author session cannot drift to an
+    # unrelated candidate while this PR is the next eligible submission.
+    if row.get('state') == 'waiting_platform':
+        payload['next_action'] = ('Return to this exact task and submit a real ACS self-test '
+                                  'for the exact commit before exploring another candidate.')
+        payload['required_commit'] = row.get('commit')
+        payload['required_task'] = row.get('task')
+    elif row.get('state') == 'reviewing':
+        payload['next_action'] = 'Pause this task and wait for the assigned evaluator result or concrete repair feedback.'
     atomic(root/'review-feedback.json',payload); (root/'review-feedback.json').chmod(0o644)
 
 class Api:
