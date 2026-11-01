@@ -151,7 +151,11 @@ fn configured_workspaces(layout: &Layout, settings: &Settings) -> Result<Vec<Pat
     settings
         .agents
         .iter()
-        .filter(|agent| agent.desired() == crate::engine_api::Desired::Started)
+        .filter(|agent| {
+            agent.desired() == crate::engine_api::Desired::Started
+                || (agent.name.starts_with("evaluator-")
+                    && review_assignment_ready(&layout.agents_dir().join(&agent.name)))
+        })
         .map(|agent| {
             layout
                 .agent(&agent.name)
