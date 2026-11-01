@@ -4,13 +4,21 @@ import errno, json, os, re, stat, subprocess, tempfile
 from pathlib import Path
 
 
-def _safe(root: Path, rel: str) -> Path:
+def _safe(root: Path, rel: str, *, allow_leaf_symlink: bool = False) -> Path:
     root=root.resolve(); p=(root/rel).resolve()
     if not p.is_relative_to(root): raise ValueError('path escapes role root')
     cur=root
-    for part in Path(rel).parts:
+    parts=Path(rel).parts
+    for index,part in enumerate(parts):
         cur=cur/part
-        if cur.is_symlink(): raise ValueError('symlink in role runtime path')
+        if cur.is_symlink():
+            if not (allow_leaf_symlink and index == len(parts)-1):
+                raise ValueError('symlink in role runtime path')
+            # A localized chroot intentionally aliases git-remote-https to the
+            # immutable git-remote-http helper. Permit that leaf alias only when
+            # its resolved target remains inside this role root.
+            if not cur.resolve().is_relative_to(root):
+                raise ValueError('symlink escapes role runtime path')
     return p
 
 def _install(path: Path, data: bytes, uid: int, mode: int=0o600):
@@ -62,7 +70,7 @@ def repair_role(role_root: str|Path, role: str, workspace: str|Path, *, uid: int
     remote_http=_safe(root,'usr/lib/git-core/git-remote-http')
     if remote_http.is_file() and not remote_http.is_symlink():
         os.chown(remote_http,0,0); os.chmod(remote_http,0o755)
-    remote_https=_safe(root,'usr/lib/git-core/git-remote-https')
+    remote_https=_safe(root,'usr/lib/git-core/git-remote-https',allow_leaf_symlink=True)
     if remote_https.exists() and not remote_https.is_symlink() and remote_https.is_file():
         os.chown(remote_https,0,0); os.chmod(remote_https,0o755)
     for rel in ('workspace','runs','cache','tmp','home/role','dev','usr/local/bin'):

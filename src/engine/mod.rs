@@ -536,6 +536,12 @@ struct AgentRuntime {
     starting_pid: Option<u32>,
     starting_since: Option<Instant>,
     next_at: Option<Instant>,
+    /// The exact review assignment generation that most recently caused an
+    /// evaluator wake. This is in-memory edge state: a new process starts with
+    /// no edge and therefore wakes once for the durable assignment, while a
+    /// failed session cannot spin on the same assignment before the evaluator
+    /// publishes a new activity receipt.
+    last_review_wake: Option<ReviewAssignmentStamp>,
     last_end: Option<SessionEnd>,
     quick_failures: u32,
     provision_inflight: bool,
@@ -964,6 +970,7 @@ impl AgentRuntime {
             starting_pid: None,
             starting_since: None,
             next_at: None,
+            last_review_wake: None,
             last_end: None,
             quick_failures: 0,
             provision_inflight: false,
@@ -1618,13 +1625,31 @@ impl Inner {
             }
         }
         for index in 0..self.agents.len() {
+            let assignment_root = self.options.layout.agents_dir().join(&self.agents[index].name);
+            let assignment = if self.agents[index].name.starts_with("evaluator-") {
+                review_assignment(&assignment_root)
+            } else {
+                None
+            };
+            let assignment_ready = assignment.is_some()
+                && review_assignment_ready(&assignment_root);
+            let assignment_edge = review_assignment_wake_edge(
+                self.agents[index].last_review_wake.as_ref(),
+                assignment.as_ref().filter(|_| assignment_ready),
+            );
+            // A new immutable generation is an explicit wake edge. Clear an
+            // earlier session backoff immediately; the edge is recorded only
+            // after a session is actually queued.
+            if assignment_edge {
+                self.agents[index].next_at = None;
+            }
             // Review dispatch is the durable source of truth for evaluator
             // activation.  Promote a stopped evaluator before constructing the
             // request so the normal session lifecycle (including cancellation)
             // cannot immediately call the newly spawned session off.
             if self.agents[index].name.starts_with("evaluator-")
                 && self.agents[index].desired == Desired::Stopped
-                && review_assignment_ready(&self.options.layout.agents_dir().join(&self.agents[index].name))
+                && assignment_ready
             {
                 self.set_desired(index, Desired::Started);
                 let _ = self.save_settings();
@@ -1639,7 +1664,7 @@ impl Inner {
                 // without requiring an operator to press `s` in the UI.
                 let assignment_wake = std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
                     && agent.name.starts_with("evaluator-")
-                    && review_assignment_ready(&self.options.layout.agents_dir().join(&agent.name));
+                    && assignment_ready;
                 (
                     agent.removal_pending,
                     agent.name.clone(),
@@ -1667,7 +1692,7 @@ impl Inner {
             }
             if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
                 && name.starts_with("evaluator-")
-                && !review_assignment_ready(&self.options.layout.agents_dir().join(&name))
+                && !assignment_ready
             {
                 continue;
             }
@@ -1678,6 +1703,9 @@ impl Inner {
                 continue;
             }
             if let Some(request) = self.session_request(index) {
+                if let Some(assignment) = assignment {
+                    self.agents[index].last_review_wake = Some(assignment);
+                }
                 self.agents[index].starting = true;
                 self.agents[index].starting_since = Some(now);
                 self.agents[index].session_number =
@@ -3247,25 +3275,64 @@ fn provision_agent_job(inner: Arc<Mutex<Inner>>, name: String) {
     }
 }
 
+/// The identity of one immutable review handoff. The scheduler uses this as an
+/// edge, rather than treating a level-triggered `state=reviewing` file as a new
+/// request on every tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewAssignmentStamp {
+    key: String,
+    generation: u64,
+}
+
+fn review_assignment_wake_edge(
+    last: Option<&ReviewAssignmentStamp>,
+    current: Option<&ReviewAssignmentStamp>,
+) -> bool {
+    current.is_some() && last != current
+}
+
+/// Read the controller-visible exact assignment. The role-owned assignment is
+/// deliberately not read here: its home is mode 0700 and the controller must not
+/// bypass that isolation. The dispatcher-owned wake file carries the complete
+/// immutable binding needed by the scheduler.
+fn review_assignment(root: &Path) -> Option<ReviewAssignmentStamp> {
+    let dispatch = fs::read(root.join("review-dispatch.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())?;
+    if dispatch["state"] != "reviewing" {
+        return None;
+    }
+    let key = dispatch["key"].as_str()?.to_owned();
+    let generation = dispatch["generation"].as_u64()?;
+    // These fields are the immutable binding written by review_dispatcher. An
+    // assignment without them is not eligible for an evaluator wake.
+    for field in ["commit", "task", "evaluation_id", "snapshot_sha256"] {
+        let left = dispatch[field].as_str().filter(|value| !value.is_empty());
+        if left.is_none() {
+            return None;
+        }
+    }
+    Some(ReviewAssignmentStamp { key, generation })
+}
+
 /// Park deployed evaluators before model invocation until a new review generation exists.
 fn review_assignment_ready(root: &Path) -> bool {
-    // Dispatcher publishes no credentials here; private role home stays 0700.
-    let Ok(bytes) = fs::read(root.join("review-dispatch.json")) else { return false; };
-    let Ok(assignment) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
-    if assignment["state"] != "reviewing"
-        || !assignment["key"].is_string()
-        || !assignment["generation"].is_u64()
-    { return false; }
+    let Some(assignment) = review_assignment(root) else { return false; };
     // A role can finish before the dispatcher polls again. Read its public,
     // exact-generation receipt to avoid immediately rerunning the same review.
     // The private role home stays inaccessible to the controller.
-    let path=root.join("workspace/.gewu-review-status.json");
+    let path = root.join("workspace/.gewu-review-status.json");
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
-        if let Ok(bytes)=fs::read(&path) {
-            if let Ok(status)=serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if status["key"]==assignment["key"] && status["generation"]==assignment["generation"]
-                    && matches!(status["state"].as_str(),Some("waiting_author"|"waiting_platform"|"completed"))
-                { return false; }
+        if let Ok(bytes) = fs::read(&path) {
+            if let Ok(status) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if status["key"].as_str() == Some(assignment.key.as_str())
+                    && status["generation"].as_u64() == Some(assignment.generation)
+                    && matches!(
+                        status["state"].as_str(),
+                        Some("waiting_author" | "waiting_platform" | "completed")
+                    )
+                {
+                    return false;
+                }
             }
         }
     }
@@ -3284,19 +3351,35 @@ fn author_review_paused(root: &Path) -> bool {
 #[cfg(test)]
 mod review_assignment_tests {
     use super::*;
+
+    fn write_assignment(root: &Path, key: &str, generation: u64, state: &str) {
+        let value = serde_json::json!({
+            "key": key,
+            "generation": generation,
+            "state": state,
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "task": "tasks/example/task",
+            "evaluation_id": "example-123",
+            "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        fs::write(root.join("review-dispatch.json"), value.to_string()).unwrap();
+        fs::create_dir_all(root.join("home/role")).unwrap();
+        fs::write(root.join("home/role/review-assignment.json"), value.to_string()).unwrap();
+    }
+
     #[test]
     fn waiting_evaluators_need_a_new_assignment_generation() {
         let root = crate::test_support::scratch_root("review-idle-gate");
         let home = root.join("home/role");
         fs::create_dir_all(&home).unwrap();
         assert!(!review_assignment_ready(&root));
-        fs::write(root.join("review-dispatch.json"), r#"{"key":"30:abc","generation":0,"state":"reviewing"}"#).unwrap();
+        write_assignment(&root, "30:abc", 0, "reviewing");
         assert!(review_assignment_ready(&root));
         for state in ["waiting_author", "waiting_platform", "completed"] {
-            fs::write(root.join("review-dispatch.json"), serde_json::json!({"key":"30:abc","generation":0,"state":state}).to_string()).unwrap();
+            write_assignment(&root, "30:abc", 0, state);
             assert!(!review_assignment_ready(&root));
         }
-        fs::write(root.join("review-dispatch.json"), r#"{"key":"30:abc","generation":1,"state":"reviewing"}"#).unwrap();
+        write_assignment(&root, "30:abc", 1, "reviewing");
         assert!(review_assignment_ready(&root));
         let _ = fs::remove_dir_all(root);
     }
@@ -3305,14 +3388,14 @@ mod review_assignment_tests {
     fn completed_role_receipt_parks_before_dispatcher_catches_up() {
         let root=crate::test_support::scratch_root("review-receipt-race");
         fs::create_dir_all(root.join("workspace")).unwrap();
-        fs::write(root.join("review-dispatch.json"),r#"{"key":"version:task","generation":0,"state":"reviewing"}"#).unwrap();
+        write_assignment(&root, "version:task", 0, "reviewing");
         for state in ["waiting_author","waiting_platform","completed"] {
             fs::write(root.join("workspace/.gewu-review-status.json"),serde_json::json!({"key":"version:task","generation":0,"state":state}).to_string()).unwrap();
             assert!(!review_assignment_ready(&root));
         }
-        fs::write(root.join("review-dispatch.json"),r#"{"key":"version:task","generation":1,"state":"reviewing"}"#).unwrap();
+        write_assignment(&root, "version:task", 1, "reviewing");
         assert!(review_assignment_ready(&root));
-        fs::write(root.join("review-dispatch.json"),r#"{"key":"different:task","generation":0,"state":"reviewing"}"#).unwrap();
+        write_assignment(&root, "different:task", 0, "reviewing");
         assert!(review_assignment_ready(&root));
         let _=fs::remove_dir_all(root);
     }
@@ -3328,6 +3411,17 @@ mod review_assignment_tests {
         assert!(!author_review_paused(&root));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn a_new_generation_is_one_wake_edge_while_same_generation_is_level_triggered() {
+        let first = ReviewAssignmentStamp { key: "version:task".into(), generation: 0 };
+        let second = ReviewAssignmentStamp { key: "version:task".into(), generation: 1 };
+        assert!(review_assignment_wake_edge(None, Some(&first)));
+        assert!(!review_assignment_wake_edge(Some(&first), Some(&first)));
+        assert!(review_assignment_wake_edge(Some(&first), Some(&second)));
+        assert!(!review_assignment_wake_edge(Some(&second), None));
+    }
+
 }
 
 fn session_job(
@@ -3751,6 +3845,46 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(fake.counts().1, count, "the session did not start");
+    }
+
+    #[test]
+    fn a_new_review_generation_wakes_an_evaluator_during_backoff() {
+        let root = scratch_root("engine-review-wake-edge");
+        let settings = write_ready(&root, &[("evaluator-01", Desired::Started)]);
+        let clock = Arc::new(FakeClock::new());
+        let fake = Arc::new(FakeSpawner::new());
+        let mut engine = open_test_engine(&root, settings, Arc::clone(&clock), Arc::clone(&fake));
+        tick(&mut engine, &clock, Duration::ZERO);
+        wait_started(&fake, 1);
+        fake.finish_current(1);
+        tick(&mut engine, &clock, Duration::ZERO);
+        assert!(matches!(
+            engine.board().agents[0].session,
+            SessionState::Restarting { .. }
+        ));
+
+        let role_root = root.join("agents/evaluator-01");
+        let assignment = serde_json::json!({
+            "key": "new-version:tasks/example/task",
+            "generation": 1,
+            "state": "reviewing",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "task": "tasks/example/task",
+            "evaluation_id": "example-123",
+            "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        fs::write(role_root.join("review-dispatch.json"), assignment.to_string()).unwrap();
+        fs::create_dir_all(role_root.join("home/role")).unwrap();
+        fs::write(
+            role_root.join("home/role/review-assignment.json"),
+            assignment.to_string(),
+        )
+        .unwrap();
+        tick(&mut engine, &clock, Duration::ZERO);
+        wait_started(&fake, 2);
+        fake.finish_current(0);
+        tick(&mut engine, &clock, Duration::ZERO);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

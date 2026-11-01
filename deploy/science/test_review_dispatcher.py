@@ -47,6 +47,16 @@ class DispatchTests(unittest.TestCase):
                 m.reconcile(api,cfg,ledger)
             self.assertEqual(api.issues,[])
             self.assertEqual(row['assigned_at'],100)
+            feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+            self.assertFalse(feedback['author_must_pause'])
+            active=dict(key=key,generation=0,state='reviewing',stage='independent_review',
+                        reason='',updated_at=110)
+            (home/'review-status.json').write_text(json.dumps(active))
+            (home/'activity-receipt.json').write_text(json.dumps(dict(active,receipt_type='evaluator-activity-v1')))
+            with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=115):
+                m.reconcile(api,cfg,ledger)
+            feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+            self.assertTrue(feedback['author_must_pause'])
             status=dict(key=key,generation=0,state='waiting_author',stage='completeness',
                         reason='Real verifier defect',updated_at=120)
             (home/'review-status.json').write_text(json.dumps(status))

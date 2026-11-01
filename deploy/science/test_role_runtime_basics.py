@@ -48,6 +48,18 @@ class RuntimeBasicsTests(unittest.TestCase):
             self.assertEqual((etc/'gitconfig').stat().st_mode&0o777,0o644)
             self.assertEqual(helper.stat().st_mode&0o777,0o755)
 
+    def test_accepts_internal_git_remote_https_alias(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            base=Path(raw);root=base/'role';root.mkdir()
+            source=base/'.config/universe-roles';source.mkdir(parents=True)
+            credential=source/'evaluator-01.json'
+            credential.write_text(json.dumps({'login':'fixture','token':'fixture-secret'}));credential.chmod(0o600)
+            helper=root/'usr/lib/git-core/git-remote-http';helper.parent.mkdir(parents=True);helper.write_text('#!/bin/sh\n');helper.chmod(0o755)
+            (helper.parent/'git-remote-https').symlink_to('git-remote-http')
+            with patch('role_runtime_basics.probe',return_value={'ready':True}):
+                repair_role(root,'evaluator-01',base,uid=21191)
+            self.assertEqual((helper.parent/'git-remote-https').resolve(),helper.resolve())
+
     def test_role_path_symlink_cannot_overwrite_external_file(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             base=Path(raw);root=base/'role';root.mkdir();outside=base/'outside';outside.mkdir()

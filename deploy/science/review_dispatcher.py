@@ -73,10 +73,12 @@ def publish_author_feedback(pr, row, config):
     payload={'key':key,'generation':row.get('generation',0), 'commit':row.get('commit'),
              'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
              'task':row.get('task'),'evaluator':row.get('role'),
-             # The author is paused only after an evaluator owns the exact
-             # immutable version. waiting_platform means the author must still
-             # supply the missing registration/self-test evidence.
-             'author_must_pause':row.get('state')=='reviewing','updated_at':time.time()}
+             # The author is paused only after the evaluator has confirmed
+             # activity for this exact generation. A just-published assignment
+             # is still waiting for the evaluator runner to read it.
+             'author_must_pause':(row.get('state')=='reviewing'
+                                  and row.get('evaluator_activity_confirmed') is True),
+             'updated_at':time.time()}
     # A platform-waiting author is not paused: it has a concrete, bounded
     # action to complete before evaluator ownership can exist. Persist that
     # action beside the status so a fresh author session cannot drift to an
@@ -134,10 +136,14 @@ def advance_review(key,row,config,now=None):
     row.setdefault('assigned_at',row.get('updated_at') or now)
     status=matching_review_status(root,entry,key,row['generation'])
     if status is not None:
+        # An assignment alone is not evidence that the evaluator process woke.
+        # Only the matching reviewing receipt may pause the author.
+        row['evaluator_activity_confirmed'] = status.get('state') == 'reviewing'
         row.update(state=status['state'],stage=str(status.get('stage',''))[:100],
                    reason=str(status.get('reason',''))[:2000],updated_at=status['updated_at'],
                    last_activity_at=status['updated_at'])
     elif row['state']=='reviewing' and now-float(row['assigned_at'])>REVIEW_ACTIVITY_TIMEOUT:
+        row['evaluator_activity_confirmed'] = False
         row.update(state='waiting_platform',stage='evaluator_runner_startup',
                    reason='Evaluator produced no matching activity and status receipt within the startup window.',
                    evaluator_assigned=False,updated_at=now)
