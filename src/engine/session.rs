@@ -297,13 +297,20 @@ impl SessionSpawner for RealSpawner {
         let run_dir = prepared.run_dir.clone();
         let workspace = prepared.workspace.clone();
         std::thread::spawn(move || {
+            // Preserve startup diagnostics for role sessions.  A runner that
+            // exits before creating its normal run log must still leave the
+            // command output and exit status for the dispatcher/operator.
+            let stdout_path = run_dir.join("session.stdout.log");
+            let stderr_path = run_dir.join("session.stderr.log");
+            let stdout = std::fs::File::create(&stdout_path).ok().map(Stdio::from).unwrap_or_else(Stdio::null);
+            let stderr = std::fs::File::create(&stderr_path).ok().map(Stdio::from).unwrap_or_else(Stdio::null);
             let child = Command::new(&binary)
                 .arg("--run-agent")
                 .arg(&run_dir)
                 .current_dir(&workspace)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr)
                 .process_group(0)
                 .spawn();
             match child {
@@ -324,6 +331,11 @@ impl SessionSpawner for RealSpawner {
                     }
                     let _ = ready_tx.send(Ok(pid));
                     let status = child.wait();
+                    let status_text = match &status {
+                        Ok(s) => format!("exit_code={}\n", s.code().map_or(-1, |c| c)),
+                        Err(e) => format!("wait_error={}\n", e),
+                    };
+                    let _ = std::fs::write(run_dir.join("session.exit"), status_text);
                     // The pid/group records are identity handles, not transient
                     // bookkeeping. They stay until the engine has written a durable
                     // ending and verified cleanup (`run::settle_run`), or until a
