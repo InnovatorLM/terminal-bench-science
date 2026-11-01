@@ -88,7 +88,7 @@ def main():
         if args.evaluation_id in registry:
             raise ValueError('Evaluation ID is already registered')
         parent = state / 'registered' / args.evaluation_id
-        parent.mkdir(mode=0o700)
+        parent.mkdir(mode=0o700, parents=True)
         try:
             name = PurePosixPath(args.task_path).name
             snapshot = parent / name
