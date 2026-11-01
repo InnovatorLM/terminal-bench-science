@@ -16,9 +16,20 @@ def main():
         try:
             # rsync is incremental and does not block the controller.  Never
             # copy volatile sockets, locks, caches or credentials to logs.
-            if not shutil.which('rsync'): raise RuntimeError('rsync is unavailable')
-            cmd=['rsync','-a','--timeout=45','--exclude=.cache/','--exclude=.tmp/','--exclude=*.lock',str(a.source)+'/',str(a.target)+'/']
-            subprocess.run(cmd,check=True,timeout=300,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            if shutil.which('rsync'):
+                cmd=['rsync','-a','--timeout=45','--exclude=.cache/','--exclude=.tmp/','--exclude=*.lock',str(a.source)+'/',str(a.target)+'/']
+                subprocess.run(cmd,check=True,timeout=300,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            else:
+                # Minimal images may not include rsync. Keep the same exclusion
+                # policy with a bounded local copy so backup still works.
+                for src in a.source.rglob('*'):
+                    rel=src.relative_to(a.source)
+                    if any(part in {'.cache','.tmp'} for part in rel.parts) or src.name.endswith('.lock'):
+                        continue
+                    dst=a.target/rel
+                    if src.is_dir(): dst.mkdir(parents=True,exist_ok=True)
+                    elif src.is_file():
+                        dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
             row.update(status='ok',elapsed_seconds=round(time.time()-started,2))
         except Exception as e:
             row.update(status='failed',error_type=type(e).__name__,error=str(e)[:300],elapsed_seconds=round(time.time()-started,2))
