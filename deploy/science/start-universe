@@ -8,6 +8,7 @@ PY="$W/acs-harbor-test/.venv/bin/python"
 U=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
     "$PY" -c 'from deployment_paths import universe_root,require_isolated_service_config; u=universe_root(); require_isolated_service_config(u); print(u)')
 export GEWU_UNIVERSE_ROOT="$U"
+export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhanglinfeng/workspace/universes/my-terminal-bench-science-runtime-backup}"
 # Materialize only active role workspaces locally. Stopped roles get empty
 # local roots; their durable CPFS content remains available through backups.
 active_role="evaluator-01"
