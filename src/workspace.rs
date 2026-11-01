@@ -201,13 +201,17 @@ pub fn prepare(
         path: workspace.to_path_buf(),
         source,
     })?;
-    // F-1: the workspace is one of the product's directories.
-    crate::mode::set_mode(workspace, crate::mode::PRIVATE_DIR_MODE).map_err(|source| {
-        WorkspaceError::Workspace {
-            path: workspace.to_path_buf(),
-            source,
-        }
-    })?;
+    // In role-broker mode the workspace is owned by the isolated role UID;
+    // the controller must not chmod it. The launcher establishes 0700 before
+    // the role runs. Non-broker sessions retain the controller-side guard.
+    if std::env::var_os(crate::role_broker::CONFIG_ENV).is_none() {
+        crate::mode::set_mode(workspace, crate::mode::PRIVATE_DIR_MODE).map_err(|source| {
+            WorkspaceError::Workspace {
+                path: workspace.to_path_buf(),
+                source,
+            }
+        })?;
+    }
 
     let login = credential.map(|credential| credential.login).unwrap_or("");
     let url = if login.is_empty() {
