@@ -26,6 +26,14 @@ for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
         mv "$staging" "$workspace"
     fi
     mkdir -p "$workspace"
+    # Role processes must be able to clone and write inside their local workspace.
+    role_uid=$(python3 - "$GEWU_ROLE_BROKER_CONFIG" "$role" <<'PY_UID'
+import json,sys
+print(json.load(open(sys.argv[1]))['roles'][sys.argv[2]]['uid'])
+PY_UID
+)
+    chown "$role_uid:$role_uid" "$workspace"
+    chmod 0700 "$workspace"
 done
 export TMPDIR="$U/.tmp" PYTHONDONTWRITEBYTECODE=1
 export XDG_CONFIG_HOME="$U/.config" XDG_STATE_HOME="$U/.state"
