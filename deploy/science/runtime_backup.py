@@ -10,6 +10,9 @@ def main():
     p=argparse.ArgumentParser(); p.add_argument('--source',type=Path,required=True)
     p.add_argument('--target',type=Path,required=True); p.add_argument('--interval',type=int,default=600)
     a=p.parse_args(); a.target.mkdir(parents=True,exist_ok=True)
+    # The destination may predate this process and have permissive mode.
+    # Tighten it before writing any recovery metadata.
+    a.target.chmod(0o700)
     log=a.source/'.state/gewu-multiverse/runtime-backup.jsonl'; log.parent.mkdir(parents=True,exist_ok=True)
     while True:
         started=time.time(); row={'started_at':started,'source':str(a.source),'target':str(a.target)}
