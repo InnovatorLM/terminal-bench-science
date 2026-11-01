@@ -19,9 +19,8 @@ for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
         source_workspace=$(readlink -f "$workspace" || true)
         staging="$role_dir/.workspace-local.$$"
         mkdir -p "$staging"
-        if [[ "$role" == "$active_role" && -d "$source_workspace" ]]; then
-            cp -a "$source_workspace"/. "$staging"/ 2>/dev/null || true
-        fi
+        # Do not block startup on CPFS; durable contents are restored by backup.
+        # The evaluator workspace is created empty and populated by its session.
         rm "$workspace"
         mv "$staging" "$workspace"
     fi
