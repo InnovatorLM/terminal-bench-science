@@ -64,6 +64,7 @@ done
 # identity-isolated external roots under DONOR.
 python3 - "$SOURCE" "$RUNTIME" "$DONOR" "$LOCAL_PORT" <<'PY'
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -110,6 +111,13 @@ for item in queue.get('role_queues', []):
     if role not in broker['roles']:
         raise SystemExit(f'queue role is not registered: {role}')
     role_root = Path(broker['roles'][role]['root'])
+    # The chroot exposes this role-owned queue as `/evaluation`. Keep the
+    # parent searchable by the evaluator; only its inbox is writable by that
+    # evaluator and only the controller can publish results.
+    evaluation_root = role_root / 'evaluation'
+    evaluation_root.mkdir(parents=True, exist_ok=True)
+    evaluation_root.chmod(0o755)
+    os.chown(evaluation_root, 0, int(item['evaluator_uid']))
     item['inbox'] = str(role_root / 'evaluation/inbox')
     item['results'] = str(role_root / 'evaluation/results')
     inbox = Path(item['inbox'])
@@ -117,10 +125,18 @@ for item in queue.get('role_queues', []):
     inbox.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
     uid = int(item['evaluator_uid'])
-    import os
     inbox.chmod(0o700)
     inbox_owner = uid
     os.chown(inbox, inbox_owner, inbox_owner)
+    # The evaluator batch client serializes submissions with this lock. A
+    # stale lock can be left behind by the dropped queue/controller UID after
+    # a restart; repair it before the evaluator is woken so a valid assignment
+    # cannot fail before its first request is written.
+    batch_lock = inbox / '.batch.lock'
+    if not batch_lock.exists():
+        batch_lock.touch(mode=0o600)
+    os.chown(batch_lock, uid, uid)
+    batch_lock.chmod(0o600)
     results.chmod(0o755)
     os.chown(results, 0, 0)
 queue_path = runtime / '.config/science-evaluation/queue.json'

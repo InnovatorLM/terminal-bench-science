@@ -243,6 +243,17 @@ def reconcile(api,config,ledger):
             # Never silently change an active assignment to a different image/task.
             pending[key]=dict(pr=pr['number'],state='waiting_platform',stage='assignment_binding_mismatch',evaluator_assigned=False)
             continue
+        elif (row.get('state') == 'waiting_platform'
+              and row.get('stage') == 'immutable_execution_registration'
+              and execution is not None):
+            # A registration may be completed after the dispatcher parked the
+            # exact author version. Resume it as a new generation without
+            # requiring a misleading PR edit just to create an event edge.
+            row.update(state='reviewing', event=event,
+                       generation=row.get('generation', 0) + 1,
+                       issue=None, assigned_at=time.time(),
+                       evaluator_assigned=True,
+                       evaluator_activity_confirmed=False)
         root=Path(config['roles'][row['role']]['root'])
         advance_review(key,row,config)
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):
