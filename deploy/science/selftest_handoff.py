@@ -40,7 +40,7 @@ def qualify(work, state, observation, template):
     clock=work/'handoff-clock.json'
     atomic_json(clock,json.loads(read_operator_file(observation)))
     if request.get('initial_review') is True:
-        budget={'within_budget':True,'active_time_seconds_upper_bound':0,
+        budget={'within_budget':True,'active_iteration_seconds_upper_bound':0,
                 'active_time_kind':'initial_review_no_prior_iteration'}
     else:
         budget=verify(state,role,idea,clock,time.time())
