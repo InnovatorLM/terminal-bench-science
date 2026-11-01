@@ -72,6 +72,10 @@ class Api:
             batch=self.call('GET',path+('&' if '?' in path else '?')+'limit=50&page='+str(page))
             if not batch:return out
             out+=batch
+            # Forgejo may spend a long time answering pages beyond the end of
+            # a large repository. A short page is authoritative termination.
+            if len(batch) < 50:
+                return out
         raise ValueError('Pagination did not terminate')
 
 def reconcile(api,config,ledger):
