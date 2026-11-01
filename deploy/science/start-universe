@@ -187,9 +187,19 @@ while True:
         raise SystemExit('Evaluation worker failed startup; controller not started')
     time.sleep(0.1)
 PY_QUEUE_CHECK
-"$PY" "$W/gewu-multiverse/deploy/science/review_dispatcher.py" \
-    --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/review-dispatcher" \
-    > "$SERVICE_STATE/review-dispatcher/production.log" 2>&1 &
+(
+    # Forgejo may transiently be unavailable during startup. Keep the
+    # dispatcher supervised so review assignments and author feedback cannot
+    # silently stop when one polling cycle fails.
+    while true; do
+        "$PY" "$W/gewu-multiverse/deploy/science/review_dispatcher.py" \
+            --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/review-dispatcher" \
+            >> "$SERVICE_STATE/review-dispatcher/production.log" 2>&1
+        rc=$?
+        printf '%s dispatcher exited rc=%s; restarting\\n' "$(date -u +%FT%TZ)" "$rc" >> "$SERVICE_STATE/review-dispatcher/production.log"
+        sleep 5
+    done
+) &
 review_dispatch_pid=$!
 "$PY" "$W/gewu-multiverse/deploy/science/author_selftest_worker.py" \
     --broker-config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/author-selftest" \
