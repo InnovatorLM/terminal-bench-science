@@ -139,10 +139,12 @@ def validated_template(entry, request):
 
 
 def aggregate(report, result_path):
+    from acs_result_diagnostics import classify_trial
     stats = report.get('stats') or {}
     complete = stats.get('n_completed_trials') == 1 and stats.get('n_errored_trials') == 0 and report.get('harbor_exit_code') == 0
     cleanup = report.get('cleanup', {}).get('confirmed') is True
     rewards = []
+    diagnostics = []
     errors = 0
     for evaluation in stats.get('evals', {}).values():
         errors += evaluation.get('n_errors', 0)
@@ -151,14 +153,18 @@ def aggregate(report, result_path):
     if result_path.exists():
         for path in result_path.parent.glob('*/result.json'):
             trial = json.loads(path.read_text())
+            diagnostics.append(classify_trial(trial))
             data = ((trial.get('agent_result') or {}).get('metadata') or {}).get('aggregate_metrics')
             if isinstance(data, dict):
                 metadata.append({key: value for key, value in data.items() if key in {'input_tokens', 'output_tokens', 'model_messages', 'tool_result_messages', 'native_tool_calls'} and (value is None or type(value) is int and value >= 0)})
-    return {'status': 'solver_complete' if complete and cleanup and errors == 0 else 'failed',
+    infrastructure = any(not item['scored'] for item in diagnostics)
+    status = 'infrastructure_failed' if infrastructure else ('solver_complete' if complete and cleanup and errors == 0 else 'failed')
+    return {'status': status,
             'reward': rewards[0] if len(rewards) == 1 and complete else None,
             'cleanup_confirmed': cleanup, 'n_errors': errors if stats.get('evals') else None,
             'input_tokens': stats.get('n_input_tokens'), 'output_tokens': stats.get('n_output_tokens'),
-            'aggregate_metrics': metadata, 'quality_acceptance': False, 'raw_trajectory_exported': False}
+            'aggregate_metrics': metadata, 'diagnostics': diagnostics,
+            'quality_acceptance': False, 'raw_trajectory_exported': False}
 
 
 def process(config, request_path, mock=False):
