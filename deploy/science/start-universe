@@ -33,7 +33,10 @@ import json,sys
 print(json.load(open(sys.argv[1]))['roles'][sys.argv[2]]['uid'])
 PY_UID
 )
-    chown "$role_uid:$role_uid" "$workspace"
+    # The role must traverse its local root and workspace; the shared agents
+    # directory remains operator-private but role roots are independently owned.
+    chown "$role_uid:$role_uid" "$role_dir" "$workspace"
+    chmod 0755 "$role_dir"
     chmod 0700 "$workspace"
 done
 export TMPDIR="$U/.tmp" PYTHONDONTWRITEBYTECODE=1
