@@ -10,7 +10,12 @@ export PYTHONPATH="$W/gewu-multiverse/deploy/science${PYTHONPATH:+:$PYTHONPATH}"
 export GEWU_FORGEJO_PORT
 SOURCE=${GEWU_UNIVERSE_SOURCE:-$W/universes/my-terminal-bench-science-v2}
 DONOR=${GEWU_EXTERNAL_ROLE_ROOTS:-$W/universes/my-terminal-bench-science}
-RUNTIME=${GEWU_LOCAL_RUNTIME_ROOT:-$W/.tmp/gewu-terminal-bench-science-runtime}
+# Runtime state lives on the node-local ext4 volume.  CPFS is used only for
+# the source universe and periodic recovery archives; keeping the default
+# below /tmp avoids FUSE latency for git, sockets, and many small trajectory
+# files.  Operators can still override this explicitly for a dedicated local
+# path (the deployment path validator accepts the gewu runtime prefix).
+RUNTIME=${GEWU_LOCAL_RUNTIME_ROOT:-/tmp/gewu-terminal-bench-science-runtime-live-$(date -u +%Y%m%d)}
 BACKUP_DIR=${GEWU_BACKUP_DIR:-$W/.state/backups/live}
 mkdir -p "$RUNTIME" "$BACKUP_DIR"
 # Keep only failure location and status, never terminal output or command text.
