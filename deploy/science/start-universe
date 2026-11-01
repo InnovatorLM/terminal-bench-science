@@ -8,6 +8,21 @@ PY="$W/acs-harbor-test/.venv/bin/python"
 U=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
     "$PY" -c 'from deployment_paths import universe_root,require_isolated_service_config; u=universe_root(); require_isolated_service_config(u); print(u)')
 export GEWU_UNIVERSE_ROOT="$U"
+# Materialize role workspaces locally. Older deployments left symlinks to CPFS,
+# which correctly fail the broker's role-root escape check and are too slow.
+for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
+    [[ -d "$role_dir" ]] || continue
+    workspace="$role_dir/workspace"
+    if [[ -L "$workspace" ]]; then
+        source_workspace=$(readlink -f "$workspace" || true)
+        staging="$role_dir/.workspace-local.$$"
+        mkdir -p "$staging"
+        [[ -z "$source_workspace" || ! -d "$source_workspace" ]] || cp -a "$source_workspace"/. "$staging"/ 2>/dev/null || true
+        rm "$workspace"
+        mv "$staging" "$workspace"
+    fi
+    mkdir -p "$workspace"
+done
 # Runtime state is local-disk first.  A separate bounded backup worker mirrors
 # it to the durable workspace when CPFS is available; it never blocks startup.
 export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhanglinfeng/workspace/universes/my-terminal-bench-science-runtime-backup}"
