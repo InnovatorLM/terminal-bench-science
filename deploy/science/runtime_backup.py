@@ -3,7 +3,7 @@
 The runtime remains responsive when CPFS is slow: each copy has a bounded
 timeout and failures are recorded locally for the next cycle.
 """
-import argparse, json, os, shutil, subprocess, time
+import argparse, fnmatch, json, os, shutil, subprocess, time
 from pathlib import Path
 
 def main():
@@ -16,15 +16,39 @@ def main():
         try:
             # rsync is incremental and does not block the controller.  Never
             # copy volatile sockets, locks, caches or credentials to logs.
+            # Backups are for recovery metadata and trajectories only.  Never
+            # copy credentials or authentication material to the durable CPFS
+            # target: runtime trees commonly contain role credentials.toml,
+            # provider .env files, and Forgejo/token state.
+            sensitive_names = {
+                'credentials.toml', 'credentials.json', 'token', 'tokens',
+                'secrets', 'secret', '.env',
+            }
+            sensitive_globs = ('*.env', '*.token', '*token*.json', '*secret*')
+            def excluded(path):
+                rel = path.relative_to(a.source)
+                parts = rel.parts
+                if any(part in {'.cache', '.tmp', 'secrets', 'secret'} for part in parts):
+                    return True
+                name = path.name.lower()
+                if name in sensitive_names:
+                    return True
+                return any(fnmatch.fnmatch(name, pat) for pat in sensitive_globs)
+
             if shutil.which('rsync'):
-                cmd=['rsync','-a','--timeout=45','--exclude=.cache/','--exclude=.tmp/','--exclude=*.lock',str(a.source)+'/',str(a.target)+'/']
+                cmd=['rsync','-a','--timeout=45',
+                     '--exclude=.cache/','--exclude=.tmp/','--exclude=*.lock',
+                     '--exclude=credentials.toml','--exclude=credentials.json',
+                     '--exclude='+'*.env','--exclude=secrets/','--exclude=secret/',
+                     '--exclude=*token*.json','--exclude=*secret*',
+                     str(a.source)+'/',str(a.target)+'/']
                 subprocess.run(cmd,check=True,timeout=300,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
             else:
                 # Minimal images may not include rsync. Keep the same exclusion
                 # policy with a bounded local copy so backup still works.
                 for src in a.source.rglob('*'):
                     rel=src.relative_to(a.source)
-                    if any(part in {'.cache','.tmp'} for part in rel.parts) or src.name.endswith('.lock'):
+                    if excluded(src) or src.name.endswith('.lock'):
                         continue
                     dst=a.target/rel
                     if src.is_dir(): dst.mkdir(parents=True,exist_ok=True)
