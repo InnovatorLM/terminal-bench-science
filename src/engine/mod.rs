@@ -151,6 +151,7 @@ fn configured_workspaces(layout: &Layout, settings: &Settings) -> Result<Vec<Pat
     settings
         .agents
         .iter()
+        .filter(|agent| agent.desired() == crate::engine_api::Desired::Started)
         .map(|agent| {
             layout
                 .agent(&agent.name)
