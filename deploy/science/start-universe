@@ -40,6 +40,13 @@ PY_UID
     chown "$role_uid:$role_uid" "$workspace"
     chmod 0755 "$role_dir"
     chmod 0700 "$workspace"
+    # Git and shell commands inside the isolated role root require a writable
+    # null sink. Keep it as a regular file because device creation is disabled
+    # in this deployment environment.
+    mkdir -p "$role_dir/dev"
+    [[ -e "$role_dir/dev/null" ]] || : > "$role_dir/dev/null"
+    chmod 0755 "$role_dir/dev"
+    chmod 0666 "$role_dir/dev/null"
 done
 export TMPDIR="$U/.tmp" PYTHONDONTWRITEBYTECODE=1
 export XDG_CONFIG_HOME="$U/.config" XDG_STATE_HOME="$U/.state"
