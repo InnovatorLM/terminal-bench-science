@@ -36,7 +36,8 @@ PY_UID
 )
     # The role must traverse its local root and workspace; the shared agents
     # directory remains operator-private but role roots are independently owned.
-    chown "$role_uid:$role_uid" "$role_dir" "$workspace"
+    chown root:root "$role_dir"
+    chown "$role_uid:$role_uid" "$workspace"
     chmod 0755 "$role_dir"
     chmod 0700 "$workspace"
 done
