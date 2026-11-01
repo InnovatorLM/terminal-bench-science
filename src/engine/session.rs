@@ -155,13 +155,10 @@ fn readable_repositories(
 impl SessionSpawner for RealSpawner {
     fn prepare(&self, request: &SessionRequest) -> Result<PreparedSession, String> {
         ensure_run_dir(&request.run_dir)?;
-        crate::mode::hold_dir_private_below(&request.state_root, &request.run_dir).map_err(
-            |error| {
-                format!(
-                    "{} cannot be restricted: {error}",
-                    request.run_dir.display()
-                )
-            },
+        // The runtime service root is operator-owned; only the per-run directory
+        // is controller-owned and needs private mode. Do not chmod parent roots.
+        crate::mode::set_mode(&request.run_dir, crate::mode::PRIVATE_DIR_MODE).map_err(
+            |error| format!("{} cannot be restricted: {error}", request.run_dir.display())
         )?;
         let identity = GitIdentity {
             login: request.login.clone(),
