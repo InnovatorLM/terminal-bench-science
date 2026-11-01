@@ -1,5 +1,5 @@
 """Single-writer PR review dispatch. Local Forgejo only; no solver/cloud actions."""
-import argparse,fcntl,hashlib,json,os,re,time,urllib.request
+import argparse,fcntl,hashlib,json,math,os,re,stat,time,urllib.request
 from pathlib import Path
 W=Path('/mnt/data/zhanglinfeng/workspace')
 STATE=W/'.state/science-review-dispatcher'
@@ -52,8 +52,9 @@ def author_for_pr(pr, config):
     return None
 
 def publish_author_feedback(pr, row, config):
-    author=author_for_pr(pr,config)
+    author=row.get('author_role') or author_for_pr(pr,config)
     if not author: return
+    key=row.get('key') or str(row.get('pr'))+':'+str(row.get('commit'))
     root=Path(config['roles'][author]['root'])
     # Never let an older PR revision overwrite a newer exact-commit handoff
     # already owned by this author.  Without this guard, the periodic Forgejo
@@ -63,12 +64,13 @@ def publish_author_feedback(pr, row, config):
         try:
             existing=json.loads(existing_path.read_text())
             existing_key=str(existing.get('key',''))
-            incoming_key=str(row.get('pr'))+':'+str(row.get('commit'))
-            if existing.get('state')=='reviewing' and existing_key and existing_key != incoming_key:
+            same_version=(existing.get('task')==row.get('task') and
+                          existing.get('commit',existing.get('required_commit'))==row.get('commit'))
+            if existing.get('state')=='reviewing' and existing_key and existing_key != key and not same_version:
                 return
         except (OSError,ValueError,TypeError):
             pass
-    payload={'key':str(row.get('pr'))+':'+str(row.get('commit')),'generation':row.get('generation',0),
+    payload={'key':key,'generation':row.get('generation',0), 'commit':row.get('commit'),
              'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
              'task':row.get('task'),'evaluator':row.get('role'),
              # The author is paused only after an evaluator owns the exact
@@ -80,13 +82,82 @@ def publish_author_feedback(pr, row, config):
     # action beside the status so a fresh author session cannot drift to an
     # unrelated candidate while this PR is the next eligible submission.
     if row.get('state') == 'waiting_platform':
-        payload['next_action'] = ('Return to this exact task and submit a real ACS self-test '
-                                  'for the exact commit before exploring another candidate.')
+        payload['next_action'] = ('Platform intervention is required for this exact assignment. '
+                                  'Preserve the task, self-test and immutable evidence; '
+                                  'do not rebuild or repeat self-tests to work around a platform failure.')
         payload['required_commit'] = row.get('commit')
         payload['required_task'] = row.get('task')
     elif row.get('state') == 'reviewing':
         payload['next_action'] = 'Pause this task and wait for the assigned evaluator result or concrete repair feedback.'
+    if row.get('evaluation_id') and row.get('role') in config['roles']:
+        evidence=Path(config['roles'][row['role']]['root'])/'evaluation/evidence'/row['evaluation_id']/'selftest-status.json'
+        try:
+            info=evidence.lstat();proof=json.loads(evidence.read_text())
+            if (stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode&0o022
+                    and proof.get('source_commit')==row.get('commit')
+                    and proof.get('snapshot_sha256')==row.get('snapshot_sha256')):
+                payload['platform_selftest_evidence']={k:proof.get(k) for k in (
+                    'job_id','status','source_commit','snapshot_sha256','source_git_tree_verified')}
+                payload['evidence_note']='Use the matching platform self-test receipt above; older repository logs do not invalidate it. Fix scientific contract findings, but do not repeat an unchanged passing self-test solely because a review could not see the platform receipt.'
+        except (OSError,ValueError,TypeError):pass
     atomic(root/'review-feedback.json',payload); (root/'review-feedback.json').chmod(0o644)
+
+def matching_review_status(root, entry, key, generation):
+    """Only a matching pair written by the assigned role is activity evidence."""
+    values=[]
+    for name in ('review-status.json','activity-receipt.json'):
+        path=root/'home/role'/name
+        try:
+            info=path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=entry['uid']:
+                return None
+            value=json.loads(path.read_text())
+            if value.get('key')!=key or value.get('generation')!=generation:
+                return None
+            values.append(value)
+        except (OSError,ValueError,TypeError):
+            return None
+    status,activity=values
+    if status.get('state') not in STATES or activity.get('receipt_type')!='evaluator-activity-v1':
+        return None
+    stamp=status.get('updated_at')
+    if (type(stamp) not in (int,float) or not math.isfinite(stamp) or stamp<=0
+            or activity.get('updated_at')!=stamp):
+        return None
+    return status
+
+def advance_review(key,row,config,now=None):
+    now=time.time() if now is None else now
+    entry=config['roles'][row['role']];root=Path(entry['root'])
+    # Legacy exact self-test handoffs have no PR fields or assigned timestamp.
+    # Start their watchdog once; subsequent polling never refreshes this clock.
+    row.setdefault('assigned_at',row.get('updated_at') or now)
+    status=matching_review_status(root,entry,key,row['generation'])
+    if status is not None:
+        row.update(state=status['state'],stage=str(status.get('stage',''))[:100],
+                   reason=str(status.get('reason',''))[:2000],updated_at=status['updated_at'],
+                   last_activity_at=status['updated_at'])
+    elif row['state']=='reviewing' and now-float(row['assigned_at'])>REVIEW_ACTIVITY_TIMEOUT:
+        row.update(state='waiting_platform',stage='evaluator_runner_startup',
+                   reason='Evaluator produced no matching activity and status receipt within the startup window.',
+                   evaluator_assigned=False,updated_at=now)
+
+def sync_direct_assignments(config,ledger):
+    """Consume persisted exact assignments even when no PR supplied them."""
+    for key,row in ledger.items():
+        if row.get('pr') is not None:
+            continue
+        if row.get('role') not in config['roles']:
+            continue
+        advance_review(key,row,config)
+        root=Path(config['roles'][row['role']]['root'])
+        wake=dict(key=key,generation=row['generation'],state=row['state'])
+        wake.update({field:row[field] for field in ('task','commit','evaluation_id','snapshot_sha256') if field in row})
+        atomic(root/'review-dispatch.json',wake);(root/'review-dispatch.json').chmod(0o644)
+        # Keep the authoritative identity and existing role-local assignment;
+        # only the operator ledger/wake/author feedback consume result state.
+        publish_author_feedback({},dict(row,key=key),config)
+    atomic(STATE/'ledger.json',ledger)
 
 class Api:
     def __init__(self,token,base_url=None):self.token=token;self.base_url=base_url
@@ -107,6 +178,7 @@ class Api:
         raise ValueError('Pagination did not terminate')
 
 def reconcile(api,config,ledger):
+    sync_direct_assignments(config,ledger)
     pulls=api.pages('/pulls?state=open')
     pending={}
     for pr in pulls:
@@ -114,6 +186,15 @@ def reconcile(api,config,ledger):
         match=re.search(r'tasks/[a-zA-Z0-9_./-]+',pr.get('body') or '')
         if not match:continue
         task=match.group(0).rstrip('./');key=str(pr['number'])+':'+pr['head']['sha']
+        direct=[(k,row) for k,row in ledger.items() if row.get('pr') is None
+                and row.get('commit')==pr['head']['sha'] and row.get('task')==task]
+        if direct:
+            # A restored immutable handoff already owns this version. A PR
+            # appearing later must not allocate a second evaluator to it.
+            if len(direct)!=1:raise ValueError('Duplicate exact review assignment')
+            direct_key,row=direct[0]
+            publish_author_feedback(pr,dict(row,key=direct_key),config)
+            continue
         from author_submission_gate import approved
         gate_error=None
         try:eligible=approved(pr['head']['sha'],task)
@@ -142,7 +223,7 @@ def reconcile(api,config,ledger):
             publish_author_feedback(pr,pending[key],config)
             continue
         comments=api.pages('/issues/'+str(pr['number'])+'/comments');event=fingerprint(pr,comments)
-        if any(v['pr']==pr['number'] and k!=key and v['state']=='reviewing' for k,v in ledger.items()):
+        if any(v.get('pr')==pr['number'] and k!=key and v['state']=='reviewing' for k,v in ledger.items()):
             continue  # Finish or park prior revision before assigning the new one.
         row=ledger.get(key)
         if row is None:
@@ -156,37 +237,14 @@ def reconcile(api,config,ledger):
             # Never silently change an active assignment to a different image/task.
             pending[key]=dict(pr=pr['number'],state='waiting_platform',stage='assignment_binding_mismatch',evaluator_assigned=False)
             continue
-        root=Path(config['roles'][row['role']]['root']);receipt=root/'home/role/review-status.json'; activity=root/'home/role/activity-receipt.json'
-        if receipt.exists():
-            try:
-                info=receipt.lstat();status=json.loads(receipt.read_text())
-                activity_ok=False
-                if activity.exists():
-                    ai=activity.lstat(); av=json.loads(activity.read_text())
-                    activity_ok=(ai.st_uid==config['roles'][row['role']]['uid'] and not activity.is_symlink()
-                                 and av.get('receipt_type')=='evaluator-activity-v1'
-                                 and av.get('key')==key and av.get('generation')==row['generation'])
-                if (info.st_uid==config['roles'][row['role']]['uid'] and not receipt.is_symlink()
-                    and activity_ok and status.get('key')==key and status.get('generation')==row['generation']
-                    and status.get('state') in STATES):
-                    row.update(state=status['state'],stage=str(status.get('stage',''))[:100],reason=str(status.get('reason',''))[:2000],updated_at=time.time())
-            except (OSError,ValueError):pass
-        # A reviewing row is only live when the assigned evaluator has left a
-        # matching status receipt.  If the controller/runner disappeared,
-        # release the author after a bounded interval instead of leaving a
-        # permanent false pause.
-        if row['state']=='reviewing' and not (receipt.exists() and activity.exists()):
-            assigned_at=float(row.get('updated_at',0) or 0)
-            if assigned_at and time.time()-assigned_at > REVIEW_ACTIVITY_TIMEOUT:
-                row.update(state='waiting_platform',stage='evaluator_runner_startup',
-                           reason='Evaluator assignment exists but no matching activity receipt was produced within the startup window.',
-                           evaluator_assigned=False,updated_at=time.time())
+        root=Path(config['roles'][row['role']]['root'])
+        advance_review(key,row,config)
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):
             issue=api.call('GET','/issues/'+str(row['issue']))
             if issue['state']=='open':api.call('PATCH','/issues/'+str(row['issue']),{'state':'closed'})
         if row['state'] in ('waiting_author','waiting_platform') and event!=row['event']:
             if not any(v['state']=='reviewing' and v['role']==row['role'] for k,v in ledger.items() if k!=key):
-                row.update(state='reviewing',event=event,generation=row['generation']+1,issue=None)
+                row.update(state='reviewing',event=event,generation=row['generation']+1,issue=None,assigned_at=time.time())
         wake=root/'review-dispatch.json'
         if row['state']!='reviewing':
             atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)

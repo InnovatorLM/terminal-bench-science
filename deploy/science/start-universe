@@ -8,10 +8,13 @@ PY="$W/acs-harbor-test/.venv/bin/python"
 U=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
     "$PY" -c 'from deployment_paths import universe_root,require_isolated_service_config; u=universe_root(); require_isolated_service_config(u); print(u)')
 export GEWU_UNIVERSE_ROOT="$U"
+SERVICE_STATE="$U/.state/gewu-multiverse"
+mkdir -p "$SERVICE_STATE"
+exec 8>>"$SERVICE_STATE/launcher.lock"
+flock -x -n 8 || { echo 'This universe already has a launcher; startup refused.' >&2; exit 1; }
 export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhanglinfeng/workspace/universes/my-terminal-bench-science-runtime-backup}"
 # Materialize only active role workspaces locally. Stopped roles get empty
 # local roots; their durable CPFS content remains available through backups.
-active_role="evaluator-01"
 chmod 0755 "$U/.config/gewu-multiverse/agents"
 GEWU_ROLE_BROKER_CONFIG="$U/.state/gewu-multiverse/role-broker/config.json"
 for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
@@ -37,9 +40,9 @@ PY_UID
     # The role must traverse its local root and workspace; the shared agents
     # directory remains operator-private but role roots are independently owned.
     chown root:root "$role_dir"
-    chown "$role_uid:$role_uid" "$workspace"
+    chown "65534:$role_uid" "$workspace"
     chmod 0755 "$role_dir"
-    chmod 0700 "$workspace"
+    chmod 2770 "$workspace"
     # Git and shell commands inside the isolated role root require a writable
     # null sink. Keep it as a regular file because device creation is disabled
     # in this deployment environment.
@@ -91,16 +94,10 @@ if not m: raise SystemExit('Forgejo HTTP_PORT is missing')
 print(m.group(1))
 PY
 )
-"$PY" - "$U/.local/share/gewu-multiverse/forgejo/instance/app.ini" "$U/.local/share/gewu-multiverse/forgejo/instance" "$FORGEJO_PORT" <<'PY'
-from pathlib import Path
-import re,sys
-p,root,port=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
-t=p.read_text()
-t=re.sub(r'^WORK_PATH\s*=\s*.*$', 'WORK_PATH = '+root, t, flags=re.M)
-t=re.sub(r'^APP_DATA_PATH\s*=\s*.*$', 'APP_DATA_PATH = '+root+'/data', t, flags=re.M)
-t=re.sub(r'^HTTP_PORT\s*=\s*\d+', 'HTTP_PORT = '+port, t, flags=re.M)
-t=re.sub(r'^ROOT_URL\s*=\s*http://127\.0\.0\.1:\d+/', 'ROOT_URL = http://127.0.0.1:'+port+'/', t, flags=re.M)
-p.write_text(t)
+PYTHONPATH="$W/gewu-multiverse/deploy/science" "$PY" - "$U/.local/share/gewu-multiverse/forgejo/instance" "$FORGEJO_PORT" <<'PY'
+import sys
+from forgejo_runtime_paths import normalize
+normalize(sys.argv[1],sys.argv[2])
 PY
 export GEWU_FORGEJO_URL="http://127.0.0.1:${FORGEJO_PORT}"
 SERVICE_STATE="$U/.state/gewu-multiverse"
@@ -109,9 +106,13 @@ SERVICE_STATE="$U/.state/gewu-multiverse"
 mkdir -p "$SERVICE_STATE"
 # Only per-agent scheduler snapshots are controller-owned. Service directories
 # retain their stricter root/nobody ownership contracts (queue, broker, locks).
-mkdir -p "$SERVICE_STATE/evaluator-01"
-chown 65534:65534 "$SERVICE_STATE/evaluator-01"
-chmod 0750 "$SERVICE_STATE/evaluator-01"
+for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
+    [[ -d "$role_dir" ]] || continue
+    role=$(basename "$role_dir")
+    mkdir -p "$SERVICE_STATE/$role"
+    chown 65534:65534 "$SERVICE_STATE/$role"
+    chmod 0750 "$SERVICE_STATE/$role"
+done
 chown root:root "$SERVICE_STATE"
 chmod 0755 "$SERVICE_STATE"
 chown root:root "$SERVICE_STATE/evaluation-queue" "$SERVICE_STATE/evaluation-queue/registered" 2>/dev/null || true
@@ -137,12 +138,6 @@ fi
 # Keep this descriptor for the whole launcher lifetime, including owned children.
 # An operator reset holds the exclusive side and startup must fail closed.
 mkdir -p "$SERVICE_STATE/role-reset"
-if [[ "$U" == /tmp/gewu-terminal-bench-science-runtime-* ]]; then
-    "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
-        --source "$U" --target "$GEWU_RUNTIME_BACKUP_TARGET" --interval 600 \
-        > "$SERVICE_STATE/runtime-backup.log" 2>&1 &
-    backup_pid=$!
-fi
 exec 9>>"$SERVICE_STATE/role-reset/lifecycle.lock"
 chmod 600 "$SERVICE_STATE/role-reset/lifecycle.lock"
 flock -s -n 9 || { echo 'Operator maintenance/reset is active; deployment not started.' >&2; exit 1; }
@@ -155,6 +150,33 @@ config=json.load(open(sys.argv[1]))
 install_clients(config)
 from selftest_clients import install
 install(config)
+from pathlib import Path
+import os,tomllib
+from role_runtime_basics import repair_role
+from install_review_dispatch_policy import install as review_policy
+from install_author_selftest import install as author_queue
+from evaluation_queue import atomic_json,evaluation_catalog,root_file
+universe=Path(os.environ['GEWU_UNIVERSE_ROOT'])
+settings=tomllib.loads((universe/'.config/gewu-multiverse/multiverse.toml').read_text())
+active={row['name'] for row in settings['agents'] if row.get('desired')=='started'}
+for role,entry in config['roles'].items():
+    wake=Path(entry['root'])/'review-dispatch.json'
+    if role.startswith('evaluator-') and wake.is_file() and json.loads(wake.read_text()).get('state')=='reviewing':
+        active.add(role)
+for role in sorted(active):
+    entry=config['roles'][role]
+    receipt=repair_role(entry['root'],role,'/mnt/data/zhanglinfeng/workspace',uid=entry['uid'])
+    if not receipt['ready']:raise SystemExit('Role runtime basics failed: '+role)
+    if role.startswith('evaluator-'):review_policy(entry['root'],role)
+    if role.startswith('author-'):author_queue(entry['root'],entry['uid'],entry['gid'])
+    print(json.dumps(dict(role=role,runtime_basics=receipt)),flush=True)
+# Recover derived catalogs from the immutable operator registry. This does not
+# rebuild tasks or alter their registered bytes/digests.
+queue=json.loads(root_file(universe/'.config/science-evaluation/queue.json').read_text())
+catalog=evaluation_catalog(json.loads(root_file(queue['registry']).read_text()))
+for entry in queue['role_queues']:
+    path=Path(entry['inbox']).parent/'catalog.json'
+    atomic_json(path,catalog,0o640);os.chown(path,0,entry['evaluator_uid'])
 PY_BATCH_CLIENT
 # Check existing recovery records under the same UID as the controller. A root
 # maintenance rewrite must not leave private root-owned plans and silently
@@ -213,6 +235,12 @@ finish() {
     rm -f "$SERVICE_STATE/controller.pid"
 }
 trap finish EXIT
+if [[ "$U" == /tmp/gewu-terminal-bench-science-runtime-* ]]; then
+    "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
+        --source "$U" --target "$GEWU_RUNTIME_BACKUP_TARGET" --interval 600 \
+        > "$SERVICE_STATE/runtime-backup.log" 2>&1 &
+    backup_pid=$!
+fi
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Verify the process we own is live, then authenticate the real controller UID
@@ -270,10 +298,10 @@ PY_QUEUE_CHECK
     # dispatcher supervised so review assignments and author feedback cannot
     # silently stop when one polling cycle fails.
     while true; do
+        rc=0
         "$PY" "$W/gewu-multiverse/deploy/science/review_dispatcher.py" \
             --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/review-dispatcher" \
-            >> "$SERVICE_STATE/review-dispatcher/production.log" 2>&1
-        rc=$?
+            >> "$SERVICE_STATE/review-dispatcher/production.log" 2>&1 || rc=$?
         printf '%s dispatcher exited rc=%s; restarting\\n' "$(date -u +%FT%TZ)" "$rc" >> "$SERVICE_STATE/review-dispatcher/production.log"
         sleep 5
     done

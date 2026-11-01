@@ -7,6 +7,11 @@ import socket
 from pathlib import Path
 WORKSPACE=Path('/mnt/data/zhanglinfeng/workspace')
 
+def allowed_development_path(path, workspace=WORKSPACE):
+    """Accept durable workspace or the explicitly selected runtime, not all /tmp."""
+    resolved=Path(path).resolve();workspace=Path(workspace).resolve()
+    return resolved.is_relative_to(workspace) or resolved.is_relative_to(universe_root(workspace))
+
 def broker_socket_name(root):
     """Return a short, collision-resistant abstract socket name.
 

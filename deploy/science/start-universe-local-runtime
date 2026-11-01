@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Run a universe with hot state in the workspace-local scratch tree; the
-# stopped universe receives periodic archives only.  Keeping this below the
-# workspace is required by the deployment storage policy and also makes the
-# runtime discoverable during backup and recovery.
+# Run hot state on the operator-selected local volume; CPFS receives backups.
 set -euo pipefail
 W=/mnt/data/zhanglinfeng/workspace
 PY="$W/acs-harbor-test/.venv/bin/python"
@@ -67,6 +64,7 @@ done
 # identity-isolated external roots under DONOR.
 python3 - "$SOURCE" "$RUNTIME" "$DONOR" "$LOCAL_PORT" <<'PY'
 import json
+import shutil
 import sys
 from pathlib import Path
 from deployment_paths import broker_socket_name
@@ -81,14 +79,24 @@ broker = json.loads((src_state / 'role-broker/config.json').read_text())
 broker['socket'] = broker_socket_name(runtime)
 broker['_lock_dir'] = str(runtime / '.state/gewu-multiverse/role-broker/locks')
 broker['_forgejo_url'] = forgejo_url
-# The source descriptor may still refer to a retired donor universe.  Resolve
-# each registered role by its name inside SOURCE, never by trusting that stale
-# absolute path.  This keeps a hot runtime independent of the stopped
-# universe's broker file.
+# Keep role roots on the local runtime volume too.  The donor is only the
+# durable seed for a role that has not yet been materialized locally; pointing
+# the broker at donor roots would put Git, caches and trajectories back on
+# CPFS and defeat the local-runtime storage policy.
+runtime_agents = runtime / '.config/gewu-multiverse/agents'
+donor_agents = donor / '.config/gewu-multiverse/agents'
 for role, entry in broker['roles'].items():
-    root = donor / '.config/gewu-multiverse/agents' / role
+    root = runtime_agents / role
+    seed = donor_agents / role
+    if root.is_symlink():
+        raise SystemExit(f'linked local role root is not allowed: {role}')
     if not root.is_dir():
-        raise SystemExit(f'missing source role root: {role}')
+        if not seed.is_dir():
+            raise SystemExit(f'missing source role root: {role}')
+        # This path is only used for a genuinely fresh local runtime. Existing
+        # runtimes retain their local role roots and therefore do not rescan
+        # or copy their large CPFS workspaces on every restart.
+        shutil.copytree(seed, root, symlinks=True)
     entry['root'] = str(root.resolve())
 broker_path = dst_state / 'role-broker/config.json'
 broker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,9 +260,15 @@ sed -i "s#^U=.*#U=\"$RUNTIME\"#" "$RUNTIME/start"
 # The copied launcher must authorize the explicitly configured donor roots.
 # Never retain the source universe's previous donor path.
 sed -i "s#^export GEWU_EXTERNAL_ROLE_ROOTS=.*#export GEWU_EXTERNAL_ROLE_ROOTS=\"$DONOR\"#" "$RUNTIME/start"
-# The runtime is owned by the controller UID; configuration is readable by it.
+# The runtime's mutable top-level state is owned by the controller UID. Do not
+# recursively chown `.config`: it contains the identity-isolated role chroots,
+# whose binaries and private homes must retain their own owners and modes.
 mkdir -p "$RUNTIME/.local/share" "$RUNTIME/.state" "$RUNTIME/.cache" "$RUNTIME/.tmp"
-chown -R nobody:nogroup "$RUNTIME/.config" "$RUNTIME/workspaces" "$RUNTIME/.local" "$RUNTIME/.cache" "$RUNTIME/.tmp"
+chown nobody:nogroup "$RUNTIME/.config" "$RUNTIME/.config/gewu-multiverse" \
+  "$RUNTIME/.config/science-evaluation" "$RUNTIME/workspaces" "$RUNTIME/.local" \
+  "$RUNTIME/.cache" "$RUNTIME/.tmp"
+find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
+  -maxdepth 1 -type f -exec chown nobody:nogroup {} + 2>/dev/null || true
 # Operator service descriptors and their parent directories must remain
 # root-owned; role roots are deliberately owned by the controller/role UIDs.
 # Never recursively reassign the shared state: it contains private operator
@@ -297,9 +311,58 @@ chmod 755 "$RUNTIME/.state/gewu-multiverse/evaluation-queue"
 # configuration files themselves.  A glob over the agents directory would
 # otherwise chmod the directory to 0600, making instruction.md unreadable.
 find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
-  -type d -exec chmod 700 {} + 2>/dev/null || true
+  -maxdepth 1 -type d -exec chmod 700 {} + 2>/dev/null || true
 find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
-  -type f -exec chmod 600 {} + 2>/dev/null || true
+  -maxdepth 1 -type f -exec chmod 600 {} + 2>/dev/null || true
+# The role roots are chroots, not ordinary configuration. Keep their root
+# directory searchable while preserving every executable and private subtree.
+chmod 755 "$RUNTIME/.config/gewu-multiverse/agents" 2>/dev/null || true
+for role_root in "$RUNTIME/.config/gewu-multiverse/agents"/*; do
+  [ -d "$role_root" ] || continue
+  role=${role_root##*/}
+  role_uid=$(python3 - "$RUNTIME/.state/gewu-multiverse/role-broker/config.json" "$role" <<'PY_ROLE_UID'
+import json,sys
+print(json.load(open(sys.argv[1]))['roles'][sys.argv[2]]['uid'])
+PY_ROLE_UID
+)
+  chmod 755 "$role_root" 2>/dev/null || true
+  # Repair only chroot path components that must be traversable. Do not
+  # recurse into `home/role`, caches or workspaces, which are owned by the
+  # dedicated role UID and intentionally private.
+  for chroot_dir in home bin usr lib lib64 etc dev proc; do
+    if [ -d "$role_root/$chroot_dir" ]; then
+      chown root:root "$role_root/$chroot_dir" 2>/dev/null || true
+      chmod 755 "$role_root/$chroot_dir" 2>/dev/null || true
+    fi
+  done
+  # /etc is immutable chroot system state. Older preparation recursively
+  # assigned it to the controller with mode 0700, preventing Git from
+  # inspecting /etc/gitconfig before authentication.
+  if [ -d "$role_root/etc" ]; then
+    find "$role_root/etc" -type d -exec chown root:root {} + -exec chmod 755 {} + 2>/dev/null || true
+    find "$role_root/etc" -type f -exec chown root:root {} + -exec chmod 644 {} + 2>/dev/null || true
+  fi
+  for helper in "$role_root/usr/lib/git-core/git-remote-http" "$role_root/usr/lib/git-core/git-remote-https"; do
+    if [ -f "$helper" ] && [ ! -L "$helper" ]; then
+      chown root:root "$helper" 2>/dev/null || true
+      chmod 755 "$helper" 2>/dev/null || true
+    fi
+  done
+  for chroot_dir in usr/local usr/local/bin usr/lib usr/lib64; do
+    if [ -d "$role_root/$chroot_dir" ]; then
+      chown root:root "$role_root/$chroot_dir" 2>/dev/null || true
+      chmod 755 "$role_root/$chroot_dir" 2>/dev/null || true
+    fi
+  done
+  # A previous runtime may have been created by the old recursive ownership
+  # step. Repair only private role trees when their top directory has the
+  # controller owner; otherwise leave already-correct runtimes untouched.
+  for private_dir in home/role/.local home/role/.cache home/role/.state home/role/.config; do
+    if [ -d "$role_root/$private_dir" ] && [ "$(stat -c '%u' "$role_root/$private_dir" 2>/dev/null || echo -1)" != "$role_uid" ]; then
+      chown -R "$role_uid:$role_uid" "$role_root/$private_dir"
+    fi
+  done
+done
 # Every chroot needs a writable null sink for git, shells, and non-PTY tools.
 # Older local runtimes may predate role provisioning, so repair it on every
 # startup rather than relying on a one-time bootstrap.
@@ -311,8 +374,8 @@ for role_root in "$RUNTIME/.config/gewu-multiverse/agents"/*; do
   chmod 666 "$role_root/dev/null"
 done
 backup() {
-  # Archives contain controller credentials as well as public trajectories.
-  # Do not inherit an interactive shell's world-readable umask.
+  # Private trajectories and service databases require private archives even
+  # when separately provisioned credentials are excluded below.
   umask 077
   chmod 700 "$BACKUP_DIR"
   (
@@ -324,7 +387,11 @@ backup() {
     archive="$BACKUP_DIR/runtime-$stamp.tar.gz"
     pending="$archive.partial"
     code=0
-    tar --exclude='*.sock' --exclude='*.pid' -czf "$pending" -C "$(dirname "$RUNTIME")" "$(basename "$RUNTIME")" || code=$?
+    tar --exclude='*.sock' --exclude='*.pid' --exclude='*.lock' \
+      --exclude='.cache' --exclude='.tmp' --exclude='*credential*' \
+      --exclude='.env' --exclude='*.env' --exclude='*secret*' --exclude='*token*' \
+      --exclude='app.ini' --exclude='kubeconfig*' --exclude='*.key' \
+      -czf "$pending" -C "$(dirname "$RUNTIME")" "$(basename "$RUNTIME")" || code=$?
     # tar 1 means files changed during a live read. Retain it with an explicit
     # receipt, never advertise this as a transactional SQLite snapshot.
     if [[ "$code" -le 1 ]]; then

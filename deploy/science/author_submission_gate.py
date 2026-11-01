@@ -2,7 +2,7 @@
 import json,re,math,os,stat,hashlib
 from pathlib import Path
 W=Path('/mnt/data/zhanglinfeng/workspace')
-from deployment_paths import universe_root
+from deployment_paths import universe_root, allowed_development_path
 CHECKS=('schema','container_build','container_start','author_solve','verifier_positive','verifier_negative','post_iteration_rerun')
 REQUIRED_ORDER=('schema','container_build','container_start','author_solve','verifier_positive','verifier_negative','post_iteration_rerun')
 def validate_identity(commit,task):
@@ -15,7 +15,7 @@ def validate_identity(commit,task):
         raise ValueError('Task must be a canonical relative path')
 def read_operator_file(path,limit=16*1024*1024):
     path=Path(path)
-    if not path.is_absolute() or not path.resolve().is_relative_to(W.resolve()):raise ValueError('Operator evidence outside workspace')
+    if not path.is_absolute() or not allowed_development_path(path):raise ValueError('Operator evidence outside workspace')
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     with os.fdopen(fd,'rb') as stream:
         info=os.fstat(stream.fileno())

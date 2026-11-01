@@ -3,15 +3,16 @@
 set -euo pipefail
 set +x
 W=/mnt/data/zhanglinfeng/workspace
-export HOME="$W/.state/harbor-home"
-export XDG_CONFIG_HOME="$W/.config" XDG_STATE_HOME="$W/.state" XDG_CACHE_HOME="$W/.cache"
-export TMPDIR="$W/.tmp" PYTHONDONTWRITEBYTECODE=1
+ACS_RUN_ROOT="${GEWU_UNIVERSE_ROOT:-$W}"
+export HOME="$ACS_RUN_ROOT/.state/harbor-home"
+export XDG_CONFIG_HOME="$W/.config" XDG_STATE_HOME="$ACS_RUN_ROOT/.state" XDG_CACHE_HOME="$ACS_RUN_ROOT/.cache"
+export TMPDIR="$ACS_RUN_ROOT/.tmp" PYTHONDONTWRITEBYTECODE=1
 # Load version-controlled adapters before legacy installed copies.
 export PYTHONPATH="$W/gewu-multiverse/deploy/science/harbor-extensions:$W/gewu-multiverse/deploy/science:$W/.local/harbor-extensions${PYTHONPATH:+:$PYTHONPATH}"
 export NO_PROXY="172.16.41.195,localhost,127.0.0.1${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="$NO_PROXY" LITELLM_LOCAL_MODEL_COST_MAP=True
 umask 077
-mkdir -p "$HOME" "$TMPDIR" "$W/.state/science-evaluation"
+mkdir -p "$HOME" "$TMPDIR" "$ACS_RUN_ROOT/.state/science-evaluation"
 if [[ $# != 2 ]]; then
     echo 'Usage: run-acs-evaluation CONFIG_JSON REPORT_JSON' >&2
     exit 2
@@ -20,17 +21,21 @@ fi
 import json, sys
 from pathlib import Path
 w = Path('/mnt/data/zhanglinfeng/workspace')
+from deployment_paths import universe_root
+runtime=universe_root(w)
+def allowed(path):
+    return path.is_relative_to(w) or path.is_relative_to(runtime)
 cpath, report = [Path(p).resolve() for p in sys.argv[1:]]
-if not all(p.is_relative_to(w) for p in (cpath, report)):
+if not all(allowed(p) for p in (cpath, report)):
     raise SystemExit('Configuration and report must be workspace-local')
 c = json.loads(cpath.read_text())
 if (c.get('n_attempts'), c.get('n_concurrent_trials')) not in ((1, 1), (5, 1)) or c.get('retry', {}).get('max_retries') != 0:
     raise SystemExit('Require one or five attempts with concurrency one and zero automatic retries')
 for p in [Path(c['jobs_dir']).resolve(), Path(c['environment']['kwargs']['kubeconfig']).resolve()]:
-    if not p.is_relative_to(w):
+    if not allowed(p):
         raise SystemExit('Job and kubeconfig paths must be workspace-local')
 for dataset in c.get('datasets', []):
-    if not Path(dataset['path']).resolve().is_relative_to(w):
+    if not allowed(Path(dataset['path']).resolve()):
         raise SystemExit('Task datasets must be workspace-local')
 # Check current cluster state rather than trusting a historical successful run.
 # Inspect only the configured Secret; never log or materialize its credentials.

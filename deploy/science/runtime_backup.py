@@ -27,7 +27,7 @@ def main():
                 'credentials.toml', 'credentials.json', 'token', 'tokens',
                 'secrets', 'secret', '.env',
             }
-            sensitive_globs = ('*.env', '*.token', '*token*.json', '*secret*')
+            sensitive_globs = ('*.env', '*token*', '*secret*', '*credential*', 'app.ini', 'kubeconfig*', '*.key')
             def excluded(path):
                 rel = path.relative_to(a.source)
                 parts = rel.parts
@@ -43,20 +43,28 @@ def main():
                      '--exclude=.cache/','--exclude=.tmp/','--exclude=*.lock',
                      '--exclude=credentials.toml','--exclude=credentials.json',
                      '--exclude='+'*.env','--exclude=secrets/','--exclude=secret/',
-                     '--exclude=*token*.json','--exclude=*secret*',
+                     '--exclude=*token*','--exclude=*secret*','--exclude=*credential*',
+                     '--exclude=app.ini','--exclude=kubeconfig*','--exclude=*.key',
+                     '--exclude=*.sock','--exclude=*.pid',
                      str(a.source)+'/',str(a.target)+'/']
                 subprocess.run(cmd,check=True,timeout=300,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
             else:
                 # Minimal images may not include rsync. Keep the same exclusion
                 # policy with a bounded local copy so backup still works.
-                for src in a.source.rglob('*'):
-                    rel=src.relative_to(a.source)
-                    if excluded(src) or src.name.endswith('.lock'):
-                        continue
-                    dst=a.target/rel
-                    if src.is_dir(): dst.mkdir(parents=True,exist_ok=True)
-                    elif src.is_file():
-                        dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+                for folder,dirs,files in os.walk(a.source,followlinks=False):
+                    parent=Path(folder)
+                    dirs[:]=[d for d in dirs if not excluded(parent/d) and not (parent/d).is_symlink()]
+                    for name in files:
+                        src=parent/name
+                        if excluded(src) or src.is_symlink() or name.endswith(('.lock','.sock','.pid')) or not src.is_file():continue
+                        if time.time()-started>300:raise TimeoutError('Backup copy exceeded cycle budget')
+                        dst=a.target/src.relative_to(a.source)
+                        if dst.exists():
+                            before,after=src.stat(),dst.stat()
+                            if before.st_size==after.st_size and before.st_mtime_ns==after.st_mtime_ns:continue
+                        dst.parent.mkdir(parents=True,exist_ok=True)
+                        pending=dst.with_name(dst.name+'.backup-pending')
+                        shutil.copy2(src,pending);os.replace(pending,dst)
             row.update(status='ok',elapsed_seconds=round(time.time()-started,2))
         except Exception as e:
             row.update(status='failed',error_type=type(e).__name__,error=str(e)[:300],elapsed_seconds=round(time.time()-started,2))

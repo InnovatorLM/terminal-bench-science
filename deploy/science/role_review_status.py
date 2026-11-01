@@ -1,17 +1,43 @@
 #!/usr/local/bin/python3
-"""Report progress to the local review dispatcher; never starts cloud jobs."""
-import argparse,json,os,time
+"""Report one exact review generation; never starts cloud jobs."""
+import argparse
+import json
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('state',choices=['reviewing','waiting_author','waiting_platform','completed']);p.add_argument('--stage',required=True);p.add_argument('--reason',required=True);a=p.parse_args()
-home=Path('/home/role');assignment=json.loads((home/'review-assignment.json').read_text())
-record={'key':assignment['key'],'generation':assignment['generation'],'state':a.state,'stage':a.stage,'reason':a.reason,'updated_at':time.time()}
-stage=home/'review-status.pending';stage.write_text(json.dumps(record,ensure_ascii=False));stage.chmod(0o600);stage.replace(home/'review-status.json');print(json.dumps(record,ensure_ascii=False))
-# Keep a separate, append-only-ish activity marker for the dispatcher and
-# operator UI.  The status file is the authoritative state transition; this
-# receipt proves that the assigned evaluator actually entered the reporting
-# command for this exact assignment/generation.  Do not include credentials or
-# model output here.
-activity=dict(receipt_type='evaluator-activity-v1', key=record['key'],
-              generation=record['generation'], state=record['state'],
-              stage=record['stage'], updated_at=record['updated_at'])
-activity_stage=home/'activity-receipt.pending'; activity_stage.write_text(json.dumps(activity,ensure_ascii=False)); activity_stage.chmod(0o600); activity_stage.replace(home/'activity-receipt.json')
+import time
+
+TERMINAL={'waiting_author','waiting_platform','completed'}
+
+def write(path,value,mode=0o600):
+    pending=path.with_suffix('.pending')
+    pending.unlink(missing_ok=True)
+    with pending.open('x') as output:json.dump(value,output,ensure_ascii=False)
+    pending.chmod(mode);pending.replace(path)
+
+def report(home,workspace,state,stage,reason):
+    home,workspace=Path(home),Path(workspace)
+    assignment=json.loads((home/'review-assignment.json').read_text())
+    record=dict(key=assignment['key'],generation=assignment['generation'],state=state,
+                stage=stage,reason=reason,updated_at=time.time())
+    terminal=home/'review-terminal-status.json'
+    if terminal.is_file() and not terminal.is_symlink():
+        previous=json.loads(terminal.read_text())
+        if (previous.get('key')==record['key'] and previous.get('generation')==record['generation']
+                and previous.get('state') in TERMINAL):
+            record=previous
+    write(home/'review-status.json',record)
+    if record['state'] in TERMINAL:write(terminal,record)
+    activity={k:record[k] for k in ('key','generation','state','stage','updated_at')}
+    write(home/'activity-receipt.json',dict(activity,receipt_type='evaluator-activity-v1'))
+    # This non-secret mirror closes the dispatcher polling race. The private
+    # role home remains inaccessible to the controller.
+    write(workspace/'.gewu-review-status.json',record,0o644)
+    return record
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('state',choices=['reviewing',*sorted(TERMINAL)])
+    parser.add_argument('--stage',required=True);parser.add_argument('--reason',required=True)
+    args=parser.parse_args()
+    print(json.dumps(report('/home/role','/workspace',args.state,args.stage,args.reason),ensure_ascii=False))
+
+if __name__=='__main__':main()

@@ -4,6 +4,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tempfile
+import os
 
 def verify_source(workspace, repository, task_path, commit, uploaded):
     workspace = Path(workspace).resolve(strict=True)
@@ -18,7 +19,7 @@ def verify_source(workspace, repository, task_path, commit, uploaded):
     env = {'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_NO_REPLACE_OBJECTS': '1'}
     # Older patched Git ignores safe.directory supplied via -c. Supply exactly
     # this repository in a private operator-owned protected config, never '*'.
-    with tempfile.NamedTemporaryFile(mode='w',prefix='selftest-git-',dir=Path('/mnt/data/zhanglinfeng/workspace/.tmp')) as protected:
+    with tempfile.NamedTemporaryFile(mode='w',prefix='selftest-git-',dir=Path(os.environ.get('TMPDIR','/mnt/data/zhanglinfeng/workspace/.tmp'))) as protected:
         protected.write('[safe]\n\tdirectory = '+__import__('json').dumps(str(repo))+'\n')
         protected.flush()
         env['GIT_CONFIG_GLOBAL']=protected.name

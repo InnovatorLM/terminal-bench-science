@@ -27,6 +27,73 @@ class FakeApi:
         return issue
 
 class DispatchTests(unittest.TestCase):
+    def test_restored_direct_handoff_consumes_activity_and_preserves_identity(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);cfg={'roles':{}}
+            for role in ['evaluator-01','author-10']:
+                home=root/role/'home/role';home.mkdir(parents=True)
+                cfg['roles'][role]={'root':str(root/role),'uid':os.getuid(),'gid':os.getgid()}
+            key='abc:tasks/science/example'
+            row=dict(key=key,role='evaluator-01',author_role='author-10',task='tasks/science/example',
+                     commit='abc',evaluation_id='frozen-task',snapshot_sha256='a'*64,
+                     generation=0,state='reviewing',job_id='preserved-selftest')
+            ledger={key:row};home=root/'evaluator-01/home/role'
+            original=json.dumps(row);(home/'review-assignment.json').write_text(original)
+            api=FakeApi()
+            with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=100):
+                m.reconcile(api,cfg,ledger)
+            self.assertEqual(api.issues,[])
+            self.assertEqual(row['assigned_at'],100)
+            status=dict(key=key,generation=0,state='waiting_author',stage='completeness',
+                        reason='Real verifier defect',updated_at=120)
+            (home/'review-status.json').write_text(json.dumps(status))
+            (home/'activity-receipt.json').write_text(json.dumps(dict(status,receipt_type='evaluator-activity-v1')))
+            with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=150):
+                m.reconcile(api,cfg,ledger)
+            self.assertEqual(row['state'],'waiting_author')
+            self.assertEqual(row['updated_at'],120)
+            self.assertEqual(row['job_id'],'preserved-selftest')
+            self.assertEqual((home/'review-assignment.json').read_text(),original)
+            feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+            self.assertEqual(feedback['key'],key)
+            self.assertFalse(feedback['author_must_pause'])
+            self.assertEqual(api.issues,[])
+
+    def test_invalid_existing_receipts_cannot_suppress_startup_timeout(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);cfg={'roles':{}}
+            for role in ['evaluator-01','author-10']:
+                (root/role/'home/role').mkdir(parents=True)
+                cfg['roles'][role]={'root':str(root/role),'uid':os.getuid(),'gid':os.getgid()}
+            key='abc:tasks/science/example'
+            for defect in ('wrong_generation','wrong_owner','symlink'):
+                with self.subTest(defect=defect):
+                    home=root/'evaluator-01/home/role'
+                    for p in home.iterdir():p.unlink()
+                    row=dict(key=key,role='evaluator-01',author_role='author-10',task='tasks/science/example',
+                             commit='abc',generation=2,state='reviewing',assigned_at=100)
+                    status=dict(key=key,generation=1 if defect=='wrong_generation' else 2,
+                                state='completed',updated_at=120)
+                    receipt=home/'review-status.json';receipt.write_text(json.dumps(status))
+                    activity=home/'activity-receipt.json';activity.write_text(json.dumps(dict(status,receipt_type='evaluator-activity-v1')))
+                    if defect=='wrong_owner':
+                        cfg['roles']['evaluator-01']['uid']=os.getuid()+1
+                    else:cfg['roles']['evaluator-01']['uid']=os.getuid()
+                    if defect=='symlink':
+                        other=root/'untrusted.json';other.write_text(receipt.read_text());receipt.unlink();receipt.symlink_to(other)
+                    with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=500):
+                        m.sync_direct_assignments(cfg,{key:row})
+                    self.assertEqual(row['state'],'waiting_platform')
+                    feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+                    self.assertFalse(feedback['author_must_pause'])
+                    self.assertIn('do not rebuild',feedback['next_action'])
+
     def test_execution_lookup_matches_exact_version_and_rejects_changed_snapshot(self):
         import tempfile,json,os
         from pathlib import Path
@@ -84,8 +151,8 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(row['evaluation_id'],'example-v1')
                 self.assertEqual(row['snapshot_sha256'],'a'*64)
                 receipt=Path(cfg['roles'][row['role']]['root'])/'home/role/review-status.json'
-                receipt.write_text(json.dumps({'key':'30:abc','generation':0,'state':'waiting_author','stage':'completeness'}))
-                (receipt.parent/'activity-receipt.json').write_text(json.dumps({'receipt_type':'evaluator-activity-v1','key':'30:abc','generation':0}))
+                receipt.write_text(json.dumps({'key':'30:abc','generation':0,'state':'waiting_author','stage':'completeness','updated_at':100}))
+                (receipt.parent/'activity-receipt.json').write_text(json.dumps({'receipt_type':'evaluator-activity-v1','key':'30:abc','generation':0,'updated_at':100}))
                 m.reconcile(api,cfg,ledger);self.assertEqual(api.issues[0]['state'],'closed')
                 api.comments=[{'id':1,'updated_at':'now','user':{'login':'gewu-evaluator-01'}}]
                 m.reconcile(api,cfg,ledger);self.assertEqual(len(api.issues),1)

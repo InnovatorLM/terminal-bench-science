@@ -16,6 +16,7 @@ from dockerfile_bases import pin_bases, official_library_transport
 
 from evaluation_queue import W, atomic_json, digest_tree
 from register_evaluation import freeze
+from deployment_paths import allowed_development_path, universe_root
 
 REGISTRY='dptech-sh-pai-acr-registry.cn-shanghai.cr.aliyuncs.com/terminal-bench-universe'
 PINNED=re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$')
@@ -93,7 +94,8 @@ def validate_build_receipt(receipt,snapshot,commit,task_path,template):
 class Docker:
     def __init__(self,output):
         self.output=output;self.step=0
-        self.env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':str(W/'.state/harbor-home'),'DOCKER_CONFIG':str(W/'.state/docker-config-shanghai-public'),'TMPDIR':str(W/'.tmp')}
+        runtime=universe_root()
+        self.env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':str(runtime/'.state/harbor-home'),'DOCKER_CONFIG':str(W/'.state/docker-config-shanghai-public'),'TMPDIR':str(runtime/'.tmp')}
         for name in ['DOCKER_HOST','DOCKER_TLS_VERIFY','DOCKER_CERT_PATH','HTTP_PROXY','HTTPS_PROXY','NO_PROXY','http_proxy','https_proxy','no_proxy']:
             if name in os.environ:self.env[name]=os.environ[name]
     def run(self,args,json_output=False):
@@ -132,7 +134,7 @@ def main():
     parser.add_argument('--rg-binary')
     parser.add_argument('--publish',action='store_true',help='Push project Shanghai ACR images and verify manifest/config linkage')
     args=parser.parse_args();output=Path(args.output)
-    if os.geteuid()!=0 or not output.resolve().is_relative_to(W) or output.exists() or not PINNED.fullmatch(args.python_base):raise ValueError('Require operator, fresh workspace output and pinned base image')
+    if os.geteuid()!=0 or not allowed_development_path(output) or output.exists() or not PINNED.fullmatch(args.python_base):raise ValueError('Require operator, fresh workspace output and pinned base image')
     task_name=Path(args.task_path).name
     if not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}',task_name):raise ValueError('Task directory must already have a lowercase registry-compatible ID')
     state=W/'.state/science-image-builds';state.mkdir(mode=0o700,exist_ok=True)

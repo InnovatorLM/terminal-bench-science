@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 import subprocess
 from evaluation_queue import W, atomic_json, digest_tree, root_file
+from deployment_paths import allowed_development_path
 
 
 def validate_mechanical_check(path, snapshot, expected_hash):
@@ -28,7 +29,7 @@ def inspect_task(snapshot):
     from harbor.models.task.config import TaskConfig
     from harbor.models.task.paths import TaskPaths
     snapshot = Path(snapshot)
-    if not snapshot.resolve().is_relative_to(W):
+    if not allowed_development_path(snapshot):
         raise ValueError('Task must be workspace-local')
     before = digest_tree(snapshot)
     paths = TaskPaths(snapshot)
@@ -65,7 +66,7 @@ def main():
     parser.add_argument('--task', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    if args.output.exists() or not args.output.resolve().is_relative_to(W):
+    if args.output.exists() or not allowed_development_path(args.output):
         raise ValueError('Require a fresh workspace output')
     atomic_json(args.output, inspect_task(args.task))
 

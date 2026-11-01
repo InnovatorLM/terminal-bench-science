@@ -106,7 +106,8 @@ def validated_template(entry, request):
     if hashlib.sha256(raw).hexdigest() != entry['template_sha256']:
         raise ValueError('Registered template changed')
     snapshot = Path(entry['snapshot'])
-    if not snapshot.resolve().is_relative_to(W) or digest_tree(snapshot) != entry['snapshot_sha256'] or request['snapshot_sha256'] != entry['snapshot_sha256']:
+    local_snapshot=str(snapshot.resolve()).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    if (not snapshot.resolve().is_relative_to(W) and not local_snapshot) or digest_tree(snapshot) != entry['snapshot_sha256'] or request['snapshot_sha256'] != entry['snapshot_sha256']:
         raise ValueError('Registered snapshot changed or request is stale')
     if 'mechanical_check_sha256' in entry:
         from check_harbor_task import validate_mechanical_check
@@ -140,8 +141,19 @@ def validated_template(entry, request):
     agent_env = agent.get('env', {})
     if agent_env.get('OPENAI_API_KEY') != '${OPENAI_API_KEY}' or agent_env.get('OPENAI_BASE_URL') != 'https://dawnfm.gravarc.cn/v1' or agent_env.get('OPENAI_API_BASE') != 'https://dawnfm.gravarc.cn/v1':
         raise ValueError('Explicit designated provider and key placeholder required')
-    if config['datasets'] != [{'path': str(snapshot.parent), 'task_names': [snapshot.name]}]:
-        raise ValueError('Dataset is not the registered snapshot')
+    datasets=[{'path': str(snapshot.parent), 'task_names': [snapshot.name]}]
+    if config['datasets'] != datasets:
+        # Local runtime migration preserves the signed template and task bytes.
+        # Accept its former path only when the root-owned provenance binds that
+        # exact template and task digest; execute against the verified local copy.
+        provenance=json.loads(root_file(snapshot.parent/'provenance.json').read_text())
+        original=Path(provenance.get('snapshot',''))
+        if (not local_snapshot or provenance.get('template_sha256')!=entry['template_sha256']
+                or provenance.get('snapshot_sha256')!=entry['snapshot_sha256']
+                or provenance.get('source_commit')!=entry.get('source_commit')
+                or config['datasets']!=[{'path':str(original.parent),'task_names':[original.name]}]):
+            raise ValueError('Dataset is not the registered snapshot')
+        config['datasets']=datasets
     if any(value for key, value in config.items() if key.startswith('export')):
         raise ValueError('Raw export refused')
     return config

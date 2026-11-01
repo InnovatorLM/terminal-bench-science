@@ -14,12 +14,13 @@ import tarfile
 
 from evaluation_queue import W, atomic_json, evaluation_catalog, digest_tree, root_file, validated_template
 from check_harbor_task import inspect_task
+from deployment_paths import allowed_development_path
 
 
 def freeze(repo, commit, task_path, destination):
     repo = Path(repo).resolve(strict=True)
     destination = Path(destination)
-    if not repo.is_relative_to(W) or not destination.resolve().is_relative_to(W):
+    if not allowed_development_path(repo) or not allowed_development_path(destination):
         raise ValueError('Paths must remain in workspace')
     parts = PurePosixPath(task_path)
     if parts.is_absolute() or '..' in parts.parts or not parts.parts:

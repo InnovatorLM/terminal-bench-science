@@ -3252,9 +3252,24 @@ fn review_assignment_ready(root: &Path) -> bool {
     // Dispatcher publishes no credentials here; private role home stays 0700.
     let Ok(bytes) = fs::read(root.join("review-dispatch.json")) else { return false; };
     let Ok(assignment) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
-    assignment["state"] == "reviewing"
-        && assignment["key"].is_string()
-        && assignment["generation"].is_u64()
+    if assignment["state"] != "reviewing"
+        || !assignment["key"].is_string()
+        || !assignment["generation"].is_u64()
+    { return false; }
+    // A role can finish before the dispatcher polls again. Read its public,
+    // exact-generation receipt to avoid immediately rerunning the same review.
+    // The private role home stays inaccessible to the controller.
+    let path=root.join("workspace/.gewu-review-status.json");
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        if let Ok(bytes)=fs::read(&path) {
+            if let Ok(status)=serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if status["key"]==assignment["key"] && status["generation"]==assignment["generation"]
+                    && matches!(status["state"].as_str(),Some("waiting_author"|"waiting_platform"|"completed"))
+                { return false; }
+            }
+        }
+    }
+    true
 }
 
 /// Authors are parked after submitting a review request. The dispatcher clears
@@ -3284,6 +3299,22 @@ mod review_assignment_tests {
         fs::write(root.join("review-dispatch.json"), r#"{"key":"30:abc","generation":1,"state":"reviewing"}"#).unwrap();
         assert!(review_assignment_ready(&root));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completed_role_receipt_parks_before_dispatcher_catches_up() {
+        let root=crate::test_support::scratch_root("review-receipt-race");
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        fs::write(root.join("review-dispatch.json"),r#"{"key":"version:task","generation":0,"state":"reviewing"}"#).unwrap();
+        for state in ["waiting_author","waiting_platform","completed"] {
+            fs::write(root.join("workspace/.gewu-review-status.json"),serde_json::json!({"key":"version:task","generation":0,"state":state}).to_string()).unwrap();
+            assert!(!review_assignment_ready(&root));
+        }
+        fs::write(root.join("review-dispatch.json"),r#"{"key":"version:task","generation":1,"state":"reviewing"}"#).unwrap();
+        assert!(review_assignment_ready(&root));
+        fs::write(root.join("review-dispatch.json"),r#"{"key":"different:task","generation":0,"state":"reviewing"}"#).unwrap();
+        assert!(review_assignment_ready(&root));
+        let _=fs::remove_dir_all(root);
     }
 
     #[test]
