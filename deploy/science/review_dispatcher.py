@@ -54,6 +54,19 @@ def publish_author_feedback(pr, row, config):
     author=author_for_pr(pr,config)
     if not author: return
     root=Path(config['roles'][author]['root'])
+    # Never let an older PR revision overwrite a newer exact-commit handoff
+    # already owned by this author.  Without this guard, the periodic Forgejo
+    # scan can replace a current reviewing assignment with stale waiting data.
+    existing_path=root/'review-feedback.json'
+    if existing_path.exists():
+        try:
+            existing=json.loads(existing_path.read_text())
+            existing_key=str(existing.get('key',''))
+            incoming_key=str(row.get('pr'))+':'+str(row.get('commit'))
+            if existing.get('state')=='reviewing' and existing_key and existing_key != incoming_key:
+                return
+        except (OSError,ValueError,TypeError):
+            pass
     payload={'key':str(row.get('pr'))+':'+str(row.get('commit')),'generation':row.get('generation',0),
              'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
              'task':row.get('task'),'evaluator':row.get('role'),
