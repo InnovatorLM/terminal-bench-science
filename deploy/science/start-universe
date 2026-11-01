@@ -217,8 +217,15 @@ done
 export USER=nobody LOGNAME=nobody
 if [[ -t 0 && -t 1 ]]; then
     setpriv --reuid=65534 --regid=65534 --clear-groups "$PRODUCT" "$@" </dev/tty >/dev/tty &
+elif [[ "${GEWU_ALLOW_NONINTERACTIVE:-}" == 1 ]]; then
+    # Service managers and persistent SSH sessions do not always provide a
+    # controlling tty. The controller has no interactive input requirement;
+    # explicitly opt in rather than silently weakening the interactive path.
+    controller_log="$SERVICE_STATE/controller.log"
+    setpriv --reuid=65534 --regid=65534 --clear-groups "$PRODUCT" "$@" \
+        </dev/null >>"$controller_log" 2>&1 &
 else
-    echo 'The universe controller requires a terminal; start it from an interactive shell.' >&2
+    echo 'The universe controller requires a terminal; set GEWU_ALLOW_NONINTERACTIVE=1 for supervised service mode.' >&2
     exit 2
 fi
 controller_pid=$!
