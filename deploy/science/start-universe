@@ -81,8 +81,8 @@ chown root:root "$SERVICE_STATE/evaluation-queue" "$SERVICE_STATE/evaluation-que
 chmod 0755 "$SERVICE_STATE/evaluation-queue" "$SERVICE_STATE/evaluation-queue/registered" 2>/dev/null || true
 # Broker configuration is intentionally root-owned and trusted.
 chown root:root "$SERVICE_STATE/role-broker" "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
-chmod 0750 "$SERVICE_STATE/role-broker"
-chmod 0600 "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
+chmod 0755 "$SERVICE_STATE/role-broker"
+chmod 0644 "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
 trap 'startup_code=$?; printf "{\"phase\":\"services\",\"line\":%s,\"exit_code\":%s,\"launcher_pid\":%s}\n" "$LINENO" "$startup_code" "$$" > "$SERVICE_STATE/startup-failure.json"' ERR
 QUEUE_CONFIG="$U/.config/science-evaluation/queue.json"
 QUEUE_STATE="$SERVICE_STATE/evaluation-queue"
