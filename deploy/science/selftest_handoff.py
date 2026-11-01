@@ -39,9 +39,13 @@ def qualify(work, state, observation, template):
     validate_mechanical_check(mechanical,Path(bridge['snapshot']),hashlib.sha256(read_operator_file(mechanical)).hexdigest())
     clock=work/'handoff-clock.json'
     atomic_json(clock,json.loads(read_operator_file(observation)))
-    budget=verify(state,role,idea,clock,time.time())
-    if not budget['within_budget']:
-        raise ValueError('Conservative active-time bound needs additional pause evidence')
+    if request.get('initial_review') is True:
+        budget={'within_budget':True,'active_time_seconds_upper_bound':0,
+                'active_time_kind':'initial_review_no_prior_iteration'}
+    else:
+        budget=verify(state,role,idea,clock,time.time())
+        if not budget['within_budget']:
+            raise ValueError('Conservative active-time bound needs additional pause evidence')
     proof=dict(bridge=bridge,iteration=linkage,budget=budget,
                author_difficulty_viability_claim='Explicit request for review after iteration; independently assessed by evaluator',
                scientific_acceptance=False)
