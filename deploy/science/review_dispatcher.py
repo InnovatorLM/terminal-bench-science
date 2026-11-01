@@ -30,6 +30,36 @@ def registered_execution(commit, task):
     if len(matches)>1:raise ValueError('Ambiguous registered execution for author version')
     return matches[0] if matches else None
 
+def author_for_pr(pr, config):
+    login=str((pr.get('user') or {}).get('login',''))
+    match=re.search(r'author[-_]?([0-9]{2,4})$', login) or re.search(r'author[-_]?([0-9]{2,4})',str(pr.get('body') or ''))
+    if match:
+        name='author-'+match.group(1)
+        if name in config['roles']: return name
+    commit=str((pr.get('head') or {}).get('sha',''))
+    task=str(pr.get('body') or '')
+    for name,entry in config['roles'].items():
+        if not name.startswith('author-'): continue
+        root=Path(entry['root'])
+        for candidate in (root/'selftest/results').glob('*.json'):
+            try:
+                data=json.loads(candidate.read_text())
+                if data.get('source_commit')==commit or data.get('commit')==commit or (data.get('source_task_path') and data['source_task_path'] in task):
+                    return name
+            except (OSError,ValueError,TypeError):
+                continue
+    return None
+
+def publish_author_feedback(pr, row, config):
+    author=author_for_pr(pr,config)
+    if not author: return
+    root=Path(config['roles'][author]['root'])
+    payload={'key':str(row.get('pr'))+':'+str(row.get('commit')),'generation':row.get('generation',0),
+             'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
+             'task':row.get('task'),'evaluator':row.get('role'),
+             'author_must_pause':row.get('state')=='reviewing','updated_at':time.time()}
+    atomic(root/'review-feedback.json',payload); (root/'review-feedback.json').chmod(0o644)
+
 class Api:
     def __init__(self,token,base_url=None):self.token=token;self.base_url=base_url
     def call(self,method,path,data=None):
@@ -63,6 +93,7 @@ def reconcile(api,config,ledger):
                 reason='Container selftest and result-driven iteration evidence required before evaluator assignment',
                 evaluator_assigned=False)
             if gate_error:pending[key]['validation_error_type']=gate_error
+            publish_author_feedback(pr,pending[key],config)
             old=ledger.get(key)
             if old and old.get('issue'):
                 api.call('PATCH','/issues/'+str(old['issue']),{'state':'closed'})
@@ -76,6 +107,7 @@ def reconcile(api,config,ledger):
             pending[key]=dict(pr=pr['number'],commit=pr['head']['sha'],task=task,
                 state='waiting_platform',stage='immutable_execution_registration',
                 reason='Exact author version requires a registered immutable solver execution',evaluator_assigned=False)
+            publish_author_feedback(pr,pending[key],config)
             continue
         comments=api.pages('/issues/'+str(pr['number'])+'/comments');event=fingerprint(pr,comments)
         if any(v['pr']==pr['number'] and k!=key and v['state']=='reviewing' for k,v in ledger.items()):
@@ -108,6 +140,7 @@ def reconcile(api,config,ledger):
         wake=root/'review-dispatch.json'
         if row['state']!='reviewing':
             atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
+            publish_author_feedback(pr,row,config)
             continue
         marker=MARK+' '+key+' generation='+str(row['generation'])
         if not row.get('issue'):
@@ -120,6 +153,7 @@ def reconcile(api,config,ledger):
             row['issue']=issue['number']
         assignment=root/'home/role/review-assignment.json';atomic(assignment,dict(row,key=key));os.chown(assignment,config['roles'][row['role']]['uid'],config['roles'][row['role']]['gid'])
         atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
+        publish_author_feedback(pr,row,config)
     atomic(STATE/'pending-submissions.json',pending)
     atomic(STATE/'ledger.json',ledger)
 

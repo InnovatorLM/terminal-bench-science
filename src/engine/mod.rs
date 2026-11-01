@@ -1637,6 +1637,12 @@ impl Inner {
             {
                 continue;
             }
+            if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
+                && name.starts_with("author-")
+                && author_review_paused(&self.options.layout.agents_dir().join(&name))
+            {
+                continue;
+            }
             if let Some(request) = self.session_request(index) {
                 self.agents[index].starting = true;
                 self.agents[index].starting_since = Some(now);
@@ -3217,6 +3223,15 @@ fn review_assignment_ready(root: &Path) -> bool {
         && assignment["generation"].is_u64()
 }
 
+/// Authors are parked after submitting a review request. The dispatcher clears
+/// this durable marker only after the evaluator returns a result or asks for a
+/// concrete correction, preventing silent drift to another idea.
+fn author_review_paused(root: &Path) -> bool {
+    let Ok(bytes) = fs::read(root.join("review-feedback.json")) else { return false; };
+    let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return true; };
+    feedback["author_must_pause"] == true
+}
+
 #[cfg(test)]
 mod review_assignment_tests {
     use super::*;
@@ -3234,6 +3249,18 @@ mod review_assignment_tests {
         }
         fs::write(root.join("review-dispatch.json"), r#"{"key":"30:abc","generation":1,"state":"reviewing"}"#).unwrap();
         assert!(review_assignment_ready(&root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn submitted_authors_are_paused_until_feedback_clears_marker() {
+        let root = crate::test_support::scratch_root("author-review-pause");
+        fs::create_dir_all(&root).unwrap();
+        assert!(!author_review_paused(&root));
+        fs::write(root.join("review-feedback.json"), r#"{"author_must_pause":true}"#).unwrap();
+        assert!(author_review_paused(&root));
+        fs::write(root.join("review-feedback.json"), r#"{"author_must_pause":false,"state":"waiting_author"}"#).unwrap();
+        assert!(!author_review_paused(&root));
         let _ = fs::remove_dir_all(root);
     }
 }
