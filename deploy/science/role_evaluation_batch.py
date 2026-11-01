@@ -90,8 +90,9 @@ def install_clients(config):
         if not re.fullmatch(r'evaluator-[0-9]+',role):continue
         root=Path(entry['root']).resolve(strict=True)
         workspace=Path('/mnt/data/zhanglinfeng/workspace').resolve()
+        local_runtime=str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-')
         directory=root/'usr/local/bin'
-        if not root.is_relative_to(workspace) or directory.resolve()!=directory:
+        if (not root.is_relative_to(workspace) and not local_runtime) or directory.resolve()!=directory:
             raise ValueError('Unsafe role client destination')
         fd,name=tempfile.mkstemp(prefix='.role-evaluation-batch-',dir=directory)
         try:

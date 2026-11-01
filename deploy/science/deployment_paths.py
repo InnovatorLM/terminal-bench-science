@@ -22,15 +22,22 @@ def universe_root(workspace=WORKSPACE):
     workspace=Path(workspace).resolve()
     configured=os.environ.get('GEWU_UNIVERSE_ROOT')
     path=Path(configured) if configured else workspace/'universes/my-terminal-bench-science'
-    if not path.is_absolute() or not path.resolve().is_relative_to(workspace) or path.resolve()==workspace:
+    resolved=path.resolve()
+    # The science deployment may explicitly opt into a local-disk runtime
+    # snapshot.  It is still restricted to the named gewu runtime prefix and
+    # never selected implicitly; durable source and evidence remain in the
+    # workspace universe.
+    local_runtime = str(resolved).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    if not path.is_absolute() or (not resolved.is_relative_to(workspace) and not local_runtime) or resolved==workspace:
         raise ValueError('Universe root must be an absolute directory below workspace')
-    return path.resolve()
+    return resolved
 
 def deployment_state_root(root=None):
     """State owned by one deployment; never share mutable state across universes."""
     root=Path(root) if root is not None else universe_root()
     root=root.resolve()
-    if not root.is_relative_to(WORKSPACE.resolve()) or root==WORKSPACE.resolve():
+    local_runtime = str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-')
+    if (not root.is_relative_to(WORKSPACE.resolve()) and not local_runtime) or root==WORKSPACE.resolve():
         raise ValueError('Deployment state root must be inside workspace')
     return root/'.state/gewu-multiverse'
 

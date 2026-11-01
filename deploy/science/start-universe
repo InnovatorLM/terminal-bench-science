@@ -8,6 +8,9 @@ PY="$W/acs-harbor-test/.venv/bin/python"
 U=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
     "$PY" -c 'from deployment_paths import universe_root,require_isolated_service_config; u=universe_root(); require_isolated_service_config(u); print(u)')
 export GEWU_UNIVERSE_ROOT="$U"
+# Runtime state is local-disk first.  A separate bounded backup worker mirrors
+# it to the durable workspace when CPFS is available; it never blocks startup.
+export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhanglinfeng/workspace/universes/my-terminal-bench-science-runtime-backup}"
 export TMPDIR="$U/.tmp" PYTHONDONTWRITEBYTECODE=1
 export XDG_CONFIG_HOME="$U/.config" XDG_STATE_HOME="$U/.state"
 export XDG_DATA_HOME="$U/.local/share" XDG_CACHE_HOME="$U/.cache"
@@ -66,6 +69,12 @@ fi
 # Keep this descriptor for the whole launcher lifetime, including owned children.
 # An operator reset holds the exclusive side and startup must fail closed.
 mkdir -p "$SERVICE_STATE/role-reset"
+if [[ "$U" == /tmp/gewu-terminal-bench-science-runtime-* ]]; then
+    "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
+        --source "$U" --target "$GEWU_RUNTIME_BACKUP_TARGET" --interval 600 \
+        > "$SERVICE_STATE/runtime-backup.log" 2>&1 &
+    backup_pid=$!
+fi
 exec 9>>"$SERVICE_STATE/role-reset/lifecycle.lock"
 chmod 600 "$SERVICE_STATE/role-reset/lifecycle.lock"
 flock -s -n 9 || { echo 'Operator maintenance/reset is active; deployment not started.' >&2; exit 1; }
@@ -110,6 +119,7 @@ selftest_pid=''
 watchdog_pid=''
 controller_pid=''
 finish() {
+    if [[ -n "${backup_pid:-}" ]]; then kill -TERM "$backup_pid" 2>/dev/null || true; wait "$backup_pid" 2>/dev/null || true; fi
     if [[ -n "$controller_pid" ]]; then
         kill -TERM "$controller_pid" 2>/dev/null || true
         wait "$controller_pid" 2>/dev/null || true
@@ -225,8 +235,13 @@ elif [[ "${GEWU_ALLOW_NONINTERACTIVE:-}" == 1 ]]; then
     # Keep the PTY supplied by `script`/a service wrapper.  The board checks
     # both stdin and stdout with isatty(); redirecting stdin to /dev/null made
     # the advertised noninteractive mode fail before the controller started.
-    setpriv --reuid=65534 --regid=65534 --clear-groups "$PRODUCT" "$@" \
-        >>"$controller_log" 2>&1 &
+    # Allocate a real pseudo-terminal for the board even when this launcher is
+    # supervised without a controlling tty.  The engine intentionally refuses
+    # ordinary pipes because its terminal UI and signal handling depend on tty
+    # semantics; `script` supplies those semantics while keeping the launcher
+    # suitable for nohup/service managers.
+    script -q -f -c "setpriv --reuid=65534 --regid=65534 --clear-groups '$PRODUCT' $*" \
+        "$SERVICE_STATE/controller.typescript" >>"$controller_log" 2>&1 &
 else
     echo 'The universe controller requires a terminal; set GEWU_ALLOW_NONINTERACTIVE=1 for supervised service mode.' >&2
     exit 2

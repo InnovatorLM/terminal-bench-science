@@ -1604,12 +1604,32 @@ impl Inner {
             }
         }
         for index in 0..self.agents.len() {
+            // Review dispatch is the durable source of truth for evaluator
+            // activation.  Promote a stopped evaluator before constructing the
+            // request so the normal session lifecycle (including cancellation)
+            // cannot immediately call the newly spawned session off.
+            if self.agents[index].name.starts_with("evaluator-")
+                && self.agents[index].desired == Desired::Stopped
+                && review_assignment_ready(&self.options.layout.agents_dir().join(&self.agents[index].name))
+            {
+                self.set_desired(index, Desired::Started);
+                let _ = self.save_settings();
+                self.note(format!("`{}` activated by review assignment", self.agents[index].name));
+            }
             let (removal, name, ready, due) = {
                 let agent = &self.agents[index];
+                // A review assignment is an external work request.  Evaluators
+                // are commonly kept stopped in the durable operator settings so
+                // that idle evaluators do not consume model turns; publishing an
+                // exact assignment must nevertheless wake the assigned evaluator
+                // without requiring an operator to press `s` in the UI.
+                let assignment_wake = std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
+                    && agent.name.starts_with("evaluator-")
+                    && review_assignment_ready(&self.options.layout.agents_dir().join(&agent.name));
                 (
                     agent.removal_pending,
                     agent.name.clone(),
-                    agent.desired == Desired::Started
+                    (agent.desired == Desired::Started || assignment_wake)
                         && agent.running.is_none()
                         && !agent.starting
                         && !matches!(agent.session, SessionState::Blocked { .. })
