@@ -6,6 +6,7 @@ STATE=W/'.state/science-review-dispatcher'
 REPO='/repos/team/terminal-bench-science'
 MARK='<!-- exclusive-review-v1 -->'
 STATES={'reviewing','waiting_author','waiting_platform','completed'}
+REVIEW_ACTIVITY_TIMEOUT=300
 
 def atomic(path,data):
     stage=path.with_suffix('.pending');stage.write_text(json.dumps(data,ensure_ascii=False,indent=2));stage.chmod(0o600);stage.replace(path)
@@ -162,6 +163,16 @@ def reconcile(api,config,ledger):
                 if info.st_uid==config['roles'][row['role']]['uid'] and not receipt.is_symlink() and status.get('key')==key and status.get('generation')==row['generation'] and status.get('state') in STATES:
                     row.update(state=status['state'],stage=str(status.get('stage',''))[:100],reason=str(status.get('reason',''))[:2000],updated_at=time.time())
             except (OSError,ValueError):pass
+        # A reviewing row is only live when the assigned evaluator has left a
+        # matching status receipt.  If the controller/runner disappeared,
+        # release the author after a bounded interval instead of leaving a
+        # permanent false pause.
+        if row['state']=='reviewing' and not receipt.exists():
+            assigned_at=float(row.get('updated_at',0) or 0)
+            if assigned_at and time.time()-assigned_at > REVIEW_ACTIVITY_TIMEOUT:
+                row.update(state='waiting_platform',stage='evaluator_runner_startup',
+                           reason='Evaluator assignment exists but no matching activity receipt was produced within the startup window.',
+                           evaluator_assigned=False,updated_at=time.time())
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):
             issue=api.call('GET','/issues/'+str(row['issue']))
             if issue['state']=='open':api.call('PATCH','/issues/'+str(row['issue']),{'state':'closed'})
