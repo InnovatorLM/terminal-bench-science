@@ -182,7 +182,10 @@ def main():
     STATE=a.state
     STATE.mkdir(mode=0o700,exist_ok=True)
     with (STATE/'dispatcher.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # The launcher may briefly overlap an older dispatcher during a
+        # restart. Wait for the existing instance instead of exiting and
+        # leaving review dispatch silently disabled.
+        fcntl.flock(lock,fcntl.LOCK_EX)
         config=json.loads(a.config.read_text())
         api=Api(load_controller_credentials()['forgejo_admin_token'],config.get('_forgejo_url'))
         while True:
