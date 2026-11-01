@@ -75,7 +75,8 @@ mkdir -p "$SERVICE_STATE"
 mkdir -p "$SERVICE_STATE/evaluator-01"
 chown 65534:65534 "$SERVICE_STATE/evaluator-01"
 chmod 0750 "$SERVICE_STATE/evaluator-01"
-chmod 0750 "$SERVICE_STATE"
+chown root:root "$SERVICE_STATE"
+chmod 0755 "$SERVICE_STATE"
 # Broker configuration is intentionally root-owned and trusted.
 chown root:root "$SERVICE_STATE/role-broker" "$SERVICE_STATE/role-broker/config.json" 2>/dev/null || true
 chmod 0750 "$SERVICE_STATE/role-broker"
