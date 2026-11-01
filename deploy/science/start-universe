@@ -12,6 +12,7 @@ export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhang
 # Materialize only active role workspaces locally. Stopped roles get empty
 # local roots; their durable CPFS content remains available through backups.
 active_role="evaluator-01"
+GEWU_ROLE_BROKER_CONFIG="$U/.state/gewu-multiverse/role-broker/config.json"
 for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
     [[ -d "$role_dir" ]] || continue
     role=$(basename "$role_dir")
