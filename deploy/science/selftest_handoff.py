@@ -112,6 +112,14 @@ def handoff(work, state, entry, universe):
     directory=universe/'.state/science-author-preflight';directory.mkdir(mode=0o700,parents=True,exist_ok=True)
     key=commit+'-'+hashlib.sha256(task.encode()).hexdigest()[:16]
     atomic_json(directory/(key+'.json'),receipt)
+    # Direct local review queue is the durable fallback when Forgejo has no
+    # corresponding PR yet. It still binds the evaluator to the immutable
+    # commit, task path and snapshot; no review result is inferred here.
+    review_queue=universe/'.state/gewu-multiverse/review-requests'
+    review_queue.mkdir(mode=0o700,parents=True,exist_ok=True)
+    atomic_json(review_queue/(key+'.json'),dict(schema_version=1,state='ready_for_independent_review',
+        task=task,commit=commit,snapshot_sha256=receipt['snapshot_sha256'],evaluation_id=identifier,
+        author_role=status['role'],job_id=status['job_id'],scientific_acceptance=False))
     return dict(state='ready_for_independent_review',evaluation_id=identifier,
                 snapshot_sha256=receipt['snapshot_sha256'],scientific_acceptance=False)
 
