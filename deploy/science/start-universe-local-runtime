@@ -48,12 +48,19 @@ for f in "$DONOR/.config/gewu-multiverse/credentials.toml" \
          "$SOURCE/.config/gewu-multiverse/import-terminal-bench-science.repo-id" \
          "$SOURCE/.config/science-evaluation/queue.json" \
          "$SOURCE/.config/science-evaluation/registry.json"; do
+  target="$RUNTIME/.config/${f#*/.config/}"
   # The live controller owns its saved Start/Stop choices. Seed these once;
   # restarting must not silently restore the stopped donor's old selection.
   if [[ "$f" = */multiverse.toml && -f "$RUNTIME/.config/gewu-multiverse/multiverse.toml" ]]; then
     continue
   fi
-  [ -f "$f" ] && copy_control "$f" "$RUNTIME/.config/${f#*/.config/}" || true
+  # The registry is operator-owned mutable state. A local runtime may contain
+  # exact immutable task registrations that are newer than the donor source;
+  # never replace those entries with the donor's older catalog on restart.
+  if [[ "$f" = */science-evaluation/registry.json && -f "$target" ]]; then
+    continue
+  fi
+  [ -f "$f" ] && copy_control "$f" "$target" || true
 done
 
 # Copy and rewrite the small service descriptors.  The old implementation

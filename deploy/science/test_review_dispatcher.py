@@ -104,6 +104,35 @@ class DispatchTests(unittest.TestCase):
                     self.assertFalse(feedback['author_must_pause'])
                     self.assertIn('do not rebuild',feedback['next_action'])
 
+    @patch('review_dispatcher.registered_execution',
+           return_value={'evaluation_id':'frozen-task','snapshot_sha256':'a'*64})
+    def test_direct_platform_wait_resumes_after_registration(self, execution):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);cfg={'roles':{}}
+            for role in ['evaluator-01','author-10']:
+                (root/role/'home/role').mkdir(parents=True)
+                cfg['roles'][role]={'root':str(root/role),'uid':os.getuid(),'gid':os.getgid()}
+            key='abc:tasks/science/example'
+            row=dict(key=key,role='evaluator-01',author_role='author-10',
+                     task='tasks/science/example',commit='abc',
+                     evaluation_id='frozen-task',snapshot_sha256='a'*64,
+                     generation=2,state='waiting_platform',
+                     stage='immutable_execution_registration',
+                     evaluator_assigned=False)
+            ledger={key:row}
+            with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=200):
+                m.sync_direct_assignments(cfg,ledger)
+            self.assertEqual(row['state'],'reviewing')
+            self.assertEqual(row['generation'],3)
+            self.assertTrue(row['evaluator_assigned'])
+            wake=json.loads((root/'evaluator-01/review-dispatch.json').read_text())
+            self.assertEqual(wake['state'],'reviewing')
+            self.assertEqual(wake['generation'],3)
+            execution.assert_called_once_with('abc','tasks/science/example')
+
     def test_execution_lookup_matches_exact_version_and_rejects_changed_snapshot(self):
         import tempfile,json,os
         from pathlib import Path

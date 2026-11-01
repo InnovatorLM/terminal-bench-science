@@ -155,6 +155,27 @@ def sync_direct_assignments(config,ledger):
             continue
         if row.get('role') not in config['roles']:
             continue
+        # Direct handoffs have no PR comment whose fingerprint can create a
+        # new wake edge. When the platform was previously missing the exact
+        # immutable registration, resume that same assignment as a new
+        # generation as soon as the registration appears. Keep the identity
+        # binding strict so a different task/version can never be substituted.
+        if (row.get('state') == 'waiting_platform'
+                and row.get('stage') == 'immutable_execution_registration'):
+            try:
+                execution = registered_execution(row['commit'], row['task'])
+            except (OSError, ValueError, KeyError, TypeError):
+                execution = None
+            if (execution is not None
+                    and execution.get('evaluation_id') == row.get('evaluation_id')
+                    and execution.get('snapshot_sha256') == row.get('snapshot_sha256')):
+                now = time.time()
+                row.update(state='reviewing', stage='completeness',
+                           generation=row.get('generation', 0) + 1,
+                           assigned_at=now, updated_at=now,
+                           evaluator_assigned=True,
+                           evaluator_activity_confirmed=False,
+                           last_activity_at=None)
         advance_review(key,row,config)
         root=Path(config['roles'][row['role']]['root'])
         wake=dict(key=key,generation=row['generation'],state=row['state'])
