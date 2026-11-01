@@ -85,24 +85,16 @@ def process(role,entry,request):
    cfg=work/(agent+'.json');atomic_json(cfg,c);report=work/(agent+'-report.json')
    acs_started_at=time.time()
    with (work/(agent+'.log')).open('w') as log:r=owned_run([str(Path(__file__).with_name('run-acs-evaluation')),str(cfg),str(report)],env=env,stdout=log,stderr=log,timeout=15000)
-   d=json.loads(report.read_text()) if report.exists() else {};trials=[]
+   d=json.loads(report.read_text()) if report.exists() else {};trials=[];diagnostics=[]
    if d.get('result_path'):
     for f in Path(d['result_path']).parent.glob('*/result.json'):
-     t=json.loads(f.read_text());trials.append({'rewards':(t.get('verifier_result') or {}).get('rewards'),'exception_type':(t.get('exception_info') or {}).get('exception_type')})
+     t=json.loads(f.read_text());diagnostics.append(classify_trial(t));trials.append({'rewards':(t.get('verifier_result') or {}).get('rewards'),'exception_type':(t.get('exception_info') or {}).get('exception_type')})
    status['trials'].append({'acs_started_at':acs_started_at,'acs_finished_at':time.time(),'agent':agent,'exit_code':r.returncode,'cleanup_confirmed':d.get('cleanup',{}).get('confirmed',False),'results':trials,
-                            'diagnostics':[classify_trial(t) for t in trials]});save()
+                            'diagnostics':diagnostics});save()
   def valid(t,reward):return t['exit_code']==0 and t['cleanup_confirmed'] and len(t['results'])==1 and not t['results'][0]['exception_type'] and (t['results'][0]['rewards'] or {}).get('reward')==reward
-  if valid(status['trials'][0],1) and valid(status['trials'][1],0):
-   status['status']='selftest_passed'
-  elif any(item.get('diagnostic') == 'platform_dynamic_network_policy_mismatch'
-           for trial in status['trials'] for item in trial.get('diagnostics', [])):
-   status['status']='platform_failed'
-   status['error_class']='platform_dynamic_network_policy_mismatch'
-  elif any(not item.get('scored') for trial in status['trials'] for item in trial.get('diagnostics', [])):
-   status['status']='selftest_infrastructure_failed'
-   status['error_class']='verifier_result_missing_or_invalid'
-  else:
-   status['status']='selftest_failed'
+  status['status']='selftest_passed' if valid(status['trials'][0],1) and valid(status['trials'][1],0) else 'selftest_failed'
+  categories=[item['diagnostic'] for trial in status['trials'] for item in trial.get('diagnostics',[]) if not item['scored']]
+  if categories:status['error_class']=categories[0]
   status['note']='Author selftest only; iteration/rerun and independent evaluation still required.'
  except KeyboardInterrupt:
   status.update(status='interrupted',error='Worker stopped; inspect preserved logs and cloud cleanup.');save();raise
