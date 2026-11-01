@@ -54,6 +54,17 @@ if not m: raise SystemExit('Forgejo HTTP_PORT is missing')
 print(m.group(1))
 PY
 )
+"$PY" - "$U/.local/share/gewu-multiverse/forgejo/instance/app.ini" "$U/.local/share/gewu-multiverse/forgejo/instance" "$FORGEJO_PORT" <<'PY'
+from pathlib import Path
+import re,sys
+p,root,port=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
+t=p.read_text()
+t=re.sub(r'^WORK_PATH\s*=\s*.*$', 'WORK_PATH = '+root, t, flags=re.M)
+t=re.sub(r'^APP_DATA_PATH\s*=\s*.*$', 'APP_DATA_PATH = '+root+'/data', t, flags=re.M)
+t=re.sub(r'^HTTP_PORT\s*=\s*\d+', 'HTTP_PORT = '+port, t, flags=re.M)
+t=re.sub(r'^ROOT_URL\s*=\s*http://127\.0\.0\.1:\d+/', 'ROOT_URL = http://127.0.0.1:'+port+'/', t, flags=re.M)
+p.write_text(t)
+PY
 export GEWU_FORGEJO_URL="http://127.0.0.1:${FORGEJO_PORT}"
 SERVICE_STATE="$U/.state/gewu-multiverse"
 trap 'startup_code=$?; printf "{\"phase\":\"services\",\"line\":%s,\"exit_code\":%s,\"launcher_pid\":%s}\n" "$LINENO" "$startup_code" "$$" > "$SERVICE_STATE/startup-failure.json"' ERR
