@@ -15,6 +15,10 @@ export TMPDIR="$U/.tmp" PYTHONDONTWRITEBYTECODE=1
 export XDG_CONFIG_HOME="$U/.config" XDG_STATE_HOME="$U/.state"
 export XDG_DATA_HOME="$U/.local/share" XDG_CACHE_HOME="$U/.cache"
 export HOME="$U/.local/home" GIT_CONFIG_GLOBAL="$U/.config/gitconfig"
+# Do not inherit a work directory from an earlier Forgejo deployment. The
+# bundled launcher supplies the runtime-local directory explicitly; stale
+# values here make Forgejo reject an otherwise valid /tmp instance.
+unset FORGEJO_WORK_DIR GITEA_WORK_DIR
 export GEWU_HARNESS=native
 export GEWU_SESSION_TIMEOUT_SECS=14400
 export GEWU_RESPONSE_TOKENS=8192
