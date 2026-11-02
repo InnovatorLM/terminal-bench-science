@@ -281,6 +281,14 @@ def restore_private_controls(source,runtime,journal_path):
         # Copy private subtree ownership without changing broad role parents.
         if 'home/role/' in str(relative) or relative.parent in (instance/'home',instance/'secrets',instance/'data/jwt',instance/'data/actions_id_token'):
             dst.parent.chmod(0o700);os.chown(dst.parent,info.st_uid,info.st_gid)
+        # Nested templates are written by Forgejo during every preparation.
+        # Copying only the leaf owner leaves newly made root-owned ancestors
+        # which prevent the service UID from rewriting its locale guard.
+        if relative.is_relative_to(instance/'custom'):
+            directory=dst.parent
+            while directory!=runtime/instance:
+                os.chown(directory,info.st_uid,info.st_gid);directory.chmod(0o700)
+                directory=directory.parent
         records.append({'path':str(relative),'bytes':len(data),'uid':info.st_uid,'gid':info.st_gid,
                         'sha256':hashlib.sha256(data).hexdigest(),'mode':0o600})
     receipt={'status':'private_controls_restored','source':str(source),'runtime':str(runtime),
@@ -372,6 +380,14 @@ def bind_runtime_configuration(source,runtime,journal_path):
     for service in ('role-broker','review-dispatcher','author-selftest','command-watchdog','evaluation-queue'):
         directory=state/service;directory.mkdir(exist_ok=True,mode=0o755)
         os.chown(directory,0,0);directory.chmod(0o755)
+    # The restored custom tree can already exist with root-owned ancestors.
+    # Forgejo must rewrite its pinned template as the controller on startup.
+    custom=instance/'custom'
+    for path in custom.rglob('*'):
+        info=path.lstat()
+        if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+            raise ValueError('Unexpected linked/special Forgejo custom resource')
+        os.chown(path,65534,65534);path.chmod(0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
     require_isolated_service_config(runtime)
     result={'status':'configuration_bound','production_started':False,'runtime':str(runtime),
             'original_control_sha256':originals,'rebound_registry_fields':rebound,'forgejo_port':port,

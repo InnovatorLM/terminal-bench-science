@@ -22,6 +22,7 @@ def normalize(instance, port):
         'repository':{'ROOT':str(instance/'data/repositories')},
         'server':{'APP_DATA_PATH':str(instance/'data'),'HTTP_PORT':str(port),
                   'ROOT_URL':'http://127.0.0.1:'+str(port)+'/'},
+        'log':{'ROOT_PATH':str(instance/'log')},
     }.items():
         if section not in cfg:cfg.add_section(section)
         cfg[section].update(values)

@@ -90,6 +90,8 @@ class PreparationTests(unittest.TestCase):
             instance=runtime/'.local/share/gewu-multiverse/forgejo/instance'
             (instance/'data/repositories').mkdir(parents=True);(instance/'data/forgejo.db').write_bytes(b'fixture')
             (instance/'app.ini').write_text('[server]\nHTTP_PORT = 3000\n')
+            locale=instance/'custom/templates/base/head_script.tmpl'
+            locale.parent.mkdir(parents=True);locale.write_text('fixture template')
             signed=runtime/'signed-evidence.json';signed.write_text(json.dumps({'old_path':str(source/'original'),'signature':'unchanged'}))
             before=signed.read_bytes()
             old_workspace=source/'.config/gewu-multiverse/agents/evaluator-01/workspace'
@@ -110,6 +112,10 @@ class PreparationTests(unittest.TestCase):
                 directory=instance/name
                 self.assertEqual(directory.stat().st_uid,65534)
                 self.assertEqual(directory.stat().st_mode&0o777,0o700)
+            self.assertEqual(locale.parent.stat().st_uid,65534)
+            self.assertEqual(locale.parent.stat().st_mode&0o777,0o700)
+            self.assertEqual(locale.stat().st_uid,65534)
+            self.assertEqual(locale.stat().st_mode&0o777,0o600)
 
 
 if __name__=='__main__':unittest.main()
