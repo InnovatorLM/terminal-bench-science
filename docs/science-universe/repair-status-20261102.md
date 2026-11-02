@@ -5,7 +5,7 @@
 ## 2026-11-03 增补：当前状态优先于下文历史记录
 
 - 接受后原帖复盘已完成实际闭环：十位作者的运行中 instruction 均包含完整 Markdown 原帖回复要求。author-10 的 PR #42 评论 #2299 已记录为 completed，随后开启下一思路。详见 `post-acceptance-retrospectives.md`。
-- 大型原始轨迹已改为分块、可恢复、校验后原子安装；取消、续传、追加和源文件变化有针对性测试。本地超过 100 MiB 的 JSONL 已验证发布及脱敏，真实 ACS 探针验证 checkpoint、取消后续传、追加及最终清理，未调用模型。最终收集与模型四小时预算分离。普通 JSON/ATIF 仍不是全程流式，verifier 的 16 MiB 传输上限尚待处理。详见 `resumable-acs-evidence.md`。
+- 大型原始轨迹和 verifier 目录均已改为分块、可恢复、校验后原子安装；取消、续传、追加和源文件变化有针对性测试。本地超过 100 MiB 的 JSONL 及超过 16 MiB 的 verifier 输出均验证了完整下载和哈希。真实 ACS 探针验证 agent checkpoint、取消后续传、追加及最终清理，未调用模型。最终收集与模型四小时预算分离。普通 JSON/ATIF 仍不是全程流式。详见 `resumable-acs-evidence.md`。
 - 合格自测等待 evaluator 容量时，精确版本的队列等待不会再被旧 PR 的重做自测提示覆盖。相关回归通过；author-08 在修复部署前已自然获得审核者，不能把它计作新等待保护机制的生产触发验收。详见 `evaluator-capacity-wait.md`。
 - 首次证据热更新导致一个旧 worker 与新 publisher 的 Python 导入不兼容，已修正模块边界并从原始完成记录恢复 `420e9b11…` 的交付，新增模型/云任务为零。该题五次证据均重新核验，实际 reward 为 1/1/1/0/1；80% 达到严格难度拒绝线。原 evaluator 发现的题目契约缺陷保留，不能因补交付消除。恢复后通知审核者的逻辑保留同一五个 job，离线恢复及调度回归 25 项通过。详见 `completed-evaluation-publication-recovery.md`。
 - 当前增量备份进程仍在扫描和复制，完整周期尚未成功；没有将源码 checkpoint 或部分文件校验表述为全运行态备份完成。历史计时缺口跨修订的通用处理、备份完整覆盖与抽样恢复、剩余证据上限仍在待办中，goal 保持 active。

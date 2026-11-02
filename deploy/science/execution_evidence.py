@@ -59,6 +59,32 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
                     checks['agent_collection_complete'] = False
             except (OSError, ValueError, TypeError, AttributeError) as exc:
                 errors.append(type(exc).__name__)
+        # New verifier collectors attest coverage separately from reward. A
+        # partially downloaded directory must never look complete just because
+        # reward.txt and stdout happened to arrive before a larger diagnostic.
+        receipt = trial / 'verifier/acs-collection.json'
+        if receipt.exists():
+            try:
+                collection = json.loads(read('verifier/acs-collection.json'))
+                manifest = collection.get('manifest')
+                complete = (collection.get('schema_version') == 2 and collection.get('status') == 'collected'
+                            and collection.get('complete') is True and isinstance(manifest, dict)
+                            and collection.get('files') == len(manifest))
+                if complete:
+                    for name, item in manifest.items():
+                        if (not isinstance(name, str) or Path(name).is_absolute() or '..' in Path(name).parts
+                                or not isinstance(item, dict)):
+                            complete = False
+                            break
+                        path = trial / 'verifier' / name
+                        digest = digest_file(path, run_root)
+                        hashes[str(path.relative_to(run_root))] = digest
+                        if digest != item.get('sha256') or path.stat().st_size != item.get('bytes'):
+                            complete = False
+                checks['verifier_collection_complete'] = complete
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                checks['verifier_collection_complete'] = False
+                errors.append(type(exc).__name__)
         result = {}
         try:
             result = json.loads(read('result.json'))
@@ -82,7 +108,8 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
                 actual_rewards={'reward':float(read('verifier/reward.txt').decode().strip())}
             # A verifier may deliberately be silent. Retaining the log file
             # proves collection; its byte count does not determine scoring.
-            read('verifier/test-stdout.txt')
+            stdout = trial / 'verifier/test-stdout.txt'
+            hashes[str(stdout.relative_to(run_root))] = digest_file(stdout, run_root)
             valid=(isinstance(rewards,dict) and bool(rewards)
                 and all(type(v) in (int,float) and math.isfinite(v) for v in rewards.values()))
             checks['verifier_retained'] = (valid and actual_rewards == rewards

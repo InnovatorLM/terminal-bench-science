@@ -2,10 +2,7 @@ import asyncio
 import os
 from copy import deepcopy
 from pathlib import Path
-import base64
-import fnmatch
 import json
-import shlex
 import stat
 import tempfile
 from harbor.environments.ack import ACKEnvironment
@@ -53,6 +50,9 @@ class UniverseACK(ACKEnvironment):
     async def start(self, force_build=False):
         await super().start(force_build=force_build)
         await self._capture_pod_evidence('started')
+        if self._universe_role == 'verifier' and getattr(self, 'trial_paths', None):
+            self._record_verifier_collection(self.trial_paths.verifier_dir,
+                dict(status='pending', complete=False, files=0, manifest={}))
         if self._universe_role == 'runtime' and getattr(self, 'trial_paths', None):
             self._record_agent_collection(self.trial_paths.agent_dir,
                 dict(status='pending', complete=False, files=0, manifest={}))
@@ -135,15 +135,40 @@ class UniverseACK(ACKEnvironment):
         if paths is None or getattr(self,'_core_api',None) is None:
             return
         target=paths.verifier_dir
-        if getattr(self,'_verifier_evidence_downloaded',False) or (target/'test-stdout.txt').is_file():
+        if getattr(self,'_verifier_evidence_downloaded',False):
             return
+        if (target/'test-stdout.txt').is_file() and not (target/'acs-collection.json').exists():
+            return  # Legacy completed collection has no coverage receipt.
         try:
-            await asyncio.wait_for(self.download_dir_filtered('/logs/verifier',target),timeout=40)
+            await asyncio.wait_for(self.download_dir_filtered('/logs/verifier',target),timeout=600)
         except Exception as error:
             # Transfer failure must not prevent cleanup. A missing reward is
             # diagnosed by Harbor's verifier after available logs are saved.
+            try:
+                self._record_verifier_collection(target, dict(status='collection_failed', complete=False,
+                    error_type=type(error).__name__, partial_chunks_retained=True))
+            except (OSError, ValueError):
+                pass
             if hasattr(self,'logger'):
                 self.logger.warning('Partial verifier evidence collection (%s); cleanup continues',type(error).__name__)
+
+    def _record_verifier_collection(self, target, record):
+        from datetime import datetime, timezone
+        from acs_evidence_transport import safe_destination
+        path = safe_destination(Path(target) / 'acs-collection.json')
+        record = dict(record, schema_version=2, observed_at=datetime.now(timezone.utc).isoformat())
+        path.write_text(json.dumps(record)); path.chmod(0o600)
+
+    async def _final_verifier_evidence(self, target, **filters):
+        from acs_verifier_transport import download
+        if not hasattr(self, '_verifier_collection_lock'):
+            self._verifier_collection_lock = asyncio.Lock()
+        async with self._verifier_collection_lock:
+            while True:
+                result = await download(self, target, **filters)
+                if result['stable']:
+                    return result
+                await asyncio.sleep(1)
 
     def _get_image_url(self):
         return self._universe_image
@@ -189,78 +214,23 @@ class UniverseACK(ACKEnvironment):
             # Raw solver evidence is mandatory even if a caller filters the
             # display logs. Access control and redaction happen on publication.
             return await self.download_dir(source_dir, target_dir)
-        # Use text-safe transport for all verifier evidence, not just reward.
         if str(source_dir) == '/logs/verifier':
-            script = '''import pathlib,json,base64
-root=pathlib.Path('/logs/verifier'); files={}; total=0
-for p in sorted(root.rglob('*')):
- if p.is_symlink(): raise ValueError('Symlink in verifier evidence')
- if not p.is_file(): continue
- if total+p.stat().st_size>16*1024*1024: raise ValueError('Verifier evidence exceeds transfer limit')
- data=p.read_bytes(); total+=len(data)
- if total>16*1024*1024: raise ValueError('Verifier evidence exceeds transfer limit')
- files[p.relative_to(root).as_posix()]=base64.b64encode(data).decode('ascii')
-print(json.dumps(files))'''
-            result = await self.exec(command='python3 -I -c ' + shlex.quote(script),timeout_sec=30)
-            if result.return_code != 0:
-                raise ValueError('Unable to collect complete verifier evidence')
-            files = json.loads(result.stdout)
             target = Path(target_dir)
-            if not isinstance(files, dict):
-                raise ValueError('Invalid verifier evidence payload')
-            if target.is_symlink() or any(p.is_symlink() for p in target.parents):
-                raise ValueError('Symlink in evidence destination')
-            # Validate the entire payload before writing any file. A later
-            # malicious path, collision or oversized file must not leave a
-            # partially accepted evidence bundle or write outside the target.
-            decoded = {}
-            total = 0
-            for name, encoded in files.items():
-                if not isinstance(name, str) or not isinstance(encoded, str):
-                    raise ValueError('Invalid verifier evidence entry')
-                rel = Path(name)
-                if rel.is_absolute() or '..' in rel.parts or not rel.parts or str(rel) != name:
-                    raise ValueError('Unsafe verifier evidence path')
-                dest = target / rel
-                if dest.is_symlink() or any(p.is_symlink() for p in dest.parents):
-                    raise ValueError('Symlink in evidence destination')
-                if (dest.exists() and not dest.is_file()) or any(p.exists() and not p.is_dir() for p in dest.parents):
-                    raise ValueError('Conflicting verifier evidence path')
-                if len(encoded) > 4 * ((16 * 1024 * 1024 + 2) // 3):
-                    raise ValueError('Verifier evidence exceeds transfer limit')
-                data = base64.b64decode(encoded, validate=True)
-                total += len(data)
-                if total > 16 * 1024 * 1024:
-                    raise ValueError('Verifier evidence exceeds transfer limit')
-                decoded[rel] = data
-            if any(parent in decoded for rel in decoded for parent in rel.parents):
-                raise ValueError('Conflicting verifier evidence paths')
-            target.mkdir(parents=True, exist_ok=True, mode=0o700)
-            for rel, data in decoded.items():
-                name = str(rel)
-                selected = (not include or any(fnmatch.fnmatch(name, p) for p in include))
-                selected = selected and not any(fnmatch.fnmatch(name, p) for p in (exclude or []))
-                if not selected and name not in (protect or []) and name != 'reward.txt':
-                    continue
-                dest = target / rel
-                dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                dest.write_bytes(data)
-                dest.chmod(0o600)
-            self._verifier_evidence_downloaded=True
-            # Timeouts and verifier crashes often never write reward.txt. Keep
-            # their stdout/stderr before reporting that scoring is unavailable.
-            # An invalid reward is retained verbatim for diagnosis, never fixed.
-            raw_reward = decoded.get(Path('reward.txt'))
-            if raw_reward is None:
-                # The directory transfer succeeded. Let Harbor report its
-                # native RewardFileNotFoundError (or parse reward.json), rather
-                # than wrapping a task's missing output as a download failure.
+            result = await asyncio.wait_for(self._final_verifier_evidence(target,
+                include=include, exclude=exclude, protect=protect), timeout=600)
+            self._record_verifier_collection(target, dict(result, status='collected'))
+            self._verifier_evidence_downloaded = result['complete']
+            # Missing reward is a native Harbor scoring error, not a transport
+            # failure. Invalid reward is preserved verbatim with all diagnostics.
+            if 'reward.txt' not in result['manifest']:
                 return
+            with (target/'reward.txt').open('rb') as inp:
+                raw_reward = inp.read(128)
             try:
                 reward = raw_reward.decode().strip()
             except UnicodeDecodeError:
                 raise ValueError('Invalid verifier reward; available diagnostics retained') from None
-            if reward not in {'0', '1', '0.0', '1.0'}:
+            if result['manifest']['reward.txt']['bytes'] > 128 or reward not in {'0', '1', '0.0', '1.0'}:
                 raise ValueError('Invalid verifier reward; available diagnostics retained')
             return
         return await super().download_dir_filtered(source_dir, target_dir, include=include, exclude=exclude, protect=protect)

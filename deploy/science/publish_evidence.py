@@ -67,7 +67,8 @@ def publish(src, dst, secrets=(), gid=None):
     dst.mkdir(mode=0o700, parents=True)
     names = ['result.json', 'config.json', 'trial.log', 'agent/trajectory.json',
              'agent/mini-swe-agent.trajectory.json', 'agent/mini-swe-agent.txt',
-             'verifier/reward.txt', 'verifier/reward.json', 'verifier/test-stdout.txt', 'verifier/test-stderr.txt']
+             'verifier/reward.txt', 'verifier/reward.json', 'verifier/test-stdout.txt', 'verifier/test-stderr.txt',
+             'verifier/acs-collection.json']
     names += [str(path.relative_to(src)) for path in sorted((src/'agent').rglob('*'))
               if path.is_file() and path.suffix in {'.json','.jsonl','.txt','.log'} and str(path.relative_to(src)) not in names]
     files = {}

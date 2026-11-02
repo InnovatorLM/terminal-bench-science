@@ -1,40 +1,72 @@
 import asyncio
 import base64
 import json
-import io
+import shlex
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
-import tarfile
 import unittest
 from unittest.mock import AsyncMock,patch
 from evaluation_queue import W
 from universe_ack import UniverseACK
 
 
+class VerifierExec:
+    """Execute the actual transport Python locally, mapping only its remote root."""
+    def __init__(self, root, payload=None, interrupt_chunk=None):
+        self.root=Path(root);self.chunks=0;self.interrupt_chunk=interrupt_chunk
+        self.override=None
+        if payload is not None:
+            self.root.mkdir(parents=True,exist_ok=True)
+            invalid=any(Path(name).is_absolute() or '..' in Path(name).parts or str(Path(name))!=name
+                        or any(str(parent) in payload for parent in Path(name).parents) for name in payload)
+            if invalid:
+                self.override={name:dict(source='/logs/verifier/'+name,size=len(data),mtime_ns=1,inode=1)
+                               for name,data in payload.items()}
+            else:
+                for name,data in payload.items():
+                    path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+
+    async def exec(self, command, **kwargs):
+        if not command.startswith('python3 -I -c '):
+            return SimpleNamespace(return_code=1,stdout='',stderr='')
+        script=shlex.split(command)[3]
+        if script.startswith('# verifier inventory') and self.override is not None:
+            return SimpleNamespace(return_code=0,stdout=json.dumps(self.override),stderr='')
+        if 'base64.b64encode' in script:
+            self.chunks+=1
+            if self.chunks==self.interrupt_chunk:raise asyncio.CancelledError()
+        script=script.replace('/logs/verifier',str(self.root))
+        proc=await asyncio.create_subprocess_exec(sys.executable,'-I','-c',script,
+            stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+        stdout,stderr=await proc.communicate()
+        output=stdout.decode().replace(str(self.root),'/logs/verifier')
+        return SimpleNamespace(return_code=proc.returncode,stdout=output,stderr=stderr.decode())
+
+
 class EvidenceTests(unittest.TestCase):
     def collect(self, payload, target, **kwargs):
-        encoded={name:base64.b64encode(value).decode() for name,value in payload.items()}
-        obj=object.__new__(UniverseACK)
-        with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(encoded)))):
-            return asyncio.run(obj.download_dir_filtered('/logs/verifier',target,**kwargs))
-
-    def test_full_verifier_output_and_reward_collected(self):
-        data={k:base64.b64encode(v).decode() for k,v in {'reward.txt':b'1\n','test-stdout.txt':b'All tests passed\n','ctrf.json':b'{"passed":true}'}.items()}
         obj=object.__new__(UniverseACK)
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
-            with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
-                asyncio.run(obj.download_dir('/logs/verifier',raw))
+            client=VerifierExec(Path(raw)/'remote',payload)
+            with patch.object(UniverseACK,'exec',AsyncMock(side_effect=client.exec)):
+                return asyncio.run(obj.download_dir_filtered('/logs/verifier',target,**kwargs))
+
+    def test_full_verifier_output_and_reward_collected(self):
+        payload={'reward.txt':b'1\n','test-stdout.txt':b'All tests passed\n','ctrf.json':b'{"passed":true}'}
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            self.collect(payload,raw)
             self.assertEqual((Path(raw)/'test-stdout.txt').read_text(),'All tests passed\n')
             self.assertEqual((Path(raw)/'reward.txt').read_text(),'1\n')
             self.assertEqual((Path(raw)/'ctrf.json').stat().st_mode&0o777,0o600)
+            record=json.loads((Path(raw)/'acs-collection.json').read_text())
+            self.assertTrue(record['complete']);self.assertEqual(record['files'],3)
 
     def test_unsafe_verifier_path_refused(self):
-        obj=object.__new__(UniverseACK)
-        for data in [{'reward.txt':base64.b64encode(b'1').decode(),'../escape':base64.b64encode(b'bad').decode()}]:
-            with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
-                with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
-                    with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',raw))
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            with self.assertRaises(ValueError):
+                self.collect({'reward.txt':b'1','../escape':b'bad'},raw)
 
     def test_timeout_preserves_diagnostics_without_creating_a_reward(self):
         from acs_result_diagnostics import classify_trial
@@ -88,17 +120,33 @@ class EvidenceTests(unittest.TestCase):
                 self.collect({'test-stdout.txt':b'not yet','reward.txt':b'1','linked/escape':b'bad'},target)
             self.assertFalse((target/'test-stdout.txt').exists());self.assertEqual(list(outside.iterdir()),[])
 
-    def test_oversized_or_corrupt_payload_refused_before_any_write(self):
+    def test_over_16mib_logs_are_retained_and_hashed(self):
+        import hashlib
+        payload={'test-stdout.txt':b'Complete verifier output\n','reward.txt':b'1',
+                 'huge.log':b'x'*(17*1024*1024)}
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
-            root=Path(raw)
-            with self.assertRaisesRegex(ValueError,'transfer limit'):
-                self.collect({'test-stdout.txt':b'not yet','reward.txt':b'1','huge.log':b'x'*(16*1024*1024)},root/'large')
-            self.assertFalse((root/'large').exists())
+            root=Path(raw)/'target';self.collect(payload,root)
+            receipt=json.loads((root/'acs-collection.json').read_text())
+            self.assertTrue(receipt['complete']);self.assertGreater(receipt['bytes'],16*1024*1024)
+            for name,data in payload.items():
+                with (root/name).open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
+                self.assertEqual(digest,hashlib.sha256(data).hexdigest())
+                self.assertEqual(digest,receipt['manifest'][name]['sha256'])
+
+    def test_corrupt_chunk_cannot_replace_previous_file(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);target=root/'target';target.mkdir();(target/'test-stdout.txt').write_text('previous')
+            client=VerifierExec(root/'remote',{'test-stdout.txt':b'changed'})
+            original=client.exec
+            async def corrupted(command,**kwargs):
+                if 'base64.b64encode' in command:
+                    return SimpleNamespace(return_code=0,stdout=json.dumps('not-base64!'),stderr='')
+                return await original(command,**kwargs)
             obj=object.__new__(UniverseACK)
-            data={'test-stdout.txt':base64.b64encode(b'not yet').decode(),'reward.txt':base64.b64encode(b'1').decode(),'corrupt':'not-base64!'}
-            with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
-                with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',root/'bad'))
-            self.assertFalse((root/'bad').exists())
+            with patch.object(UniverseACK,'exec',AsyncMock(side_effect=corrupted)):
+                with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',target))
+            self.assertEqual((target/'test-stdout.txt').read_text(),'previous')
+            self.assertFalse((target/'acs-collection.json').exists())
 
     def test_digest_execution_does_not_require_unused_tests_dockerfile(self):
         obj=object.__new__(UniverseACK)
@@ -121,13 +169,9 @@ class EvidenceTests(unittest.TestCase):
             (task_dir/'tests/test.sh').write_text('#!/bin/sh\nset -e\ntest -f /app/result.json\n')
             task=Task(task_dir);paths=TrialPaths(root/'trial');paths.mkdir()
             obj=object.__new__(UniverseACK);obj.task_env_config=task.config.environment
-            encoded={'test-stdout.txt':base64.b64encode(b'').decode()}
-            async def execute(*,command,**kwargs):
-                if command.startswith('python3 -I -c '):
-                    return SimpleNamespace(return_code=0,stdout=json.dumps(encoded),stderr='')
-                return SimpleNamespace(return_code=1,stdout='',stderr='')
+            client=VerifierExec(root/'remote',{'test-stdout.txt':b''})
             verifier=Verifier(task=task,trial_paths=paths,environment=obj,skip_tests_upload=True)
-            with patch.object(UniverseACK,'exec',AsyncMock(side_effect=execute)):
+            with patch.object(UniverseACK,'exec',AsyncMock(side_effect=client.exec)):
                 with self.assertRaises(RewardFileNotFoundError) as caught:
                     asyncio.run(verifier.verify())
             self.assertTrue(paths.test_stdout_path.is_file())
@@ -185,12 +229,12 @@ class EvidenceTests(unittest.TestCase):
         obj=object.__new__(UniverseACK)
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             target=Path(raw)/'verifier';obj.trial_paths=SimpleNamespace(verifier_dir=target);obj._core_api=object()
-            data={'test-stdout.txt':base64.b64encode(b'Waiting on package download\n').decode()}
+            client=VerifierExec(Path(raw)/'remote',{'test-stdout.txt':b'Waiting on package download\n'})
             async def stopped(delete):
                 self.assertTrue(delete)
                 self.assertEqual((target/'test-stdout.txt').read_text(),'Waiting on package download\n')
                 self.assertFalse((target/'reward.txt').exists())
-            with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock()),patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))) as execute,patch('universe_ack.ACKEnvironment.stop',AsyncMock(side_effect=stopped)) as stop:
+            with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock()),patch.object(UniverseACK,'exec',AsyncMock(side_effect=client.exec)) as execute,patch('universe_ack.ACKEnvironment.stop',AsyncMock(side_effect=stopped)) as stop:
                 asyncio.run(obj.stop(delete=True))
                 self.assertEqual(execute.call_args.kwargs['timeout_sec'],30)
                 stop.assert_awaited_once_with(delete=True)
