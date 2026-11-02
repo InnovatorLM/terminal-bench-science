@@ -324,7 +324,9 @@ find "$RUNTIME/.config/gewu-multiverse" "$RUNTIME/.config/science-evaluation" \
 for role_state in "$RUNTIME/.state/gewu-multiverse"/author-[0-9]* \
                   "$RUNTIME/.state/gewu-multiverse"/evaluator-[0-9]* \
                   "$RUNTIME/.state/gewu-multiverse/curator"; do
-  [ ! -d "$role_state" ] || chown -R nobody:nogroup "$role_state"
+  if [ -d "$role_state" ] && [ "$(stat -c '%u' "$role_state")" != 65534 ]; then
+    chown -R nobody:nogroup "$role_state"
+  fi
 done
 chown root:root "$RUNTIME/.state" \
   "$RUNTIME/.state/gewu-multiverse/role-broker" \
@@ -340,7 +342,7 @@ chmod 700 "$RUNTIME/.state/gewu-multiverse"
 chmod 755 "$RUNTIME/.state" "$RUNTIME/.state/gewu-multiverse"
 for service in role-broker review-dispatcher author-selftest command-watchdog; do
   descriptor="$RUNTIME/.state/gewu-multiverse/$service/config.json"
-  chown -R root:root "$(dirname "$descriptor")"
+  chown root:root "$(dirname "$descriptor")" "$descriptor"
   chmod 600 "$descriptor"
   chmod 755 "$(dirname "$descriptor")"
 done

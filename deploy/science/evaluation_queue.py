@@ -108,7 +108,8 @@ def validated_template(entry, request):
         raise ValueError('Registered template changed')
     snapshot = Path(entry['snapshot'])
     local_snapshot=str(snapshot.resolve()).startswith('/tmp/gewu-terminal-bench-science-runtime-')
-    if (not snapshot.resolve().is_relative_to(W) and not local_snapshot) or digest_tree(snapshot) != entry['snapshot_sha256'] or request['snapshot_sha256'] != entry['snapshot_sha256']:
+    workspace_snapshot=snapshot.resolve().is_relative_to(W.resolve())
+    if (not workspace_snapshot and not local_snapshot) or digest_tree(snapshot) != entry['snapshot_sha256'] or request['snapshot_sha256'] != entry['snapshot_sha256']:
         raise ValueError('Registered snapshot changed or request is stale')
     if 'mechanical_check_sha256' in entry:
         from check_harbor_task import validate_mechanical_check
@@ -149,8 +150,10 @@ def validated_template(entry, request):
         # exact template and task digest; execute against the verified local copy.
         provenance=json.loads(root_file(snapshot.parent/'provenance.json').read_text())
         original=Path(provenance.get('snapshot',''))
-        if (not local_snapshot or provenance.get('template_sha256')!=entry['template_sha256']
+        if (not (workspace_snapshot or local_snapshot) or not original.is_absolute()
+                or provenance.get('template_sha256')!=entry['template_sha256']
                 or provenance.get('snapshot_sha256')!=entry['snapshot_sha256']
+                or not re.fullmatch('[a-f0-9]{40}',str(entry.get('source_commit','')))
                 or provenance.get('source_commit')!=entry.get('source_commit')
                 or config['datasets']!=[{'path':str(original.parent),'task_names':[original.name]}]):
             raise ValueError('Dataset is not the registered snapshot')
