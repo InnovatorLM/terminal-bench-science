@@ -8,6 +8,8 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import runpy
+from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
 import acs_evidence_transport as transport
@@ -169,6 +171,16 @@ class ResumeTests(unittest.TestCase):
         self.assertNotIn('agent_collection_complete',evidence['checks'])
         receipt.write_text(json.dumps({'status':'collection_failed'}))
         self.assertFalse(inspect(report,path,c,'a'*64,True)['complete'])
+
+    def test_new_publisher_works_when_worker_cached_old_evidence_module(self):
+        old=ModuleType('execution_evidence')
+        def legacy_read(*args):raise AssertionError('Old size-limited helper must not be reused')
+        old.read_file=legacy_read
+        fixture=evidence_fixtures.EvidenceTests();_,trial=fixture.fixture(self.root,fixture.config())
+        with patch.dict(sys.modules,{'execution_evidence':old}):
+            new=runpy.run_path(str(Path(__file__).with_name('publish_evidence.py')))
+            manifest=new['publish'](trial,self.root/'hot-packet',['SECRET-CANARY'])
+        self.assertTrue(manifest['trajectory_available']);self.assertTrue(manifest['sanitized'])
 
 
 if __name__=='__main__':unittest.main()

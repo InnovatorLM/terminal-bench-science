@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-from execution_evidence import read_file, evidence_file
+from evidence_files import read_file, evidence_file
 from selftest_logs import sanitize, credential_values
 
 W = Path('/mnt/data/zhanglinfeng/workspace')
