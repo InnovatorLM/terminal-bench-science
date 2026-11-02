@@ -13,8 +13,9 @@ import os
 from pathlib import Path
 import re
 import time
+from iteration_budget import LIMIT
 
-LIMIT = 5 * 3600
+EXHAUSTED_REASON = '48_hour_active_iteration_budget_exceeded'
 
 def reconcile_session(state, live, now, observed_end=None):
     """Reconcile an observed runner lifecycle without clearing an idea budget.
@@ -27,6 +28,8 @@ def reconcile_session(state, live, now, observed_end=None):
         if live and row['status']=='session_paused' and row.get('automatic_session_pause'):
             transition(state,'resume',idea,now,reason='runner observed live')
             row.pop('automatic_session_pause',None)
+        elif live and row['status']=='active':
+            transition(state,'status',idea,now)
         elif not live and row['status']=='active':
             end=now if observed_end is None else max(row['last_at'],min(now,observed_end))
             try:
@@ -56,7 +59,8 @@ def transition(state, action, idea, now, run_id=None, reason=None):
     row['last_at'] = now
     if row['active_seconds'] > LIMIT and row['status'] not in ('finished', 'abandoned'):
         row['status'] = 'abandoned'
-        row['reason'] = 'five_hour_active_iteration_budget_exceeded'
+        row['reason'] = EXHAUSTED_REASON
+        row['events'].append(dict(action='abandon', at=now, run_id=None, reason=EXHAUSTED_REASON))
     if action == 'status':
         return row
     if row['status'] in ('finished', 'abandoned'):

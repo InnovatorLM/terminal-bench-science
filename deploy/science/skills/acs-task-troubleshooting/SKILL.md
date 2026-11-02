@@ -31,7 +31,7 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 | OOMKilled 或明确资源耗尽 | 由平台核实后从 4c/8Gi 升到最多 8c/16Gi；一般计算慢或错误答案不构成扩容证据。磁盘不足单独检查镜像/解包与临时存储，不能用加CPU冒充修复。 |
 | `selftest_passed` 但 `review_handoff` 是 `waiting_author` | 先看 stage：`review_request_required` 使用交接文档中的 `request-review` 补申请，不重跑；确实缺作者自解或结果驱动迭代才修题并复跑。首次自测不证明已完成迭代。 |
 | `selftest_passed` 但 `review_handoff` 是 `waiting_platform` | 保留通过的原 job，提交登记/证据缺项一次，等待平台修复。不要为补交接重复跑相同自测。 |
-| 迭代计时的历史观测缺失或开始时间冲突 | 平台核对原始 observation、暂停区间和历史记录。作者保留现有 idea 和通过的 job；无需修改题目、全盘搜索平台源码、反复自测或重置五小时预算。 |
+| 迭代计时的历史观测缺失或开始时间冲突 | 平台核对原始 observation、暂停区间和历史记录。作者保留现有 idea 和通过的 job；无需修改题目、全盘搜索平台源码、反复自测或重置 48 小时预算。 |
 | 五次 reward 已有但缺 trajectory/imageID/资源回显 | 是证据未闭环，先请求补收集/登记现存文件。配置请求不等于实际Pod回显，历史已删除Pod的信息不能编造。 |
 
 ## 等待与交接
@@ -50,6 +50,6 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 
 满 4 小时没有完成时先排查缺文件、环境/模型接口/工具故障、verifier缺陷。排除这些原因后确属题目困难的超时，记录依据并按模型错误计分，可作为难度的正面证据；不要伪造原始 verifier reward。未经分类的 timeout 或缺轨迹只能保留未完成证据，不能直接算错或宣称高质量。
 
-作者同一思路主动迭代超过 5 小时（扣除有平台记录的 ACS 时间），或已无法保证难度，应记录失败经验并换思路。不得重建 idea ID、清空历史或重复提交同版本来重置计时。
+作者同一思路主动迭代超过 48 小时（扣除有平台记录的 ACS 时间），或已无法保证难度，应记录失败经验并换思路。不得重建 idea ID、清空历史或重复提交同版本来重置计时。
 
-已完成版本的作者预算截止于该次自测完成，后续交接等待不继续累计。若平台历史观测无法恢复，只有经过单独核对的已完成固定版本可带 `legacy_budget_unknown` 进入独立审核；这是未知时长，不是零用时或证明五小时内完成。evaluator 保留派单的 `budget_summary` 限制，独立审核科学质量。此例外不能延长作者继续迭代的预算，也不能恢复明确已放弃的思路。
+已完成版本的作者预算截止于该次自测完成，后续交接等待不继续累计。若平台历史观测无法恢复，只有经过单独核对的已完成固定版本可带 `legacy_budget_unknown` 进入独立审核；这是未知时长，不是零用时或证明 48 小时内完成。evaluator 保留派单的 `budget_summary` 限制，独立审核科学质量。此例外不能延长作者继续迭代的预算，也不能恢复明确已放弃的思路。

@@ -5,6 +5,8 @@ verified ACS/platform/session-stop intervals, not author-provided run IDs alone.
 """
 import math
 
+LIMIT = 48 * 3600
+
 
 def number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -73,8 +75,8 @@ def verify(row, at, observed_pauses):
         else:
             raise ValueError('Unknown iteration transition')
         previous = instant
-    if status == 'abandon' or row.get('status') == 'abandoned' or active > 18000:
-        raise ValueError('Idea abandoned or five-hour budget exceeded')
-    return dict(active_iteration_seconds=active, budget_seconds=18000,
+    if status == 'abandon' or row.get('status') == 'abandoned' or active > LIMIT:
+        raise ValueError('Idea abandoned or 48-hour budget exceeded')
+    return dict(active_iteration_seconds=active, budget_seconds=LIMIT,
                 recomputed_from_events=True, pause_coverage_verified=True,
                 event_origin_attested=False, scientific_acceptance=False)

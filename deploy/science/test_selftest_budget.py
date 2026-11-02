@@ -66,7 +66,7 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(result['acs_excluded_seconds'],30)
             self.assertEqual(result['active_iteration_seconds_upper_bound'],70)
             self.assertTrue(result['within_budget']);self.assertFalse(result['event_origin_attested'])
-            result=verify(state,'author-01','idea',obs,20000)
+            result=verify(state,'author-01','idea',obs,200000)
             self.assertFalse(result['within_budget'])
             row['first_observed_at']=21;obs.write_text(json.dumps(value))
             with self.assertRaisesRegex(ValueError,'before its first selftest'):verify(state,'author-01','idea',obs,100)

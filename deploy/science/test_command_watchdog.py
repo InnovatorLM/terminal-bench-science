@@ -1,6 +1,18 @@
 import os,signal,subprocess,sys,time,unittest
-from command_watchdog import overdue,process_info,stop_command_group
+from command_watchdog import overdue,process_info,stop_command_group,owner_alive
+from unittest.mock import patch
 class DeadlineTests(unittest.TestCase):
+    def test_hot_restarted_service_stops_if_launcher_exits_or_pid_is_reused(self):
+        owner=dict(pid=123,uid=0,start_ticks=456,state='S')
+        with patch('command_watchdog.process_info',return_value=owner):
+            self.assertTrue(owner_alive(owner))
+        for changed in (dict(state='Z'),dict(start_ticks=457),dict(uid=1000)):
+            with patch('command_watchdog.process_info',return_value=dict(owner,**changed)):
+                self.assertFalse(owner_alive(owner))
+        with patch('command_watchdog.process_info',side_effect=FileNotFoundError):
+            self.assertFalse(owner_alive(owner))
+        self.assertTrue(owner_alive(None))
+
     def test_term_ignoring_command_is_killed_after_grace(self):
         process=subprocess.Popen([sys.executable,'-u','-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print("ready",flush=True);time.sleep(30)'],start_new_session=True,stdout=subprocess.PIPE,text=True)
         try:

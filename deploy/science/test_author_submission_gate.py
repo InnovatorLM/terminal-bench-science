@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import author_submission_gate as gate
+from iteration_budget import LIMIT
 
 class AuthorGateTests(unittest.TestCase):
     def setUp(self):
@@ -45,10 +46,10 @@ class AuthorGateTests(unittest.TestCase):
             r=copy.deepcopy(self.receipt);r['pre_submission_order']=order
             with self.subTest(order=order),self.assertRaises(ValueError):self.check(r)
     def test_budget(self):
-        for value in (18001,-1,True,float('nan'),float('inf')):
+        for value in (LIMIT+1,-1,True,float('nan'),float('inf')):
             r=copy.deepcopy(self.receipt);r['active_iteration_seconds']=value
             with self.subTest(value=value),self.assertRaises(ValueError):self.check(r)
-        self.receipt['active_iteration_seconds']=18000
+        self.receipt['active_iteration_seconds']=LIMIT
         self.check(self.receipt)
     def test_stale_commit_blocks(self):
         self.receipt['commit']='d'*40

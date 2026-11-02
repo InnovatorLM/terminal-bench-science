@@ -205,7 +205,7 @@ def _reconcile(work, state, entry, universe):
         progress=work/'handoff-progress.json'
         stage=json.loads(read_operator_file(progress)).get('stage','verify_iteration_and_budget') if progress.exists() else 'verify_iteration_and_budget'
         guidance={'validate_selftest':'Complete and repair the source-bound container selftest before requesting review.',
-                  'verify_iteration_and_budget':'Check stable idea ID, linked prior execution, observed idea clock and five-hour budget evidence.',
+                  'verify_iteration_and_budget':'Check stable idea ID, linked prior execution, observed idea clock and 48-hour budget evidence.',
                   'immutable_execution_registration':'Platform must finish exact-version image and snapshot registration; keep the source commit available.',
                   'publish_review_eligibility':'Platform must publish the verified eligibility receipt.'}
         stage=stage if stage in guidance else 'verify_iteration_and_budget'

@@ -3,6 +3,7 @@ import json,re,math,os,stat,hashlib
 from pathlib import Path
 W=Path('/mnt/data/zhanglinfeng/workspace')
 from deployment_paths import universe_root, allowed_development_path
+from iteration_budget import LIMIT
 CHECKS=('schema','container_build','container_start','author_solve','verifier_positive','verifier_negative','post_iteration_rerun')
 REQUIRED_ORDER=('schema','container_build','container_start','author_solve','verifier_positive','verifier_negative','post_iteration_rerun')
 def validate_identity(commit,task):
@@ -41,7 +42,7 @@ def validate_receipt(receipt,commit,task):
     legacy_unknown=receipt.get('schema_version')==4 and receipt.get('budget_status')=='legacy_budget_unknown'
     if legacy_unknown:
         if active is not None:raise ValueError('Unknown historical budget cannot claim a measured duration')
-    elif isinstance(active,bool) or not isinstance(active,(int,float)) or not math.isfinite(active) or not 0<=active<=18000:raise ValueError('Author iteration exceeds five hours')
+    elif isinstance(active,bool) or not isinstance(active,(int,float)) or not math.isfinite(active) or not 0<=active<=LIMIT:raise ValueError('Author iteration exceeds 48 hours')
     if receipt.get('difficulty_viable') is not True:raise ValueError('Direction abandoned: difficulty not viable')
     if not isinstance(receipt.get('evidence_files'),list) or not receipt['evidence_files']:raise ValueError('Missing actual execution evidence')
     for entry in receipt['evidence_files']:

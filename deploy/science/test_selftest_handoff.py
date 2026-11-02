@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -230,6 +231,19 @@ class HandoffTests(unittest.TestCase):
             install({'roles':{'author-01':{'root':str(root)},'evaluator-01':{}}})
             self.assertEqual((root/'usr/local/bin/role-acs-selftest').read_bytes(),Path(__file__).with_name('role_acs_selftest.py').read_bytes())
             self.assertTrue((root/'usr/local/bin/author-iteration-clock').exists())
+            # Exercise the installed scripts outside the repository: a source
+            # import test misses dependencies omitted from role containers.
+            for name in ('author-iteration-clock', 'role-iteration'):
+                command = root/'usr/local/bin'/name
+                result = subprocess.run([sys.executable, str(command), '--help'],
+                                        cwd=root, env={'PYTHONDONTWRITEBYTECODE':'1'},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([sys.executable, '-c',
+                                     'from iteration_budget import LIMIT; print(LIMIT)'],
+                                    cwd=root/'usr/local/bin', env={'PYTHONDONTWRITEBYTECODE':'1'},
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), '172800')
 
 
 if __name__=='__main__':unittest.main()

@@ -84,7 +84,7 @@ def assess_budget(work, state, status, observation, at):
                     scope=audit['scope'],scientific_acceptance=False)
     if not budget['within_budget']:
         raise BudgetEvidenceRequired('iteration_pause_evidence_required',
-            'The conservative five-hour bound at task completion is exceeded. Establish independently verified excluded intervals or confirm the actual budget outcome; this does not prove five hours of author work.',
+            'The conservative 48-hour bound at task completion is exceeded. Establish independently verified excluded intervals or confirm the actual budget outcome; this does not prove 48 hours of author work.',
             role=status['role'],idea_id=status['idea_id'],
             active_iteration_seconds_upper_bound=budget['active_iteration_seconds_upper_bound'],
             recorded_idea_started_at=budget['recorded_idea_started_at'],total_excluded_seconds=budget['total_excluded_seconds'])

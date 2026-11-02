@@ -333,7 +333,7 @@ def scan(config, session_state, state, now=None, reset_action=None):
             # Persist attempt before mutation: a crash must not repeatedly reset.
             save(path, current)
             reason = 'Repeated identical failures across three sessions or nine times in one session; workspace unchanged for at least one non-waiting hour.'
-            guidance = 'Read the preserved failure and task state once. Change the approach or abandon the idea; do not repeat unchanged failing commands. Preserve the existing five-hour idea clock.'
+            guidance = 'Read the preserved failure and task state once. Change the approach or abandon the idea; do not repeat unchanged failing commands. Preserve the existing 48-hour idea clock.'
             if reset_action is None:
                 old_u, old_state = role_reset.U, role_reset.DEPLOYMENT_STATE
                 try:

@@ -2,7 +2,7 @@
 
 This command never changes a live clock. The operator must review its output and
 apply it while the observer is stopped. A later/reset start is a conflict, not a
-reason to invent a new five-hour budget or stitch unrelated event sequences.
+reason to invent a new 48-hour budget or stitch unrelated event sequences.
 """
 import argparse
 import copy

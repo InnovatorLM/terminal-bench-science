@@ -11,6 +11,13 @@ def process_info(pid):
     return dict(pid=int(pid),uid=p.stat().st_uid,state=fields[0],pgid=int(fields[2]),
                 start_ticks=int(fields[19]),comm=(p/'comm').read_text().strip())
 
+def owner_alive(expected):
+    if expected is None:return True
+    try:
+        current=process_info(expected['pid'])
+        return current['state']!='Z' and all(current[k]==expected[k] for k in ('uid','start_ticks'))
+    except (OSError,ValueError,IndexError):return False
+
 def overdue(info,uptime,hz,limit):
     return info['state']!='Z' and info['pid']==info['pgid'] and info['comm']=='bash' and uptime-info['start_ticks']/hz>=limit
 
@@ -70,16 +77,22 @@ def main():
     import fcntl
     global CONFIG,STATE
     from deployment_paths import universe_root
-    p=argparse.ArgumentParser();p.add_argument('--once',action='store_true');p.add_argument('--config',type=Path,default=CONFIG);p.add_argument('--state',type=Path,default=STATE);p.add_argument('--session-state',type=Path,default=universe_root()/'.state/gewu-multiverse');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--once',action='store_true');p.add_argument('--config',type=Path,default=CONFIG);p.add_argument('--state',type=Path,default=STATE);p.add_argument('--session-state',type=Path,default=universe_root()/'.state/gewu-multiverse');p.add_argument('--owner-pid',type=int);a=p.parse_args()
     CONFIG,STATE=a.config,a.state
+    owner=process_info(a.owner_pid) if a.owner_pid is not None else None
     STATE.mkdir(parents=True,exist_ok=True,mode=0o700)
     with (STATE/'watchdog.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        while True:
+        from iteration_budget import LIMIT
+        print(json.dumps(dict(event='watchdog_started',pid=os.getpid(),budget_seconds=LIMIT,owner_pid=a.owner_pid)),flush=True)
+        while owner_alive(owner):
             config=json.loads(CONFIG.read_text())
             scan(config)
             from iteration_lifecycle import scan_clocks
-            scan_clocks(config,state_root=a.session_state,observation_root=STATE/'iteration-observations')
+            observations=STATE/'iteration-observations'
+            scan_clocks(config,state_root=a.session_state,observation_root=observations)
+            from author_budget_watchdog import scan as scan_author_budgets
+            scan_author_budgets(config,a.session_state,observations,STATE/'budget-resets')
             from dead_end_watchdog import scan as scan_dead_ends
             scan_dead_ends(config, a.session_state, STATE/'dead-end-observations')
             if a.once:return

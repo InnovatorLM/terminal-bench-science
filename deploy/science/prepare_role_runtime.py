@@ -113,10 +113,8 @@ for index, role in enumerate(roles):
         from install_role_packages import provision
         provision(root, uid, uid, package_binary)
     if role.startswith('author-'):
-        clock=root/'usr/local/bin/role-iteration'
-        clock.unlink(missing_ok=True)
-        shutil.copyfile(Path(__file__).with_name('author_iteration_clock.py'),clock)
-        clock.chmod(0o755)
+        from selftest_clients import install_clock
+        install_clock(root)
         policy=Path(__file__).resolve().parents[2]/'docs/science-universe/author-workflow-overlay.md'
         (root/'instruction.md').write_text(policy.read_text()+chr(10)+(root/'instruction.md').read_text())
     from install_review_dispatch_policy import install as install_review_policy

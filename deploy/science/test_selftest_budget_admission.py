@@ -45,12 +45,12 @@ class CompletedBudgetTests(unittest.TestCase):
         return path,audit
 
     def test_completed_version_does_not_accrue_handoff_wait(self):
-        result=assess_budget(self.work,self.state,self.status,self.obs,30000)
+        result=assess_budget(self.work,self.state,self.status,self.obs,200000)
         self.assertEqual(result['active_iteration_seconds_upper_bound'],60)
         self.assertEqual(result['iteration_cutoff_at'],100)
         self.assertTrue(result['within_budget'])
-        self.assertFalse(verify(self.state,'author-01','idea',self.obs,30000)['within_budget'])
-        with patch('selftest_handoff.time.time',return_value=30000):
+        self.assertFalse(verify(self.state,'author-01','idea',self.obs,200000)['within_budget'])
+        with patch('selftest_handoff.time.time',return_value=200000):
             receipt=qualify(self.work,self.state,self.obs,self.template)
         self.assertEqual(receipt['schema_version'],3)
         self.assertEqual(receipt['active_iteration_seconds'],60)

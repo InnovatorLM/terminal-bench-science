@@ -348,7 +348,10 @@ def main():
     parser.add_argument('--universe', type=Path, required=True)
     parser.add_argument('--poll-seconds', type=int, default=30)
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--owner-pid', type=int)
     args = parser.parse_args()
+    from command_watchdog import process_info, owner_alive
+    owner = process_info(args.owner_pid) if args.owner_pid is not None else None
     if os.geteuid() != 0 or not 5 <= args.poll_seconds <= 300:
         raise SystemExit('Require operator/root and polling interval 5..300 seconds')
     directory = args.state/'review-supplement-consumer'
@@ -359,7 +362,9 @@ def main():
         stopping = True
     signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
     with operator_lock(directory/'consumer.lock', blocking=False):
-        while not stopping:
+        from iteration_budget import LIMIT
+        print(json.dumps(dict(event='review_consumer_started',pid=os.getpid(),budget_seconds=LIMIT,owner_pid=args.owner_pid)),flush=True)
+        while not stopping and owner_alive(owner):
             try:
                 consume_once(json.loads(read_operator_file(args.broker_config)), args.state, args.universe)
             except Exception as error:

@@ -35,7 +35,7 @@ def directive(text, reset_id, reason, guidance):
         'Previous session was interrupted by the operator; this is not a model-answer failure.',
         'Reason: ' + reason, 'Next action: ' + guidance,
         'Preserve existing files, branches and trajectories. Inspect the prior handoff briefly; do not repeat an abandoned search unless the operator requests it.',
-        'Keep the existing per-idea active-time ledger; reset does not grant a fresh five-hour budget for the same idea.', END])
+        'Keep the existing per-idea active-time ledger; reset does not grant a fresh 48-hour budget for the same idea.', END])
     return text.rstrip() + '\n\n' + block + '\n'
 
 def identity(pid):

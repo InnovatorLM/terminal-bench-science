@@ -2,12 +2,12 @@
 
 Unverified pauses receive no time refund. Passing this upper bound proves the
 recorded idea stays within budget; an excessive upper bound requires additional
-pause evidence, not an automatic claim that the author worked over five hours.
+pause evidence, not an automatic claim that the author worked over 48 hours.
 """
 import json
 from pathlib import Path
 from author_submission_gate import read_operator_file
-from iteration_budget import number
+from iteration_budget import LIMIT, number
 
 
 class BudgetEvidenceRequired(ValueError):
@@ -125,7 +125,7 @@ def verify(state, role, idea, observation, at, *, completed_at=None):
                 maintenance_excluded_seconds=sum(b-a for a,b in maintenance),
                 verified_maintenance_intervals=maintenance,
                 total_excluded_seconds=refund,verified_excluded_intervals=excluded,
-                selftest_jobs=sorted(jobs),within_budget=active<=18000,
+                selftest_jobs=sorted(jobs),within_budget=active<=LIMIT,
                 iteration_cutoff_at=end,observed_at=latest,
                 unverified_pauses_refunded=False,event_origin_attested=False,
                 scientific_acceptance=False)

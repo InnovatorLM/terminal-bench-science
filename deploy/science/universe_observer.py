@@ -52,7 +52,7 @@ def scan(root=None):
         if 'infra_error' in hits:
             findings.append({'severity':'high','kind':'infrastructure_signal','role':role_dir.name,'action':'inspect_recent_verifier_and_pod_evidence'})
         # Waiting/one exception is intentionally insufficient for reset.  This
-        # is only a review proposal; ACS waits and the five-hour idea ledger are
+        # is only a review proposal; ACS waits and the 48-hour idea ledger are
         # excluded from any reset decision.
         if age>3600 and 'stalled' in hits and 'infra_error' in hits:
             findings.append({'severity':'medium','kind':'stalled_role','role':role_dir.name,'action':'request_operator_review_or_reset','reset_eligible':False,'reason':'observer cannot distinguish ACS/platform wait from dead end'})
