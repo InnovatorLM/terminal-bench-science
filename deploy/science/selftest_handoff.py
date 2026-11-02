@@ -112,7 +112,10 @@ def handoff(work, state, entry, universe):
     if existing:
         identifier,registered=existing[0]
         registered_template=validated_template(registered,{'snapshot_sha256':receipt['snapshot_sha256']})
-        if (registered_template['agents'][0].get('name')!='codex-preinstall' or
+        agent=registered_template['agents'][0]
+        valid_codex=(agent.get('name')=='codex-preinstall' or
+                     (agent.get('name') is None and agent.get('import_path')=='universe_codex:UniverseCodex'))
+        if (not valid_codex or
                 any(registered_template['environment']['kwargs'].get(k)!=template['environment']['kwargs'][k] for k in ('runtime_image','verifier_image'))):
             raise ValueError('Existing source registration uses another runtime publication')
     else:

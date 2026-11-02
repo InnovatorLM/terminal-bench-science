@@ -413,6 +413,36 @@ def role_available_for(ledger,key,role):
     return not any(other_key!=key and other.get('role')==role and other.get('state')=='reviewing'
                    for other_key,other in ledger.items())
 
+def publish_wake(root,key,row):
+    # The Rust scheduler refuses an identity-free wake. PR-based assignments
+    # must carry the same binding as direct self-test handoffs.
+    wake=dict(key=key,generation=row['generation'],state=row['state'])
+    wake.update({field:row[field] for field in ('task','commit','evaluation_id','snapshot_sha256') if field in row})
+    path=root/'review-dispatch.json';atomic(path,wake);path.chmod(0o644)
+    if row['state']=='reviewing':row['wake_schema_version']=1
+
+def deliver_selftest_evidence(row,config,role_available=True):
+    if not all(row.get(k) for k in ('commit','task','evaluation_id','snapshot_sha256')):return True
+    from deployment_paths import universe_root
+    from selftest_review_evidence import publish
+    try:
+        manifest=publish(config['roles'][row['role']],row,universe_root(W))
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        row['selftest_evidence_error']=type(error).__name__
+        if row.get('state')=='reviewing':
+            row.update(state='waiting_platform',stage='selftest_evidence_delivery',
+                       reason='Platform must deliver exact-version selftest controls; do not repeat ACS.')
+        return False
+    if manifest is not None:
+        row['selftest_evidence_packet']='/evaluation/evidence/'+row['evaluation_id']
+        row['selftest_evidence_job_id']=manifest['job_id']
+    row.pop('selftest_evidence_error',None)
+    if row.get('stage')=='selftest_evidence_delivery' and role_available:
+        row.update(state='reviewing',stage='completeness',generation=row.get('generation',0)+1,
+                   assigned_at=time.time(),updated_at=time.time(),last_activity_at=None,
+                   evaluator_activity_confirmed=False)
+    return True
+
 def sync_direct_assignments(config,ledger):
     """Consume persisted exact assignments even when no PR supplied them."""
     from formal_review_decision import apply
@@ -455,7 +485,8 @@ def sync_direct_assignments(config,ledger):
                            last_activity_at=None)
         role=row['role']
         role_available=active_by_role.get(role) in (None,key)
-        advance_review(key,row,config,role_available=role_available)
+        if deliver_selftest_evidence(row,config,role_available):
+            advance_review(key,row,config,role_available=role_available)
         if row['state']=='reviewing':
             active_by_role[role]=key
         root=Path(config['roles'][row['role']]['root'])
@@ -467,9 +498,7 @@ def sync_direct_assignments(config,ledger):
                 atomic(assignment,dict(row,key=key))
                 os.chown(assignment,config['roles'][row['role']]['uid'],config['roles'][row['role']]['gid'])
         if active_by_role.get(role) in (None,key):
-            wake=dict(key=key,generation=row['generation'],state=row['state'])
-            wake.update({field:row[field] for field in ('task','commit','evaluation_id','snapshot_sha256') if field in row})
-            atomic(root/'review-dispatch.json',wake);(root/'review-dispatch.json').chmod(0o644)
+            publish_wake(root,key,row)
         # Keep the authoritative identity and existing role-local assignment;
         # only the operator ledger/wake/author feedback consume result state.
         publish_author_feedback({},dict(row,key=key),config)
@@ -595,8 +624,7 @@ def reconcile(api,config,ledger):
                 api.call('PATCH','/issues/'+str(old['issue']),{'state':'closed'})
                 old.update(state='waiting_author',stage='author_container_preflight',reason='Author pre-submission container checks and iteration evidence required')
                 if role_available_for(ledger,key,old['role']):
-                    wake=Path(config['roles'][old['role']]['root'])/'review-dispatch.json'
-                    atomic(wake,dict(key=key,generation=old['generation'],state=old['state']));wake.chmod(0o644)
+                    publish_wake(Path(config['roles'][old['role']]['root']),key,old)
             continue
         try:execution=registered_execution(pr['head']['sha'],task)
         except (OSError,ValueError,KeyError,TypeError):execution=None
@@ -636,18 +664,29 @@ def reconcile(api,config,ledger):
         summary=review_budget_summary(pr['head']['sha'],task)
         if summary is not None:row['budget_summary']=summary
         root=Path(config['roles'][row['role']]['root'])
-        advance_review(key,row,config,role_available=role_available_for(ledger,key,row['role']))
+        evidence_delivered=deliver_selftest_evidence(row,config,role_available_for(ledger,key,row['role']))
+        if (row.get('stage')=='evaluator_runner_startup' and row.get('wake_schema_version')!=1
+                and row['state'] in ('reviewing','waiting_platform')
+                and role_available_for(ledger,key,row['role'])):
+            # One-time recovery of assignments published before version-bound
+            # PR wakes existed. A genuine failure after this delivery does not
+            # receive repeated automatic restarts.
+            row.update(state='reviewing',stage='completeness',reason='Recovered the missing immutable binding in the evaluator wake.',
+                       generation=row['generation']+1,assigned_at=time.time(),updated_at=time.time(),
+                       evaluator_assigned=True,evaluator_activity_confirmed=False,last_activity_at=None,
+                       wake_schema_version=1,issue=None)
+        if evidence_delivered:
+            advance_review(key,row,config,role_available=role_available_for(ledger,key,row['role']))
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):
             issue=api.call('GET','/issues/'+str(row['issue']))
             if issue['state']=='open':api.call('PATCH','/issues/'+str(row['issue']),{'state':'closed'})
         if (row['state'] in ('waiting_author','waiting_platform') and event!=row['event']
-                and row.get('stage')!='five_rollouts'):
+                and row.get('stage') not in ('five_rollouts','selftest_evidence_delivery')):
             if not any(v['state']=='reviewing' and v['role']==row['role'] for k,v in ledger.items() if k!=key):
                 row.update(state='reviewing',event=event,generation=row['generation']+1,issue=None,assigned_at=time.time())
-        wake=root/'review-dispatch.json'
         if row['state']!='reviewing':
             if role_available_for(ledger,key,row['role']):
-                atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
+                publish_wake(root,key,row)
             publish_author_feedback(pr,row,config)
             continue
         marker=MARK+' '+key+' generation='+str(row['generation'])
@@ -660,7 +699,7 @@ def reconcile(api,config,ledger):
                 issue=api.call('POST','/issues',{'title':'[独占评测] PR #'+str(row['pr'])+' '+row['commit'][:8],'body':body,'assignees':['gewu-'+row['role']]})
             row['issue']=issue['number']
         assignment=root/'home/role/review-assignment.json';atomic(assignment,dict(row,key=key));os.chown(assignment,config['roles'][row['role']]['uid'],config['roles'][row['role']]['gid'])
-        atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
+        publish_wake(root,key,row)
         publish_author_feedback(pr,row,config)
     atomic(STATE/'pending-submissions.json',pending)
     publish_version_handoffs(config,handoffs)

@@ -458,6 +458,9 @@ class DispatchTests(unittest.TestCase):
                 receipt=Path(cfg['roles'][row['role']]['root'])/'home/role/review-status.json'
                 assignment=json.loads((receipt.parent/'review-assignment.json').read_text())
                 self.assertEqual(assignment['budget_summary'],budget.return_value)
+                wake=json.loads((Path(cfg['roles'][row['role']]['root'])/'review-dispatch.json').read_text())
+                for field in ('commit','task','evaluation_id','snapshot_sha256'):
+                    self.assertEqual(wake[field],assignment[field])
                 receipt.write_text(json.dumps({'key':'30:abc','generation':0,'state':'waiting_author','stage':'completeness','updated_at':100}))
                 (receipt.parent/'activity-receipt.json').write_text(json.dumps({'receipt_type':'evaluator-activity-v1','key':'30:abc','generation':0,'updated_at':100}))
                 m.reconcile(api,cfg,ledger);self.assertEqual(api.issues[0]['state'],'closed')
@@ -468,6 +471,54 @@ class DispatchTests(unittest.TestCase):
                 api.pulls[0]['head']['sha']='def';m.reconcile(api,cfg,ledger)
                 self.assertNotIn('30:def',ledger) # No simultaneous revision ownership.
             finally:m.STATE=original
+
+    def test_legacy_pr_startup_failure_is_recovered_once_with_complete_wake(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);role=root/'evaluator-01';(role/'home/role').mkdir(parents=True)
+            cfg={'roles':{'evaluator-01':dict(root=str(role),uid=os.getuid(),gid=os.getgid())}}
+            api=FakeApi();api.issues=[dict(number=1,state='closed')];key='30:abc'
+            row=dict(pr=30,commit='abc',task='tasks/science/example',role='evaluator-01',
+                     state='waiting_platform',stage='evaluator_runner_startup',generation=1,
+                     assigned_at=100,event=m.fingerprint(api.pulls[0],[]),issue=1,
+                     evaluation_id='example-v1',snapshot_sha256='a'*64)
+            ledger={key:row}
+            with patch.object(m,'STATE',root),patch('author_submission_gate.approved',return_value=True),\
+                 patch('author_submission_gate.review_budget_summary',return_value=None),\
+                 patch.object(m,'registered_execution',return_value=dict(evaluation_id='example-v1',snapshot_sha256='a'*64)):
+                with patch.object(m.time,'time',return_value=500):m.reconcile(api,cfg,ledger)
+                self.assertEqual(row['generation'],2)
+                self.assertEqual(row['state'],'reviewing')
+                self.assertEqual(row['stage'],'completeness')
+                wake=json.loads((role/'review-dispatch.json').read_text())
+                for field in ('commit','task','evaluation_id','snapshot_sha256'):
+                    self.assertEqual(wake[field],row[field])
+                with patch.object(m.time,'time',return_value=900):m.reconcile(api,cfg,ledger)
+                self.assertEqual(row['state'],'waiting_platform')
+                self.assertEqual(row['generation'],2)
+                with patch.object(m.time,'time',return_value=1000):m.reconcile(api,cfg,ledger)
+                self.assertEqual(row['state'],'waiting_platform')
+                self.assertEqual(row['generation'],2)
+
+    def test_selftest_delivery_failure_parks_review_and_recovers_once(self):
+        import review_dispatcher as m
+        row=dict(commit='a'*40,task='tasks/proof',evaluation_id='proof',snapshot_sha256='b'*64,
+                 role='evaluator-01',generation=1,state='reviewing',stage='completeness')
+        cfg={'roles':{'evaluator-01':{}}}
+        with patch('selftest_review_evidence.publish',side_effect=ValueError('Missing receipt')):
+            self.assertFalse(m.deliver_selftest_evidence(row,cfg))
+        self.assertEqual(row['state'],'waiting_platform')
+        self.assertEqual(row['stage'],'selftest_evidence_delivery')
+        with patch('selftest_review_evidence.publish',return_value={'job_id':'c'*32}):
+            self.assertTrue(m.deliver_selftest_evidence(row,cfg,role_available=False))
+            self.assertEqual(row['state'],'waiting_platform')
+            self.assertTrue(m.deliver_selftest_evidence(row,cfg))
+            self.assertEqual(row['state'],'reviewing')
+            self.assertEqual(row['generation'],2)
+            m.deliver_selftest_evidence(row,cfg)
+            self.assertEqual(row['generation'],2)
 
     @patch('review_dispatcher.registered_execution',return_value=None)
     @patch('author_submission_gate.approved',return_value=True)

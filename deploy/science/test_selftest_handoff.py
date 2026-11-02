@@ -194,7 +194,8 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(consume_once(config,state,universe,now=100)['attempted'],1)
             with patch('selftest_handoff.time.time',return_value=100),patch('selftest_handoff.subprocess.run',side_effect=subprocess.CalledProcessError(1,'mock registration failure')):
                 with self.assertRaises(subprocess.CalledProcessError):handoff(work,state,entry,universe)
-            with patch.dict(os.environ,{'GEWU_UNIVERSE_ROOT':str(universe)}):
+            with patch.dict(os.environ,{'GEWU_UNIVERSE_ROOT':str(universe)}),\
+                 patch('selftest_review_evidence.credential_values',return_value=['fixture-secret-value']):
                 self.assertFalse(approved(commit,'tasks/proof'))
                 # Actual subprocess, Git freeze, schema checks, immutable catalog,
                 # identity bridge and final eligibility file. Cloud controls in
@@ -206,6 +207,12 @@ class HandoffTests(unittest.TestCase):
                 self.assertTrue(approved(commit,'tasks/proof'))
                 self.assertEqual(registered_execution(commit,'tasks/proof')['evaluation_id'],result['evaluation_id'])
                 self.assertEqual(handoff(work,state,entry,universe),result)
+                # Replaying a registered adapter must not re-register or rerun
+                # controls just because its Harbor name is intentionally null.
+                registered=json.loads(registry.read_text())[result['evaluation_id']]
+                registered_template=json.loads(Path(registered['template']).read_text())
+                self.assertIsNone(registered_template['agents'][0]['name'])
+                (work/'oracle.log').write_text('passed; api_key=fixture-secret-value\n')
                 from selftest_review_dispatch import consume
                 evaluator=root/'evaluator';(evaluator/'home/role').mkdir(parents=True)
                 config={'roles':{'author-01':dict(entry,uid=os.getuid()),
@@ -220,8 +227,24 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(assignment['budget_summary']['budget_status'],'verified_within_budget')
                 self.assertEqual(assignment['budget_summary']['iteration_cutoff_at'],100)
                 self.assertEqual(assignment['budget_summary']['active_iteration_seconds'],60)
+                packet=evaluator/'evaluation/evidence'/result['evaluation_id']
+                delivered=json.loads((packet/'selftest-status.json').read_text())
+                self.assertEqual(delivered['source_commit'],commit)
+                self.assertEqual(delivered['trials'][0]['results'][0]['rewards']['reward'],1)
+                self.assertEqual(delivered['trials'][1]['results'][0]['rewards']['reward'],0)
+                self.assertEqual((packet/'selftest-status.json').stat().st_mode&0o777,0o640)
+                self.assertNotIn('fixture-secret-value',(packet/'selftest/oracle.log').read_text())
+                self.assertIn('[REDACTED]',(packet/'selftest/oracle.log').read_text())
+                manifest=(packet/'selftest-manifest.json').read_bytes()
                 consume(config,ledger,universe,dispatcher_state)
                 self.assertEqual(len(ledger),1)
+                self.assertEqual((packet/'selftest-manifest.json').read_bytes(),manifest)
+                from selftest_review_evidence import publish
+                with self.assertRaisesRegex(ValueError,'job mismatch'):
+                    publish(config['roles']['evaluator-01'],dict(assignment,job_id='f'*32),universe)
+                (packet/'selftest-status.json').write_text('{}')
+                with self.assertRaisesRegex(ValueError,'evidence changed'):
+                    publish(config['roles']['evaluator-01'],assignment,universe)
             self.assertEqual(len(json.loads(registry.read_text())),1)
             self.assertFalse(result['scientific_acceptance'])
 

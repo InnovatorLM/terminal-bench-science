@@ -57,6 +57,11 @@ def consume(config, ledger, universe, state):
                 row['budget_summary']=request['budget_summary']
                 atomic_json(Path(state)/'ledger.json',ledger)
             entry=config['roles'][row['role']]
+            if not dispatcher.deliver_selftest_evidence(row,config):
+                atomic_json(Path(state)/'ledger.json',ledger)
+                dispatcher.publish_wake(Path(entry['root']),key,row)
+                dispatcher.publish_author_feedback({},dict(row,key=key),config)
+                continue
             destination=Path(entry['root'])/'home/role/review-assignment.json'
             destination.parent.mkdir(parents=True,exist_ok=True)
             payload=dict(row,key=key)
@@ -67,8 +72,7 @@ def consume(config, ledger, universe, state):
             if any(delivered.get(k)!=payload.get(k) for k in ('key','generation','commit','task','evaluation_id','snapshot_sha256','budget_summary')):
                 atomic_json(destination,payload)
                 os.chown(destination,entry['uid'],entry['gid'])
-            wake=Path(entry['root'])/'review-dispatch.json'
-            atomic_json(wake,{k:payload[k] for k in ('key','generation','state','task','commit','evaluation_id','snapshot_sha256')},0o644)
+            dispatcher.publish_wake(Path(entry['root']),key,row)
             dispatcher.publish_author_feedback({},payload,config)
         except (OSError,ValueError,KeyError,TypeError) as error:
             pending[path.stem]={'state':'waiting_author','stage':'author_container_preflight',

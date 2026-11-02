@@ -54,3 +54,12 @@
 - 待提交代码在独立目录运行 161 项测试全部通过；随后去除独立 public-service 的奖励例外，并重新运行受影响的 16 项测试全部通过。代码检查未发现凭据特征，工作区完整源码快照已保存，public Harbor 服务的未完成改动保留在工作区。
 
 原帖经验回复已走通，五次替代评测及其证据已全部完成；完整目标仍保持 active，直到作者后续交接、其余调度问题、监控和备份逐项完成核验。
+
+## 评审唤醒与自测证据交付
+
+- PR 派单曾只写 key/generation/state，缺少调度器要求的 commit/task/evaluation_id/snapshot_sha256。现在与直接自测派单使用同一完整唤醒格式；旧的启动失败仅恢复一次，真实的新启动失败不会无限重试。author-01 对应 PR #35 已恢复到新的 reviewing generation。
+- 找到了 `selftest-status.json` 的交付缺口：反馈消费者引用该文件，但原交接没有发布它。新交接在唤醒 evaluator 前，核对提交版本、自测资格、源码快照和镜像登记，把 oracle/nop 结果、构建和完整性回执、可用 verifier 日志送到指定 evaluator 的私有证据目录。文件有原始和脱敏后摘要，重复交接不会重跑 ACS；缺失/冲突属于平台问题，不要求作者重复自测。
+- 已注册的 UniverseCodex 模板使用 `name=null`，旧的交接重试却只接受 `name=codex-preinstall`。现接受明确的 UniverseCodex 入口，同时保留相同 runtime/verifier digest 核查，防止成功登记在重放时被误报为另一套镜像。
+- evaluator-01 已实际完成 bee 五次结果审核，回执为 reject，理由是五次全部答对、正确率 100% 超过严格拒绝线。作者当前反馈也已收到该结果；原始五次轨迹和判分保持不变。
+
+本轮源码整合提交 `67c8fd6` 已推送 GitHub main；运行时增量备份仍在继续，不能把源码已备份表述为完整运行态备份已完成。
