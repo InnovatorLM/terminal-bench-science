@@ -54,8 +54,27 @@ class UniverseACK(ACKEnvironment):
     async def stop(self, delete=True):
         try:
             await self._capture_pod_evidence('before_stop')
+            await self._retain_incomplete_verifier_evidence()
         finally:
             await super().stop(delete=delete)
+
+    async def _retain_incomplete_verifier_evidence(self):
+        # Harbor downloads verifier output only after verify() returns. A
+        # timeout cancels that path, so retain partial diagnostics before the
+        # owned Pod disappears. Never turn this best-effort copy into a score.
+        paths=getattr(self,'trial_paths',None)
+        if paths is None or getattr(self,'_core_api',None) is None:
+            return
+        target=paths.verifier_dir
+        if getattr(self,'_verifier_evidence_downloaded',False) or (target/'test-stdout.txt').is_file():
+            return
+        try:
+            await asyncio.wait_for(self.download_dir_filtered('/logs/verifier',target),timeout=40)
+        except Exception as error:
+            # Missing reward is expected on timeout. The download helper saves
+            # available logs before reporting that no valid reward exists.
+            if hasattr(self,'logger'):
+                self.logger.warning('Partial verifier evidence collection (%s); cleanup continues',type(error).__name__)
 
     def _get_image_url(self):
         return self._universe_image
@@ -78,7 +97,7 @@ for p in sorted(root.rglob('*')):
  if total>16*1024*1024: raise ValueError('Verifier evidence exceeds transfer limit')
  files[p.relative_to(root).as_posix()]=base64.b64encode(data).decode('ascii')
 print(json.dumps(files))'''
-            result = await self.exec(command='python3 -I -c ' + shlex.quote(script))
+            result = await self.exec(command='python3 -I -c ' + shlex.quote(script),timeout_sec=30)
             if result.return_code != 0:
                 raise ValueError('Unable to collect complete verifier evidence')
             files = json.loads(result.stdout)
@@ -123,6 +142,7 @@ print(json.dumps(files))'''
                 dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 dest.write_bytes(data)
                 dest.chmod(0o600)
+            self._verifier_evidence_downloaded=True
             # Timeouts and verifier crashes often never write reward.txt. Keep
             # their stdout/stderr before reporting that scoring is unavailable.
             # An invalid reward is retained verbatim for diagnosis, never fixed.

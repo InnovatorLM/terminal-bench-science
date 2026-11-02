@@ -23,6 +23,75 @@ from deployment_paths import allowed_development_path, universe_root
 REGISTRY='dptech-sh-pai-acr-registry.cn-shanghai.cr.aliyuncs.com/terminal-bench-universe'
 PINNED=re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$')
 HARNESS={'mini-swe-agent':'2.2.8','litellm':'1.106.2','openai':'2.54.0','mcp':'2.3.0'}
+BASE_RESOLUTION_FAILURE={
+    'error_class':'platform_base_image_resolution',
+    'failure_owner':'platform',
+    'stage':'base_image_resolution',
+    'retry_requires_task_change':False,
+    'cloud_execution_started':False,
+    'remediation':'Platform must resolve the requested base image from pull/inspect evidence. Keep the submitted task unchanged; do not repeatedly edit or resubmit it to work around this failure.',
+}
+
+
+class BaseImageResolutionError(ValueError):
+    """The platform could not bind a requested base to observed pull evidence."""
+
+
+def image_repository(reference):
+    """Normalize Docker's repository aliases without confusing ports and tags."""
+    name=reference.split('@',1)[0]
+    if ':' in name.rsplit('/',1)[-1]:name=name.rsplit(':',1)[0]
+    parts=name.split('/')
+    if len(parts)==1 or not ('.' in parts[0] or ':' in parts[0] or parts[0]=='localhost'):
+        name='docker.io/'+name
+    if name.startswith(('index.docker.io/','registry-1.docker.io/')):
+        name='docker.io/'+name.split('/',1)[1]
+    if name.startswith('docker.io/') and name.count('/')==1:
+        name='docker.io/library/'+name.split('/',1)[1]
+    return name
+
+
+def select_base_digest(requested,info,pull_output=''):
+    """Bind this pull, not every historical digest attached to its config ID."""
+    repository=image_repository(requested)
+    explicit=requested.split('@',1)[1] if '@' in requested else None
+    if explicit is not None and not re.fullmatch(r'sha256:[a-f0-9]{64}',explicit):
+        raise BaseImageResolutionError('Requested base digest is invalid')
+    refs=info.get('RepoDigests',[])
+    if not isinstance(refs,list):raise BaseImageResolutionError('Invalid base image inspect digest list')
+    matching={ref.split('@',1)[1] for ref in refs if isinstance(ref,str) and PINNED.fullmatch(ref) and image_repository(ref)==repository}
+    pulled=set(re.findall(r'^Digest:\s*(sha256:[a-f0-9]{64})\s*$',pull_output,re.M))
+    if len(pulled)>1:raise BaseImageResolutionError('Pull reported conflicting base digests')
+    observed=next(iter(pulled),None)
+    if explicit is not None and observed is not None and explicit!=observed:
+        raise BaseImageResolutionError('Pulled base digest differs from explicit requested digest')
+    chosen=explicit or observed
+    if chosen is None:
+        if len(matching)!=1:raise BaseImageResolutionError('Base digest is ambiguous without this pull evidence')
+        chosen=next(iter(matching))
+    if chosen not in matching:
+        raise BaseImageResolutionError('Requested repository/pull digest is absent from inspected image')
+    return repository+'@'+chosen
+
+
+def resolve_base_image(docker,image,mirror=None):
+    transport=official_library_transport(image,mirror)
+    pulled=docker.run(['pull',transport])
+    info=docker.run(['image','inspect',transport],True)[0]
+    try:return select_base_digest(transport,info,pulled)
+    except BaseImageResolutionError:
+        atomic_json(docker.output/'failure.json',BASE_RESOLUTION_FAILURE)
+        raise
+
+
+def build_failure_details(output):
+    from evaluation_queue import root_file
+    path=Path(output)/'failure.json'
+    if not path.exists():return {}
+    value=json.loads(root_file(path).read_text())
+    if value.get('error_class')==BASE_RESOLUTION_FAILURE['error_class']:
+        return dict(BASE_RESOLUTION_FAILURE)
+    return {}
 
 
 @contextlib.contextmanager
@@ -167,13 +236,7 @@ def main():
         env_hash=validate_context(snapshot/'environment');tests_hash=validate_context(snapshot/'tests')
         docker=Docker(output)
         def resolve_base(image):
-            transport=official_library_transport(image,os.environ.get('GEWU_DOCKER_LIBRARY_MIRROR'))
-            docker.run(['pull',transport])
-            info=docker.run(['image','inspect',transport],True)[0]
-            refs=info.get('RepoDigests',[])
-            if len(refs)!=1 or not PINNED.fullmatch(refs[0]):
-                raise ValueError('Base image must resolve to one immutable repository digest')
-            return refs[0]
+            return resolve_base_image(docker,image,os.environ.get('GEWU_DOCKER_LIBRARY_MIRROR'))
         effective_environment=output/'environment-effective'
         shutil.copytree(snapshot/'environment',effective_environment)
         base_resolution=pin_bases(effective_environment/'Dockerfile',args.python_base,resolve_base)

@@ -104,6 +104,19 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual((work/'status.json').read_bytes(),original)
             self.assertEqual((role/'selftest/results'/(work.name+'.json')).stat().st_mode&0o777,0o640)
 
+    def test_platform_image_resolution_failure_is_not_sent_back_for_author_edits(self):
+        from build_task_images import BASE_RESOLUTION_FAILURE
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,work,obs,template,status=self.fixture(root)
+            role=root/'role';(role/'selftest/results').mkdir(parents=True)
+            status.update(BASE_RESOLUTION_FAILURE,status='failed');(work/'status.json').write_text(json.dumps(status))
+            with patch('selftest_handoff.handoff') as handoff:
+                reconcile(work,state,dict(root=str(role),gid=0),root/'universe');handoff.assert_not_called()
+            result=json.loads((role/'selftest/results'/(work.name+'.json')).read_text())
+            self.assertEqual(result['status'],'failed')
+            self.assertEqual(result['review_handoff']['state'],'waiting_platform')
+            self.assertFalse(result['retry_requires_task_change'])
+
     def test_incomplete_root_status_does_not_overwrite_interruption_receipt(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);state,work,obs,template,status=self.fixture(root)

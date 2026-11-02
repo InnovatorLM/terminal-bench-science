@@ -167,7 +167,11 @@ def reconcile(work, state, entry, universe):
         else:return
     status=json.loads(read_operator_file(work/'status.json'))
     if status.get('status') not in ('selftest_passed','selftest_failed','failed','interrupted'):return
-    try:result=handoff(work,Path(state),entry,universe)
+    try:
+        if status.get('failure_owner')=='platform' and status.get('error_class')=='platform_base_image_resolution':
+            result=dict(state='waiting_platform',stage='base_image_resolution',
+                        reason=status['remediation'],scientific_acceptance=False)
+        else:result=handoff(work,Path(state),entry,universe)
     except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError) as error:
         progress=work/'handoff-progress.json'
         stage=json.loads(read_operator_file(progress)).get('stage','verify_iteration_and_budget') if progress.exists() else 'verify_iteration_and_budget'

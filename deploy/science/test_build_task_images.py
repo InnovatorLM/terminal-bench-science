@@ -5,12 +5,53 @@ from pathlib import Path
 import tempfile
 import unittest
 from evaluation_queue import W
-from build_task_images import validate_context,validate_dockerfile,receipt_labels,publish_image,validate_build_receipt,REGISTRY,HARNESS
+from build_task_images import validate_context,validate_dockerfile,receipt_labels,publish_image,validate_build_receipt,REGISTRY,HARNESS,select_base_digest,resolve_base_image,BaseImageResolutionError,build_failure_details
 
 BASE='public.ecr.aws/docker/library/python@sha256:'+'a'*64
 
 
 class BuildTests(unittest.TestCase):
+    def test_base_resolution_uses_requested_repository_among_aliases(self):
+        digest='sha256:'+'a'*64
+        self.assertEqual(select_base_digest('public.ecr.aws/docker/library/python:3.12-slim',
+            {'RepoDigests':['other.example/python@sha256:'+'b'*64,'public.ecr.aws/docker/library/python@'+digest]}),
+            'public.ecr.aws/docker/library/python@'+digest)
+        self.assertEqual(select_base_digest('localhost:5000/team/python:tag',
+            {'RepoDigests':['localhost:5000/team/python@'+digest]}),'localhost:5000/team/python@'+digest)
+        self.assertEqual(select_base_digest('python:3.12',{'RepoDigests':['python@'+digest]}),'docker.io/library/python@'+digest)
+
+    def test_this_pull_selects_among_multiple_digests_for_same_repository(self):
+        repo='public.ecr.aws/docker/library/python';old='sha256:'+'1'*64;current='sha256:'+'a'*64
+        info={'RepoDigests':[repo+'@'+old,repo+'@'+current]}
+        self.assertEqual(select_base_digest(repo+':3.12-slim',info,'Digest: '+current+'\n'),repo+'@'+current)
+        with self.assertRaisesRegex(BaseImageResolutionError,'ambiguous'):
+            select_base_digest(repo+':3.12-slim',info)
+        with self.assertRaisesRegex(BaseImageResolutionError,'absent'):
+            select_base_digest(repo+':3.12-slim',info,'Digest: sha256:'+'c'*64+'\n')
+
+    def test_explicit_digest_and_pull_must_agree_exactly(self):
+        repo='registry.example/python';a='sha256:'+'a'*64;b='sha256:'+'b'*64;info={'RepoDigests':[repo+'@'+a,repo+'@'+b]}
+        self.assertEqual(select_base_digest(repo+'@'+a,info,'Digest: '+a+'\n'),repo+'@'+a)
+        with self.assertRaisesRegex(BaseImageResolutionError,'differs from explicit'):
+            select_base_digest(repo+'@'+a,info,'Digest: '+b+'\n')
+        with self.assertRaisesRegex(BaseImageResolutionError,'conflicting'):
+            select_base_digest(repo+':tag',info,'Digest: '+a+'\nDigest: '+b+'\n')
+        with self.assertRaisesRegex(BaseImageResolutionError,'absent'):
+            select_base_digest('other.example/python@'+a,info,'Digest: '+a+'\n')
+
+    def test_resolver_failure_has_operator_owned_platform_classification(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            class FakeDocker:
+                output=Path(raw)
+                def run(self,args,json_output=False):
+                    if args[0]=='pull':return 'Digest: sha256:'+'a'*64+'\n'
+                    return [{'RepoDigests':['wrong.example/python@sha256:'+'a'*64]}]
+            with self.assertRaises(BaseImageResolutionError):resolve_base_image(FakeDocker(),'python:3.12')
+            details=build_failure_details(Path(raw))
+            self.assertEqual(details['failure_owner'],'platform')
+            self.assertFalse(details['retry_requires_task_change'])
+            self.assertEqual((Path(raw)/'failure.json').stat().st_mode&0o777,0o600)
+
     def test_registration_requires_matching_publication(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as temporary:
             snapshot=Path(temporary)

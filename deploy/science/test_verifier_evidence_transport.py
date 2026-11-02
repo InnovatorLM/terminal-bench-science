@@ -116,6 +116,36 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):asyncio.run(obj.stop(delete=True))
             stop.assert_awaited_once_with(delete=True)
 
+    def test_stop_recovers_timeout_stdout_before_deleting_pod_without_reward(self):
+        obj=object.__new__(UniverseACK)
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            target=Path(raw)/'verifier';obj.trial_paths=SimpleNamespace(verifier_dir=target);obj._core_api=object()
+            data={'test-stdout.txt':base64.b64encode(b'Waiting on package download\n').decode()}
+            async def stopped(delete):
+                self.assertTrue(delete)
+                self.assertEqual((target/'test-stdout.txt').read_text(),'Waiting on package download\n')
+                self.assertFalse((target/'reward.txt').exists())
+            with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock()),patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))) as execute,patch('universe_ack.ACKEnvironment.stop',AsyncMock(side_effect=stopped)) as stop:
+                asyncio.run(obj.stop(delete=True))
+                self.assertEqual(execute.call_args.kwargs['timeout_sec'],30)
+                stop.assert_awaited_once_with(delete=True)
+
+    def test_failed_timeout_log_transfer_still_deletes_pod(self):
+        obj=object.__new__(UniverseACK)
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            obj.trial_paths=SimpleNamespace(verifier_dir=Path(raw));obj._core_api=object()
+            with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock()),patch.object(UniverseACK,'download_dir_filtered',AsyncMock(side_effect=TimeoutError)),patch('universe_ack.ACKEnvironment.stop',AsyncMock()) as stop:
+                asyncio.run(obj.stop(delete=True));stop.assert_awaited_once_with(delete=True)
+
+    def test_stop_does_not_overwrite_already_retained_verifier_output(self):
+        obj=object.__new__(UniverseACK)
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            target=Path(raw);obj.trial_paths=SimpleNamespace(verifier_dir=target);obj._core_api=object()
+            (target/'test-stdout.txt').write_text('Original evidence')
+            with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock()),patch.object(UniverseACK,'download_dir_filtered',AsyncMock()) as collect,patch('universe_ack.ACKEnvironment.stop',AsyncMock()):
+                asyncio.run(obj.stop(delete=True));collect.assert_not_awaited()
+            self.assertEqual((target/'test-stdout.txt').read_text(),'Original evidence')
+
     def test_source_adapters_identical_and_wrapper_prefers_source(self):
         directory=Path(__file__).parent
         self.assertEqual((directory/'universe_ack.py').read_bytes(),(directory/'harbor-extensions/universe_ack.py').read_bytes())

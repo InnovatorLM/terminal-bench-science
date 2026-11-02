@@ -5,7 +5,7 @@ from evaluation_queue import W,atomic_json,digest_tree
 from check_harbor_task import inspect_task
 from acs_network_preflight import NetworkPreflightError
 from selftest_lifecycle import owned_run, recover_interrupted, install_stop_handlers
-from build_task_images import builder_slot,validate_dockerfile
+from build_task_images import builder_slot,validate_dockerfile,build_failure_details
 from selftest_source import verify_source
 from selftest_logs import credential_values, publish as publish_logs
 from selftest_upload import snapshot_upload
@@ -13,6 +13,14 @@ from acs_result_diagnostics import classify_trial
 STATE=Path(os.environ.get('GEWU_AUTHOR_SELFTEST_STATE',W/'.state/science-author-selftest'))
 PYTHON=W/'acs-harbor-test/.venv/bin/python'
 BASE='public.ecr.aws/docker/library/python@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377'
+def configure_control_verifier(config):
+ """Use the frozen task's verifier budget, not a template's historical cap."""
+ verifier=config.setdefault('verifier',{})
+ for name in ('override_timeout_sec','max_timeout_sec','environment_mode','environment'):
+  verifier.pop(name,None)
+ verifier.update(include_logs=[],exclude_logs=[])
+ config['verifier_timeout_multiplier']=1.0
+
 def build_command(repo,commit,name,output):
  codex=Path(os.environ.get('GEWU_CODEX_BINARY',str(W/'.local/libexec/science-runtime/codex')))
  rg=Path(os.environ.get('GEWU_RG_BINARY',str(W/'.local/libexec/science-runtime/rg')))
@@ -87,7 +95,9 @@ def process(role,entry,request):
    status['status']='building';save()
    with (work/'build.log').open('w') as log:
     r=owned_run(build_command(repo,commit,name,work/'build')+['--lock-fd',str(lock_fd)],env=env,stdout=log,stderr=log,timeout=3600,pass_fds=(lock_fd,))
-  if r.returncode:raise RuntimeError('Image build failed; operator evidence: '+str(work/'build.log'))
+  if r.returncode:
+   status.update(build_failure_details(work/'build'))
+   raise RuntimeError('Image build failed; operator evidence: '+str(work/'build.log'))
   images=json.loads((work/'build/receipt.json').read_text())['images'];status['images']={k:v['published_digest'] for k,v in images.items()};status['trials']=[]
   for agent in ['oracle','nop']:
    status['status']='running_'+agent;save();c=json.loads(json.dumps(run_template));run='tbs-universe-linfeng-selftest-'+job[:12]+'-'+agent
@@ -95,7 +105,7 @@ def process(role,entry,request):
    # These are task.toml fields, not Harbor job VerifierConfig fields.
    # Remove historical no-op overrides; actual shared/separate mode and
    # artifact transfer remain exactly as declared by the frozen task.
-   c['verifier'].pop('environment_mode',None);c['verifier'].pop('environment',None)
+   configure_control_verifier(c)
    c['environment']['delete']=True;c['environment']['override_cpus']=4;c['environment']['override_memory_mb']=8192
    # Always use the version-controlled adapter.  The historical default ACK
    # path could load a removed local import and, more importantly, did not
