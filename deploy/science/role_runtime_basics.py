@@ -34,6 +34,14 @@ def _install(path: Path, data: bytes, uid: int, mode: int=0o600):
         try: os.unlink(tmp)
         except FileNotFoundError: pass
 
+def install_comparison_tool(role_root: str|Path):
+    """Supply the host's small, immutable comparison tool without touching packages."""
+    root=Path(role_root)
+    source=Path('/usr/bin/cmp')
+    if not source.is_file() or source.stat().st_uid!=0 or not os.access(source,os.X_OK):
+        raise ValueError('Trusted host cmp executable unavailable')
+    _install(_safe(root,'usr/local/bin/cmp'),source.read_bytes(),0,0o755)
+
 def repair_role(role_root: str|Path, role: str, workspace: str|Path, *, uid: int, controller_uid: int=65534) -> dict:
     root=Path(role_root); uid=int(uid)
     if os.geteuid()!=0 or uid<20000 or uid==controller_uid:
@@ -105,6 +113,7 @@ def repair_role(role_root: str|Path, role: str, workspace: str|Path, *, uid: int
     _install(_safe(root,'usr/local/bin/role-askpass'),ask,0,0o755)
     src=Path(__file__).with_name('role_forgejo.py')
     _install(_safe(root,'usr/local/bin/role-forgejo'),src.read_bytes(),0,0o755)
+    install_comparison_tool(root)
     return probe(root,uid)
 
 def probe(root: str|Path, uid: int) -> dict:
@@ -118,10 +127,11 @@ for prompt,key in [('Username','login'),('Password','token')]:
  checks[key]=p.returncode==0 and p.stdout.strip()==c[key]
 with open('/dev/null','r+b'):pass
 p=subprocess.run(['/usr/bin/git','--version'],capture_output=True)
+comparison=subprocess.run(['/usr/local/bin/cmp','/etc/gitconfig','/etc/gitconfig'],capture_output=True) if Path('/etc/gitconfig').is_file() else subprocess.run(['/usr/local/bin/cmp','/usr/local/bin/cmp','/usr/local/bin/cmp'],capture_output=True)
 helper=Path('/usr/lib/git-core/git-remote-http')
 probe=Path('/workspace/.role-runtime-probe');probe.write_text('ok');probe.unlink()
-assert all(checks.values()) and p.returncode==0 and helper.is_file() and os.access(helper,os.X_OK)
-print(json.dumps({'uid':os.getuid(),'git_auth_helper':True,'git_remote_http':True,'python_ssl':True,'null_io':True,'workspace_write':True}))
+assert all(checks.values()) and p.returncode==0 and comparison.returncode==0 and helper.is_file() and os.access(helper,os.X_OK)
+print(json.dumps({'uid':os.getuid(),'git_auth_helper':True,'git_remote_http':True,'python_ssl':True,'null_io':True,'workspace_write':True,'cmp':True}))
 '''
     command=['/usr/bin/setpriv','--no-new-privs','/usr/sbin/chroot',
              '--userspec='+str(uid)+':'+str(uid),'--groups='+str(uid),str(root),

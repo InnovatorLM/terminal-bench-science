@@ -34,7 +34,7 @@ def read_text_retry(path, attempts=8):
     raise last
 
 MODULES = ('numpy','scipy','pytest','pydantic','yaml')
-TOOLS = ('bash','git','tar','gzip','seq','nohup','curl','role-install','role-forgejo')
+TOOLS = ('bash','git','tar','gzip','seq','nohup','curl','cmp','role-install','role-forgejo')
 
 PROBE = '''import importlib,json,os,shutil,sys,subprocess
 os.chdir('/')
@@ -43,7 +43,7 @@ for name in ['numpy','scipy','pytest','pydantic','yaml']:
  try:
   m=importlib.import_module(name);modules[name]={'ok':True,'version':getattr(m,'__version__','unknown')}
  except Exception as e:modules[name]={'ok':False,'error_type':type(e).__name__}
-tools={name:shutil.which(name) for name in ['bash','git','tar','gzip','seq','nohup','curl','role-install','role-forgejo']}
+tools={name:shutil.which(name) for name in ['bash','git','tar','gzip','seq','nohup','curl','cmp','role-install','role-forgejo']}
 commands={}
 for name in sys.argv[1:]:
  executable=shutil.which(name)

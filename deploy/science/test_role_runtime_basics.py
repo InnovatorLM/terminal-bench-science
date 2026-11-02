@@ -31,6 +31,8 @@ class RuntimeBasicsTests(unittest.TestCase):
                 self.assertEqual((root/'workspace').stat().st_gid,21191)
                 self.assertEqual((root/'workspace').stat().st_mode&0o7777,0o2770)
                 self.assertTrue(os.access(root/'usr/local/bin/role-askpass',os.X_OK))
+                self.assertEqual((root/'usr/local/bin/cmp').read_bytes(),Path('/usr/bin/cmp').read_bytes())
+                self.assertEqual((root/'usr/local/bin/cmp').stat().st_uid,0)
 
     def test_repairs_immutable_chroot_paths_for_git(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
