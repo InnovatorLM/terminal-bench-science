@@ -1,10 +1,11 @@
 """Operator-owned author selftest queue: frozen upload -> ACR -> ACS oracle/nop."""
 import contextlib,json,os,re,signal,subprocess,sys,tarfile,hashlib,time,fcntl
+from collections import Counter
 from pathlib import Path,PurePosixPath
 from evaluation_queue import W,atomic_json,digest_tree
 from check_harbor_task import inspect_task
 from acs_network_preflight import NetworkPreflightError
-from docker_context_preflight import DockerContextError
+from docker_context_preflight import DockerContextError,require_contexts
 from selftest_lifecycle import owned_run, recover_interrupted, install_stop_handlers
 from build_task_images import builder_slot,validate_dockerfile,build_failure_details
 from selftest_source import verify_source, SourceMismatchError
@@ -14,6 +15,39 @@ from acs_result_diagnostics import classify_trial
 STATE=Path(os.environ.get('GEWU_AUTHOR_SELFTEST_STATE',W/'.state/science-author-selftest'))
 PYTHON=W/'acs-harbor-test/.venv/bin/python'
 BASE='public.ecr.aws/docker/library/python@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377'
+DEFAULT_WORKERS=10
+MAX_WORKERS=15
+METRICS_INTERVAL=30
+
+
+def failure_classification(receipt):
+ """Summarize observed failures without blaming ACS or inventing a reward."""
+ explicit=receipt.get('error_class')
+ if isinstance(explicit,str) and re.fullmatch(r'[a-zA-Z0-9_]{1,100}',explicit):return explicit
+ if receipt.get('status')=='interrupted':return 'worker_interrupted'
+ if receipt.get('status')=='selftest_failed':
+  trials=receipt.get('trials')
+  if not isinstance(trials,list):return 'control_result_missing_or_ambiguous'
+  for trial in trials:
+   if not isinstance(trial,dict):return 'control_result_missing_or_ambiguous'
+   diagnostics=trial.get('diagnostics')
+   for diagnostic in diagnostics if isinstance(diagnostics,list) else []:
+    if not isinstance(diagnostic,dict):continue
+    if not diagnostic.get('scored') and isinstance(diagnostic.get('diagnostic'),str):
+     value=diagnostic['diagnostic']
+     if re.fullmatch(r'[a-zA-Z0-9_]{1,100}',value):return value
+   if trial.get('exit_code')!=0:return 'control_run_failed_requires_diagnosis'
+   if trial.get('cleanup_confirmed') is not True:return 'control_cleanup_unconfirmed'
+   results=trial.get('results',[])
+   if not isinstance(results,list) or len(results)!=1 or not isinstance(results[0],dict):return 'control_result_missing_or_ambiguous'
+   if results[0].get('exception_type'):return 'control_trial_exception'
+   if not diagnostics or not all(isinstance(item,dict) and item.get('scored') is True for item in diagnostics):return 'control_score_unverified'
+   agent=trial.get('agent');expected={'oracle':1,'nop':0}.get(agent) if isinstance(agent,str) else None
+   rewards=results[0].get('rewards');reward=rewards.get('reward') if isinstance(rewards,dict) else None
+   if type(reward) not in (int,float) or reward not in (0,1):return 'control_reward_invalid'
+   if expected is not None and reward!=expected:return agent+'_control_failed'
+  return 'unclassified_control_failure'
+ return 'unclassified_worker_failure'
 def configure_control_verifier(config):
  """Use the frozen task's verifier budget, not a template's historical cap."""
  verifier=config.setdefault('verifier',{})
@@ -51,9 +85,13 @@ def process(role,entry,request):
  def publish(payload):
   atomic_json(result,payload);os.chown(result,0,entry['gid']);result.chmod(0o640)
  if recover_interrupted(work,result,publish):return
- work.mkdir(mode=0o700);status={'schema_version':2,'job_id':job,'role':role,'status':'validating','quality_acceptance':False,'received_at':time.time()}
+ work.mkdir(mode=0o700);status={'schema_version':2,'job_id':job,'role':role,'status':'validating','quality_acceptance':False,'received_at':time.time(),'worker_pid':os.getpid(),'stage':'upload_validation','cloud_execution_attempted':False}
  secrets=credential_values(root)
+ last_phase=None
  def save():
+  nonlocal last_phase
+  if last_phase!=status['status']:
+   status['phase_started_at']=time.time();last_phase=status['status']
   status['diagnostics']=publish_logs(work,root,job,entry['gid'],secrets)
   status['updated_at']=time.time();publish(status);atomic_json(work/'status.json',status)
  save()
@@ -75,17 +113,20 @@ def process(role,entry,request):
   repo=work/'source';task=repo/name;unpack(frozen,task)
   # Bind bytes and executable modes to the claimed version before attributing
   # any task/network defect to it. An uncommitted upload is not that version.
+  status['stage']='source_verification'
   status.update(verify_source(root/'workspace',q['source_repository'],q['source_task_path'],q['source_commit'],task));save()
   # Validate the real task policy against the same job environment used below,
   # before acquiring the builder or starting any cloud work. Never rewrite the
   # frozen source to force a verifier mode or change its network contract.
   run_template=json.loads((W/'.config/harbor-api/template.json').read_text())
+  status['stage']='mechanical_preflight'
+  require_contexts(task)  # Typed package defects, before inspect_task's general checks.
   mechanical=inspect_task(task,acs_environment=run_template['environment'])
   atomic_json(work/'mechanical.json',mechanical)
   status['network_preflight']=mechanical['acs_network_preflight']
   save()
   for args in [['init','-q'],['config','user.email','operator@localhost'],['config','user.name','operator'],['add','.'],['commit','-qm','Frozen author upload']]:subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
-  commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();status.update(status='waiting_builder',source_commit=q['source_commit'],execution_commit=commit,execution_task_path=name,snapshot_sha256=digest_tree(task));save()
+  commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();status.update(status='waiting_builder',stage='build_queue',source_commit=q['source_commit'],execution_commit=commit,execution_task_path=name,snapshot_sha256=digest_tree(task));save()
   if 'iteration' in q:
    from selftest_iteration import validate
    status['iteration']=validate(q['iteration'],status,STATE,role);save()
@@ -98,7 +139,7 @@ def process(role,entry,request):
   # task. The child inherits this exact locked descriptor, rather than trying
   # to acquire the same slot again and deadlocking.
   with builder_slot() as lock_fd:
-   status['status']='building';save()
+   status.update(status='building',stage='image_build');save()
    with (work/'build.log').open('w') as log:
     r=owned_run(build_command(repo,commit,name,work/'build')+['--lock-fd',str(lock_fd)],env=env,stdout=log,stderr=log,timeout=3600,pass_fds=(lock_fd,))
   if r.returncode:
@@ -106,7 +147,7 @@ def process(role,entry,request):
    raise RuntimeError('Image build failed; operator evidence: '+str(work/'build.log'))
   images=json.loads((work/'build/receipt.json').read_text())['images'];status['images']={k:v['published_digest'] for k,v in images.items()};status['trials']=[]
   for agent in ['oracle','nop']:
-   status['status']='running_'+agent;save();c=json.loads(json.dumps(run_template));run='tbs-universe-linfeng-selftest-'+job[:12]+'-'+agent
+   status.update(status='running_'+agent,stage='acs_'+agent);save();c=json.loads(json.dumps(run_template));run='tbs-universe-linfeng-selftest-'+job[:12]+'-'+agent
    c.update(job_name=run,jobs_dir=str(work/'runs'),n_attempts=1,n_concurrent_trials=1,datasets=[{'path':str(repo),'task_names':[name]}],agents=[{'name':agent,'override_timeout_sec':14400}]);c['retry']={'max_retries':0};c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[])
    # These are task.toml fields, not Harbor job VerifierConfig fields.
    # Remove historical no-op overrides; actual shared/separate mode and
@@ -126,6 +167,7 @@ def process(role,entry,request):
    execution_budget=apply_execution_budget(c)
    cfg=work/(agent+'.json');atomic_json(cfg,c);report=work/(agent+'-report.json')
    acs_started_at=time.time()
+   status.update(cloud_execution_attempted=True,acs_phase_started_at=acs_started_at);save()
    with (work/(agent+'.log')).open('w') as log:r=owned_run([str(Path(__file__).with_name('run-acs-evaluation')),str(cfg),str(report)],env=env,stdout=log,stderr=log,timeout=execution_budget['worker_seconds'],cleanup_grace=180)
    d=json.loads(report.read_text()) if report.exists() else {};trials=[];diagnostics=[]
    if d.get('result_path'):
@@ -137,6 +179,7 @@ def process(role,entry,request):
   status['status']='selftest_passed' if valid(status['trials'][0],1) and valid(status['trials'][1],0) else 'selftest_failed'
   categories=[item['diagnostic'] for trial in status['trials'] for item in trial.get('diagnostics',[]) if not item['scored']]
   if categories:status['error_class']=categories[0]
+  elif status['status']=='selftest_failed':status['error_class']=failure_classification(status)
   status['note']='Author selftest only; iteration/rerun and independent evaluation still required.'
  except SourceMismatchError as e:
   from selftest_logs import sanitize
@@ -147,6 +190,7 @@ def process(role,entry,request):
  except DockerContextError as e:
   from selftest_logs import sanitize
   status.update(status='failed',error_class='author_build_context_missing',stage='build_context_preflight',
+                failure_owner='task',retry_requires_task_change=True,
                 docker_context_preflight=e.report,error=sanitize(str(e),secrets)[:600],cloud_execution_started=False)
   atomic_json(work/'build-context-preflight.json',e.report)
  except NetworkPreflightError as e:
@@ -158,7 +202,11 @@ def process(role,entry,request):
   status.update(status='interrupted',error='Worker stopped; inspect preserved logs and cloud cleanup.');save();raise
  except Exception as e:
   from selftest_logs import sanitize
-  status.update(status='failed',error=sanitize(str(e),secrets)[:600])
+  status.update(status='failed',error=sanitize(str(e),secrets)[:600],error_type=type(e).__name__)
+  if status.get('stage')=='mechanical_preflight' and isinstance(e,ValueError):
+   status.update(error_class='task_package_validation_failed',failure_owner='task',
+                 retry_requires_task_change=True,cloud_execution_started=False)
+  else:status.setdefault('error_class','unclassified_worker_failure')
  status['completed_at']=time.time()
  save()
 def pending_requests(roles,state):
@@ -232,22 +280,120 @@ def schedule(pool,candidates,broker_config,command_for):
  """Fill only vacant slots, and never run two jobs for the same author."""
  pool.reap()
  active_roles={key[0] for key in pool.children}
+ # A replacement supervisor may inherit no Popen handles while old children
+ # still own author locks. Count these conservative occupancies before filling
+ # new slots; the per-author lock alone does not enforce the pool-wide limit.
+ roles=set(broker_config.get('roles',{}))|{role for _,role,_ in candidates}
+ external_roles={role for role in roles if re.fullmatch(r'author-[0-9]+',role)
+                 and role not in active_roles and role_locked(role)}
  for _,role,q in candidates:
-  if len(pool.children)>=pool.limit:break
-  if role in active_roles or role_locked(role):continue
+  if len(pool.children)+len(external_roles)>=pool.limit:break
+  if role in active_roles or role in external_roles or role_locked(role):continue
   key=(role,q.stem)
   if pool.start(key,command_for(role,q)):
    active_roles.add(role)
+
+
+def _read_receipt(path):
+ try:
+  value=json.loads(Path(path).read_text())
+  return value if isinstance(value,dict) else None
+ except (OSError,ValueError):return None
+
+
+def _observed_lock(path):
+ """Probe an existing lock, without creating files or claiming its owner."""
+ try:fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+ except FileNotFoundError:return False
+ except OSError:return None
+ try:
+  try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  except BlockingIOError:return True
+  fcntl.flock(fd,fcntl.LOCK_UN)
+  return False
+ except OSError:return None
+ finally:os.close(fd)
+
+
+def queue_snapshot(roles,state,pool,candidates,*,now=None,terminal_sample_per_role=20):
+ """Local queue observations, explicitly not Kubernetes resource accounting."""
+ from selftest_lifecycle import TERMINAL
+ now=time.time() if now is None else now;state=Path(state)
+ authors={role:entry for role,entry in roles.items() if re.fullmatch(r'author-[0-9]+',role)}
+ tracked={key:child for key,child in pool.children.items() if child.poll() is None}
+ role_locks={role:_observed_lock(state/'locks'/(role+'.lock')) for role in authors}
+ job_locks={(role,q.stem):_observed_lock(state/'locks'/(q.stem+'.lock')) for _,role,q in candidates}
+ known=set(tracked)|{key for key,locked in job_locks.items() if locked is True}
+ known_roles={key[0] for key in known}
+ unknown_roles={role for role,held in role_locks.items() if held is not False and role not in known_roles}
+ pending=[(mtime,role,q) for mtime,role,q in candidates if (role,q.stem) not in known and role not in unknown_roles]
+ unknown=[(role,q.stem) for _,role,q in candidates if role in unknown_roles]
+ active=[];phases=Counter()
+ for role,job in sorted(known):
+  receipt=_read_receipt(state/job/'status.json')
+  if receipt is None and role in authors:
+   receipt=_read_receipt(Path(authors[role]['root'])/'selftest/results'/(job+'.json'))
+  receipt=receipt or {}
+  phase=receipt.get('status') if isinstance(receipt.get('status'),str) else 'unknown'
+  phases[phase]+=1
+  updated=receipt.get('updated_at');started=receipt.get('phase_started_at')
+  active.append(dict(role=role,job_id=job,phase=phase,
+      ownership='supervisor_child' if (role,job) in tracked else 'held_job_lock',
+      pid=getattr(tracked.get((role,job)),'pid',None),
+      last_status_write_age_seconds=max(0,now-updated) if type(updated) in (int,float) else None,
+      phase_age_seconds=max(0,now-started) if type(started) in (int,float) else None))
+ terminal_counts=Counter();failure_counts=Counter();unreadable=0;sampled=0
+ for role,entry in authors.items():
+  paths=[]
+  for path in (Path(entry['root'])/'selftest/results').glob('*.json'):
+   if not re.fullmatch('[a-f0-9]{32}',path.stem):continue
+   try:paths.append((path.stat().st_mtime_ns,path))
+   except OSError:unreadable+=1
+  count=0
+  for _,path in sorted(paths,reverse=True):
+   receipt=_read_receipt(path)
+   if receipt is None:unreadable+=1;continue
+   if not isinstance(receipt.get('status'),str) or receipt['status'] not in TERMINAL:continue
+   terminal_counts[receipt['status']]+=1;sampled+=1;count+=1
+   if receipt['status']!='selftest_passed':failure_counts[failure_classification(receipt)]+=1
+   if count>=terminal_sample_per_role:break
+ oldest=min(pending,key=lambda item:item[0]) if pending else None
+ return dict(schema_version=1,observed_at=now,supervisor_pid=os.getpid(),
+  scope='local_worker_processes_locks_and_receipts; not a cluster query',
+  capacity=dict(configured_workers=pool.limit,maximum_supported_workers=MAX_WORKERS,
+      tracked_live_processes=len(tracked),external_or_unidentified_locked_roles=sum(
+          held is True and role not in {key[0] for key in tracked} for role,held in role_locks.items()),
+      per_author_limit=1,free_slots=None,free_slots_reason='No atomic global ownership snapshot; locks and processes are sampled separately.'),
+  queue=dict(nonterminal_requests=len(candidates),observed_active_requests=sum((role,q.stem) in known for _,role,q in candidates),
+      pending_requests=len(pending),ownership_unknown_requests=len(unknown),
+      oldest_pending_wait_seconds=max(0,now-oldest[0]/1e9) if oldest else None,
+      oldest_pending_job_id=oldest[2].stem if oldest else None,
+      wait_time_basis='request_file_mtime; excludes known active jobs'),
+  active_jobs=active,active_phase_counts=dict(phases),
+  build=dict(configured_shared_lock_limit=1,shared_lock_held=_observed_lock(W/'.state/science-image-builds/builder.lock'),
+      observed_selftest_build_phase_jobs=phases['building'],observed_selftest_waiting_builder_jobs=phases['waiting_builder'],
+      oldest_observed_builder_wait_seconds=max((item['phase_age_seconds'] for item in active
+          if item['phase']=='waiting_builder' and item['phase_age_seconds'] is not None),default=None),
+      actual_docker_build_processes=None),
+  acs=dict(observed_selftest_execution_phase_jobs=phases['running_oracle']+phases['running_nop'],
+      actual_running_pods=None,global_cluster_limit_enforced=False,
+      local_limit_basis='At most one sequential oracle/nop job per worker; separate verifier Pods may overlap.',
+      excludes_independent_evaluator_jobs=True),
+  recent_terminal_results=dict(scope='most recent terminal receipts per author, ordered by file mtime',
+      maximum_per_role=terminal_sample_per_role,sampled=sampled,status_counts=dict(terminal_counts),
+      failure_classifications=dict(failure_counts),unreadable_receipts=unreadable),
+  observation_gaps=dict(unidentified_locked_roles=sorted(unknown_roles),
+      unreadable_role_locks=sorted(role for role,held in role_locks.items() if held is None)))
 
 def main():
  global STATE
  p=__import__('argparse').ArgumentParser();p.add_argument('--broker-config',type=Path,default=W/'.state/science-role-broker/config.json');p.add_argument('--state',type=Path,default=STATE)
  # Ten authors share this pool. All ten can overlap ACS execution while the
  # separate build slot keeps the local Docker daemon's workload bounded.
- p.add_argument('--workers',type=int,default=int(os.environ.get('GEWU_SELFTEST_WORKERS','10')))
+ p.add_argument('--workers',type=int,default=int(os.environ.get('GEWU_SELFTEST_WORKERS',str(DEFAULT_WORKERS))))
  p.add_argument('--single-request',type=Path,help=__import__('argparse').SUPPRESS);p.add_argument('--role',help=__import__('argparse').SUPPRESS)
  args=p.parse_args();STATE=args.state
- if not 1<=args.workers<=15:raise SystemExit('workers must be between 1 and 15')
+ if not 1<=args.workers<=MAX_WORKERS:raise SystemExit('workers must be between 1 and '+str(MAX_WORKERS))
  STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
  broker_config=json.loads(args.broker_config.read_text());roles=broker_config['roles']
  if args.single_request is not None:
@@ -265,7 +411,7 @@ def main():
  from queue_parallel import ActiveJobs
  with (STATE/'worker.lock').open('a') as lock:
   fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-  pool=ActiveJobs(args.workers);stopping=False
+  pool=ActiveJobs(args.workers);stopping=False;next_metrics=0
   def stop(_signum,_frame):
    nonlocal stopping
    stopping=True
@@ -276,10 +422,21 @@ def main():
   try:
    while not stopping:
     broker_config=json.loads(args.broker_config.read_text());roles=broker_config['roles']
-    schedule(pool,pending_requests(roles,STATE),broker_config,command_for)
+    candidates=pending_requests(roles,STATE)
+    schedule(pool,candidates,broker_config,command_for)
+    if time.monotonic()>=next_metrics:
+     try:atomic_json(STATE/'queue-status.json',queue_snapshot(roles,STATE,pool,candidates))
+     except (OSError,ValueError,TypeError) as error:
+      print('Selftest queue metrics unavailable: '+type(error).__name__,file=sys.stderr,flush=True)
+     next_metrics=time.monotonic()+METRICS_INTERVAL
     time.sleep(2)
   finally:
    pool.stop()
+   try:
+    receipt=queue_snapshot(roles,STATE,pool,pending_requests(roles,STATE))
+    receipt['supervisor_stopped']=True
+    atomic_json(STATE/'queue-status.json',receipt)
+   except (OSError,ValueError,TypeError):pass
    signal.signal(signal.SIGTERM,previous);signal.signal(signal.SIGINT,previous_int)
  return 0
 if __name__=='__main__':raise SystemExit(main())

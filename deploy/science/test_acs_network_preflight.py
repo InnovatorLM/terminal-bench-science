@@ -221,6 +221,28 @@ class NetworkPreflightTests(unittest.TestCase):
                 self.assertEqual(digest_tree(state / job / 'source/example'), source_hash)
                 self.assertEqual(digest_tree(source), source_hash)
 
+    def test_verifier_package_defects_are_task_errors_before_builder_and_acs(self):
+        cases=[('[verifier.environment]\ncpus=2\n',None,'tests/Dockerfile'),
+               ('schema_version="1.3"\n',lambda task:(task/'tests/test.sh').write_text(''),'tests/test.sh')]
+        for config,prepare,missing in cases:
+            with self.subTest(missing=missing),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                root=Path(raw)
+                source,role,job,request,entry,state,commit=self.queued_upload(root,config,prepare=prepare)
+                before=digest_tree(source)
+                with patch.object(worker,'W',root),patch.object(worker,'STATE',state), \
+                     patch.object(worker,'credential_values',return_value=[]), \
+                     patch.object(worker,'builder_slot') as builder,patch.object(worker,'owned_run') as run:
+                    worker.process('author-01',entry,request)
+                builder.assert_not_called();run.assert_not_called()
+                receipt=json.loads((role/'selftest/results'/(job+'.json')).read_text())
+                self.assertEqual(receipt['failure_owner'],'task')
+                self.assertEqual(receipt['stage'],'build_context_preflight')
+                self.assertFalse(receipt['cloud_execution_attempted'])
+                self.assertFalse(receipt['cloud_execution_started'])
+                self.assertEqual(receipt['docker_context_preflight']['missing_files'][0]['path'],missing)
+                self.assertEqual(receipt['source_commit'],commit)
+                self.assertEqual(digest_tree(source),before)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,24 @@
 
 2026-11-02：当前配置为 10 个按需 job 槽位，覆盖现有 10 个作者；同一作者同时只运行一个 self-test。启动器显式传入 `--workers 10`，可通过 `GEWU_SELFTEST_WORKERS` 覆盖。槽位上限不是预热容器数；没有请求时不会创建 job 子进程或 ACS Pod。
 
+## 2026-11-03 容量与观测补齐（代码完成，需部署后观察）
+
+代码默认仍为 10 个 worker，参数接受 1–15，不自动增加并发。每个作者同一时间只能有一个自测；oracle、nop 顺序执行。一个全局 builder 文件锁限制本机构建为一个。self-test 与正式 evaluator 没有共用 ACS Pod 信号量，因此不能把 self-test 的 worker 上限当作整个宇宙的云资源上限。
+
+替换 supervisor 后，旧子进程可能仍持有作者锁。新 supervisor 现在把这些存活锁计入保守容量，再领取新请求；不会因为自己的 `Popen` 表为空就补满另外十个任务。
+
+运行中的 supervisor 每 30 秒在所选宇宙的 `.state/gewu-multiverse/author-selftest/queue-status.json` 发布一个仅本机观察的快照：
+
+- 已追踪进程、外部或身份尚未定位的作者锁，及配置的 worker 数。
+- 非终态请求、已观察活动请求、待执行请求、所有权未知请求。最久等待以请求文件 mtime 计算，排除已确认活动任务；它不是作者的迭代计时。
+- 本机构建锁是否被占用、活动 worker 的 `building` / `waiting_builder` 阶段数与可观察的最久 builder 等待。
+- `running_oracle` / `running_nop` 阶段的 worker 数。`actual_running_pods` 保持 null，因为没有查询 Kubernetes；它不等于活跃 Pod 数，独立 verifier 可能产生额外 Pod。
+- 每个作者最近最多 20 个终态回执的状态与失败分类。样本范围明确标注；不把它冒充全历史计数，不读取或输出错误正文、凭证和完整日志。
+
+`free_slots` 也保持 null：进程和文件锁是非原子采样，快照不声称精确剩余槽位。`updated_at` 的年龄明确称为“最后一次状态写入年龄”，不是 heartbeat。正常退出时标记 `supervisor_stopped=true`；异常退出后应结合 `observed_at` 判断快照是否陈旧。
+
+缺 reward、失败清理和 worker 中断保留各自诊断，不折算为 oracle/nop 的零分；只有已有实际评分且不符合 oracle=1 / nop=0 时，才记录对应控制失败。这个指标用于定位平台或题包问题，不代表题目难度。
+
 ## 本机和云端开销
 
 空队列实测：10 槽位的主 worker RSS 为 28.2 MiB，4 秒采样的 CPU 时间增量为 0，子进程数为 0。该采样只能说明空闲控制进程很轻，不能代表构建或运行任务时的开销。

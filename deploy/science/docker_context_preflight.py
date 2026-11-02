@@ -12,16 +12,18 @@ import shlex
 class DockerContextError(ValueError):
     def __init__(self, report):
         self.report = report
-        missing = report['missing_sources']
-        super().__init__('Missing Docker build context inputs: ' + '; '.join(
-            f"{row['dockerfile']}:{row['line']} {row['source']}" for row in missing))
+        details = [f"{row['dockerfile']}:{row['line']} {row['source']}"
+                   for row in report['missing_sources']]
+        details.extend(f"{row['path']} ({row['reason']})" for row in report.get('missing_files', []))
+        super().__init__('Invalid task build/verifier inputs: ' + '; '.join(details))
 
 
 def inspect_context(directory, label):
     directory = Path(directory)
     dockerfile = directory / 'Dockerfile'
     result = dict(dockerfile=label + '/Dockerfile', checked_sources=[],
-                  missing_sources=[], deferred=[], docker_executed=False)
+                  missing_sources=[], deferred=[], docker_executed=False,
+                  dockerfile_present=dockerfile.is_file())
     if not dockerfile.is_file():
         return result
     source = dockerfile.read_text()
@@ -84,11 +86,66 @@ def inspect_context(directory, label):
     return result
 
 
+def verifier_build_plan(task, config):
+    """Preserve Harbor's inheritance, but never discard a declared verifier image.
+
+    This builder accepts Dockerfile-authored tasks. When no dedicated verifier
+    environment was declared, its historical FROM-official fallback is valid
+    for both shared mode and a fresh separate copy of the agent environment.
+    A declared environment must instead supply its own image or Dockerfile.
+    When both are present the explicit image wins, matching Harbor's prebuilt
+    image behavior; the unused Dockerfile is recorded, not silently substituted.
+    """
+    from harbor.models.task.verifier_mode import resolve_task_verifier_mode
+    task = Path(task)
+    environment = config.verifier.environment
+    image = environment.docker_image if environment is not None else None
+    dockerfile = task / 'tests/Dockerfile'
+    plan = dict(mode=resolve_task_verifier_mode(config).value,
+                declared_environment=environment is not None,
+                tests_materialization_verified=False, runtime_verified=False)
+    if image:
+        return dict(plan, source='declared_image', image=image,
+                    dockerfile_present=dockerfile.is_file(),
+                    dockerfile_used=False)
+    if dockerfile.is_file():
+        return dict(plan, source='dockerfile', dockerfile='tests/Dockerfile', dockerfile_used=True)
+    if environment is None:
+        return dict(plan, source='inherited_agent_image', dockerfile_used=False)
+    return dict(plan, source='missing', dockerfile_used=False)
+
+
 def require_contexts(task):
-    contexts = [inspect_context(Path(task) / label, label) for label in ('environment', 'tests')]
+    from harbor.models.task.config import TaskConfig
+    task = Path(task)
+    # This is also called directly by the image builder, without inspect_task.
+    # A missing verifier entrypoint must fail before pull/build/publication.
+    missing_files = []
+    for name in ('task.toml', 'environment/Dockerfile', 'tests/test.sh'):
+        path = task / name
+        if not path.is_file() or not path.read_bytes().strip():
+            missing_files.append(dict(path=name, reason='missing_or_empty_required_file'))
+    config = None
+    plan = None
+    if not any(row['path'] == 'task.toml' for row in missing_files):
+        config = TaskConfig.model_validate_toml((task / 'task.toml').read_text())
+        plan = verifier_build_plan(task, config)
+        if plan['source'] == 'missing':
+            missing_files.append(dict(path='tests/Dockerfile',
+                reason='declared_verifier_environment_requires_dockerfile_or_image'))
+        elif plan['source'] == 'dockerfile' and not (task / 'tests/Dockerfile').read_bytes().strip():
+            missing_files.append(dict(path='tests/Dockerfile', reason='empty_verifier_dockerfile'))
+    labels = ['environment']
+    # Do not reject unused COPY inputs when a declared image is the verifier
+    # definition. The required entrypoint is checked separately; its actual
+    # upload/baked materialization remains an execution-template decision.
+    if plan is None or plan['source'] == 'dockerfile':
+        labels.append('tests')
+    contexts = [inspect_context(task / label, label) for label in labels]
     result = dict(contexts=contexts, missing_sources=[row for context in contexts
-                  for row in context['missing_sources']], docker_executed=False,
-                  runtime_verified=False)
-    if result['missing_sources']:
+                  for row in context['missing_sources']], missing_files=missing_files,
+                  verifier_build=plan, docker_executed=False, runtime_verified=False,
+                  failure_owner='task' if missing_files or any(context['missing_sources'] for context in contexts) else None)
+    if result['missing_sources'] or missing_files:
         raise DockerContextError(result)
     return result

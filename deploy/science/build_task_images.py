@@ -91,7 +91,43 @@ def build_failure_details(output):
     value=json.loads(root_file(path).read_text())
     if value.get('error_class')==BASE_RESOLUTION_FAILURE['error_class']:
         return dict(BASE_RESOLUTION_FAILURE)
+    if value.get('error_class')=='task_build_context_invalid':
+        return {key:value[key] for key in ('error_class','failure_owner','stage',
+                'retry_requires_task_change','cloud_execution_started','remediation') if key in value}
     return {}
+
+
+def preflight_build_inputs(snapshot,output):
+    """Report task defects before any Docker or registry operation."""
+    from docker_context_preflight import require_contexts,DockerContextError
+    try:
+        report=require_contexts(snapshot)
+    except DockerContextError as error:
+        atomic_json(Path(output)/'build-context-preflight.json',error.report)
+        atomic_json(Path(output)/'failure.json',dict(error_class='task_build_context_invalid',
+            failure_owner='task',stage='build_context_preflight',retry_requires_task_change=True,
+            cloud_execution_started=False,remediation='Repair the missing task/verifier files or build inputs in the source commit; no ACS execution was attempted.'))
+        raise
+    atomic_json(Path(output)/'build-context-preflight.json',report)
+    return report
+
+
+def prepare_verifier_context(snapshot,output,plan,python_base,resolve_base):
+    """Make the effective context from the definition selected in preflight."""
+    if plan['source']=='inherited_agent_image':return None,[],[]
+    target=Path(output)/'tests-effective'
+    if plan['source']=='dockerfile':
+        shutil.copytree(Path(snapshot)/'tests',target)
+    elif plan['source']=='declared_image':
+        image=plan['image']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@-]*',image):
+            raise ValueError('Invalid declared verifier image reference')
+        target.mkdir()
+        (target/'Dockerfile').write_text('FROM '+image+'\n')
+    else:raise ValueError('Unresolved verifier build definition')
+    resolution=pin_bases(target/'Dockerfile',python_base,resolve_base)
+    bases=validate_dockerfile(target/'Dockerfile',python_base)
+    return target,bases,resolution
 
 
 @contextlib.contextmanager
@@ -233,9 +269,8 @@ def main():
     with builder_slot(args.lock_fd):
         output.mkdir(mode=0o700)
         snapshot=output/'task';task_hash=freeze(args.repo,args.commit,args.task_path,snapshot)
+        preflight=preflight_build_inputs(snapshot,output)
         env_hash=validate_context(snapshot/'environment');tests_hash=validate_context(snapshot/'tests')
-        from docker_context_preflight import require_contexts
-        require_contexts(snapshot)
         docker=Docker(output)
         def resolve_base(image):
             return resolve_base_image(docker,image,os.environ.get('GEWU_DOCKER_LIBRARY_MIRROR'))
@@ -243,15 +278,13 @@ def main():
         shutil.copytree(snapshot/'environment',effective_environment)
         base_resolution=pin_bases(effective_environment/'Dockerfile',args.python_base,resolve_base)
         bases=validate_dockerfile(effective_environment/'Dockerfile',args.python_base)
-        effective_tests=output/'tests-effective'
-        if (snapshot/'tests/Dockerfile').exists():
-            shutil.copytree(snapshot/'tests',effective_tests)
-            base_resolution+=pin_bases(effective_tests/'Dockerfile',args.python_base,resolve_base)
-            verifier_bases=validate_dockerfile(effective_tests/'Dockerfile',args.python_base)
-        else:verifier_bases=[]
+        effective_tests,verifier_bases,verifier_resolution=prepare_verifier_context(
+            snapshot,output,preflight['verifier_build'],args.python_base,resolve_base)
+        base_resolution+=verifier_resolution
         identity={'source_commit':args.commit,'source_task_path':args.task_path,'task_name':task_name,'snapshot_sha256':task_hash,'environment_context_sha256':env_hash,'tests_context_sha256':tests_hash,'python_base':args.python_base,'runtime_source_bases':bases,'verifier_source_bases':verifier_bases,'scientific_acceptance':False,'oracle_leakage_review_required':True,'hermetic_build':False,'published':False}
         atomic_json(output/'identity.json',identity)
         identity['base_resolution']=base_resolution
+        identity['verifier_build']=preflight['verifier_build']
         identity['official_library_mirror']=os.environ.get('GEWU_DOCKER_LIBRARY_MIRROR')
         identity['environment_effective_context_sha256']=digest_tree(effective_environment)
         atomic_json(output/'identity.json',identity)
@@ -292,14 +325,16 @@ def main():
         if args.harness!='codex':(runtime/'Dockerfile').write_text(dockerfile)
         runtime_hash=validate_context(runtime)
         build('runtime',runtime,REGISTRY+'/'+task_name+':'+(codex_metadata['runtime_tag'] if codex_metadata else 'minisweagent-2.2.8'),runtime_hash)
-        if (snapshot/'tests/Dockerfile').exists():
+        if effective_tests is not None:
             verifier_context=effective_tests
         else:
             verifier_context=output/'verifier';verifier_context.mkdir();(verifier_context/'Dockerfile').write_text('FROM '+official+'\n')
         verifier_hash=validate_context(verifier_context)
         build('verifier',verifier_context,REGISTRY+'/'+task_name+'-verifier:official',verifier_hash)
         if digest_tree(snapshot)!=task_hash or digest_tree(snapshot/'environment')!=env_hash or digest_tree(snapshot/'tests')!=tests_hash:raise ValueError('Frozen source changed during image build')
-        atomic_json(output/'receipt.json',{**identity,'images':images,'runtime_adapter_context_sha256':runtime_hash,'verifier_effective_context_sha256':verifier_hash,'harness_versions':(codex_metadata['harness_versions'] if codex_metadata else HARNESS),'harness':args.harness,'native_binaries':(codex_metadata['native_binaries'] if codex_metadata else {}),'published':args.publish,'registry_config_linkage_verified':args.publish,'standard_tests_uploaded_by_harbor':not (snapshot/'tests/Dockerfile').exists(),'scientific_acceptance':False})
+        # A Dockerfile's presence does not establish whether Harbor will upload
+        # tests or use baked tests. That is a later execution-template choice.
+        atomic_json(output/'receipt.json',{**identity,'images':images,'runtime_adapter_context_sha256':runtime_hash,'verifier_effective_context_sha256':verifier_hash,'harness_versions':(codex_metadata['harness_versions'] if codex_metadata else HARNESS),'harness':args.harness,'native_binaries':(codex_metadata['native_binaries'] if codex_metadata else {}),'published':args.publish,'registry_config_linkage_verified':args.publish,'standard_tests_uploaded_by_harbor':None,'tests_materialization_verified':False,'scientific_acceptance':False})
         print(json.dumps({'source_commit':args.commit,'task_name':task_name,'published':args.publish,'receipt_complete':True,'scientific_acceptance':False}))
 
 

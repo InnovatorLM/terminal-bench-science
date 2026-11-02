@@ -4,13 +4,107 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+import contextlib
+import io
+import shutil
+from unittest.mock import patch
 from evaluation_queue import W
 from build_task_images import validate_context,validate_dockerfile,receipt_labels,publish_image,validate_build_receipt,REGISTRY,HARNESS,select_base_digest,resolve_base_image,BaseImageResolutionError,build_failure_details
+import build_task_images as builder
+from docker_context_preflight import require_contexts,DockerContextError
 
 BASE='public.ecr.aws/docker/library/python@sha256:'+'a'*64
 
 
 class BuildTests(unittest.TestCase):
+    def verifier_fixture(self,root,config=''):
+        values={'task.toml':'schema_version="1.3"\n'+config,'environment/Dockerfile':'FROM scratch\n',
+                'tests/test.sh':'#!/bin/bash\nexit 0\n'}
+        for name,value in values.items():
+            path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(value)
+
+    def test_direct_builder_rejects_missing_verifier_before_docker_creation(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);source=root/'source';output=root/'build'
+            self.verifier_fixture(source,'[verifier.environment]\ncpus=2\n')
+            def freeze(_repo,_commit,_task,target):
+                shutil.copytree(source,target)
+                return builder.digest_tree(target)
+            argv=['build_task_images.py','--repo',str(root),'--commit','a'*40,'--task-path','task',
+                  '--output',str(output),'--python-base',BASE]
+            with patch('sys.argv',argv),patch.object(builder,'freeze',side_effect=freeze), \
+                 patch.object(builder,'builder_slot',return_value=contextlib.nullcontext()), \
+                 patch.object(builder.os,'geteuid',return_value=0),patch.object(builder,'Docker') as docker:
+                with self.assertRaises(DockerContextError):builder.main()
+            docker.assert_not_called()
+            failure=build_failure_details(output)
+            self.assertEqual(failure['error_class'],'task_build_context_invalid')
+            self.assertEqual(failure['failure_owner'],'task')
+            self.assertFalse(failure['cloud_execution_started'])
+
+    def test_effective_verifier_context_respects_declared_image_over_dockerfile(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);task=root/'task';out=root/'output';out.mkdir()
+            image='registry.example/verifier:1';pinned='registry.example/verifier@sha256:'+'b'*64
+            self.verifier_fixture(task,'[verifier.environment]\ndocker_image="'+image+'"\n')
+            (task/'tests/Dockerfile').write_text('FROM scratch\nCOPY absent /never-used\n')
+            plan=require_contexts(task)['verifier_build']
+            with patch.object(builder,'resolve_base_image',side_effect=AssertionError('no network')):
+                seen=[]
+                def resolve(ref):seen.append(ref);return pinned
+                context,bases,resolution=builder.prepare_verifier_context(task,out,plan,BASE,resolve)
+            self.assertEqual(seen,[image])
+            self.assertEqual(bases,[pinned])
+            self.assertEqual((context/'Dockerfile').read_text(),'FROM '+pinned+'\n')
+            self.assertEqual(resolution,[{'source':image,'resolved':pinned}])
+            self.assertNotIn('absent',(context/'Dockerfile').read_text())
+
+    def test_effective_verifier_uses_local_dockerfile_or_explicit_inheritance(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);task=root/'task';out=root/'output';out.mkdir()
+            self.verifier_fixture(task,'[verifier]\nenvironment_mode="separate"\n')
+            inherited=require_contexts(task)['verifier_build']
+            with patch.object(builder,'resolve_base_image',side_effect=AssertionError('no network')):
+                self.assertEqual(builder.prepare_verifier_context(task,out,inherited,BASE,None),(None,[],[]))
+            (task/'tests/Dockerfile').write_text('FROM scratch\nCOPY test.sh /tests/test.sh\n')
+            plan=require_contexts(task)['verifier_build']
+            context,bases,resolution=builder.prepare_verifier_context(task,out,plan,BASE,None)
+            self.assertEqual(bases,['scratch'])
+            self.assertEqual(resolution,[])
+            self.assertEqual((context/'test.sh').read_bytes(),(task/'tests/test.sh').read_bytes())
+
+    def test_complete_offline_build_records_source_without_claiming_test_upload(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);source=root/'source';output=root/'build'
+            image='registry.example/verifier@sha256:'+'b'*64
+            self.verifier_fixture(source,'[verifier.environment]\ndocker_image="'+image+'"\n')
+            (source/'tests/Dockerfile').write_text('FROM scratch\nCOPY unused-input /unused\n')
+            class FakeDocker:
+                def __init__(self,out):self.output=out;self.images={}
+                def run(self,args,json_output=False):
+                    if args[0]=='build':
+                        tag=args[args.index('-t')+1]
+                        labels=dict(args[i+1].split('=',1) for i,value in enumerate(args) if value=='--label')
+                        self.images[tag]={'Id':'sha256:'+'c'*64,'Config':{'Labels':labels}}
+                        return ''
+                    if args[:2]==['image','inspect']:return [self.images[args[2]]]
+                    raise AssertionError('Unexpected Docker or registry operation')
+            def freeze(_repo,_commit,_task,target):
+                shutil.copytree(source,target);return builder.digest_tree(target)
+            argv=['build_task_images.py','--repo',str(root),'--commit','a'*40,'--task-path','task',
+                  '--output',str(output),'--python-base',BASE,'--harness','mini-swe-agent']
+            with patch('sys.argv',argv),patch.object(builder,'freeze',side_effect=freeze), \
+                 patch.object(builder,'builder_slot',return_value=contextlib.nullcontext()), \
+                 patch.object(builder.os,'geteuid',return_value=0),patch.object(builder,'Docker',FakeDocker), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                builder.main()
+            receipt=json.loads((output/'receipt.json').read_text())
+            self.assertEqual(receipt['verifier_build']['source'],'declared_image')
+            self.assertEqual(receipt['verifier_source_bases'],[image])
+            self.assertIsNone(receipt['standard_tests_uploaded_by_harbor'])
+            self.assertFalse(receipt['tests_materialization_verified'])
+            self.assertFalse(receipt['scientific_acceptance'])
+
     def test_base_resolution_uses_requested_repository_among_aliases(self):
         digest='sha256:'+'a'*64
         self.assertEqual(select_base_digest('public.ecr.aws/docker/library/python:3.12-slim',
