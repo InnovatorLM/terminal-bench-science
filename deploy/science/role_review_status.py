@@ -31,6 +31,16 @@ def report(home,workspace,state,stage,reason,recommendation=None):
             record=previous
             terminal_record=True
     if not terminal_record:
+        if state=='completed' and recommendation=='accept':
+            from role_evaluation_batch import summary
+            evaluation=home.parents[1]/'evaluation'
+            batch=summary(assignment,evaluation/'results',evaluation/'inbox')
+            if not batch['complete']:
+                raise ValueError('Acceptance requires five valid evidence-backed rollouts. Diagnose invalid runs; '
+                                 'use waiting_platform for missing platform evidence or waiting_author for task defects.')
+            if not batch['difficulty_threshold_met']:
+                raise ValueError('Acceptance requires pass rate <=60%; >=80% must be rejected. '
+                                 'Preserve all five results and report completed --recommendation reject.')
         if state=='waiting_platform' and stage in ('rollouts','five_rollouts','acs_rollouts'):
             from role_evaluation_batch import summary
             evaluation=home.parents[1]/'evaluation'

@@ -139,7 +139,8 @@ class DispatchTests(unittest.TestCase):
             m.publish_author_feedback({},row,cfg)
             feedback=json.loads((root/'author-10/review-feedback.json').read_text())
             self.assertEqual(feedback['review_recommendation'],'accept')
-            self.assertEqual(feedback['formal_decision'],'not_recorded')
+            self.assertEqual(feedback['formal_decision'],'pending_evidence')
+            self.assertTrue(feedback['author_must_pause'])
             self.assertEqual(m.completed_versions({key:row},'author-10','tasks/one','new')[0]
                              ['review_recommendation'],'accept')
 

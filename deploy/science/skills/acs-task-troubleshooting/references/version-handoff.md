@@ -33,3 +33,7 @@ role-acs-selftest request-review "$JOB" --previous-job "$PRIOR_JOB" \
 它只补充审核意图及迭代关联，不构建镜像、不调用 ACS 或模型、不修改原 request/status/build、commit 和快照。查询返回的 `review-...` 请求 ID 或原 job 的 `review_handoff`，等待派单；不要再调用 `submit` 追赶交接状态。旧 job 必须本来就绑定 idea，前次 job 必须是同一作者、同一题目的已完成容器自测。原记录缺 idea 时不能追溯补造，构建失败也不能冒充已完成容器测试。
 
 交接成功不等于科学接收。`completed` 是流程状态，`review_recommendation` 是 evaluator 建议，`formal_decision` 是正式接收记录；缺失建议的旧回执显示 `unrecorded`，不能根据默认的 `scientific_acceptance=false` 推断拒绝。预算未知、历史轨迹或实际 Pod 信息缺失等限制应保留；补交审核不能替代真实迭代、oracle/nop 和固定版本证据。
+
+完成科学审核且五次有效评测满足要求后，evaluator 使用 `role-review-status completed --stage final_review --recommendation accept --reason '具体结论及证据'` 明确提交结论。平台自动核对冻结版本、五次原始与公开轨迹摘要、实际 Pod 镜像/资源和清理记录；通过后生成 `formal_decision=accepted`，无需另一轮人工批准。五次正确率达到 80% 必须拒绝；未诊断超时不能计作模型错误，也不能据此提交 accept。
+
+作者若收到 `stage=formal_acceptance_evidence`、`formal_decision=pending_evidence`，表示评审建议接收而平台证据登记尚有具体缺项，`acceptance_blockers` 列出原因；保留版本并等待平台处理，不重建、重复自测或猜测已被拒绝。curator 从 `/review-acceptance-handoffs.json` 查看待平台处理的版本。补齐后平台会重新核对并自动登记。正式接收后按 `/post-acceptance.json` 回原 proposal/PR 回复 Markdown 经验总结，再开始下一题。

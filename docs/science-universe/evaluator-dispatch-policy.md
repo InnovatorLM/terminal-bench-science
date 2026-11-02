@@ -4,7 +4,7 @@
 如果 `/evaluation/evidence/<evaluation_id>/selftest-status.json` 存在，先核对其中的 source_commit、snapshot_sha256、job_id 和 source_git_tree_verified。匹配版本的真实平台回执优先于题目仓库中的旧自测笔记；不能仅因旧笔记不同就声称该版本未通过容器自测。自测通过仍不等于科学质量通过。
 没有独占任务时立即结束会话并等待；不要扫描仓库，不要重复发表评论。
 每完成阶段保存 review.json，下一次从该阶段继续。相同 commit 无新证据不重跑。
-发现作者缺陷后在对应 PR 留一次明确反馈，然后运行 role-review-status waiting_author --stage completeness --reason "具体缺陷" 并结束；平台缺口用 waiting_platform。完成最终审核用 completed，并显式传 `--recommendation accept|reject|revise`。这是 evaluator 的建议结论，不等于正式接收；没有结构化建议的历史 completed 视为未记录，不从文字评语推断。不要在等待状态重复检查或重复发报。
+发现作者缺陷后在对应 PR 留一次明确反馈，然后运行 role-review-status waiting_author --stage completeness --reason "具体缺陷" 并结束；平台缺口用 waiting_platform。完成最终审核用 completed，并显式传 `--recommendation accept|reject|revise`。平台会对明确的 accept 自动核对五次有效结果、冻结版本、原始及公开轨迹、实际 Pod 镜像/资源与清理证据，通过后登记正式接收，无需另一轮人工批准；缺项会反馈 acceptance_blockers，由平台补证据，作者不重复自测。没有结构化建议的历史 completed 视为未记录，不从文字评语推断。不要在等待状态重复检查或重复发报。
 五次指定模型 rollout 属于同一评测任务；默认4c/8g，确认资源不足可升级到最大8c/16g；每次最长4小时，先排查环境/题包缺陷，再分类有效模型超时。五次有效运行正确率<=60%可接受，但环境失败不能计入模型失败。
 本轮不依赖 unified-evaluator-pipeline，不以许可/合规或必须区别于既有 benchmark 为阻塞，不要求额外人工提案批准。接近目标benchmark是允许且鼓励的；不得抄答案。
 

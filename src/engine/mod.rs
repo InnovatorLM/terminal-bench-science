@@ -3398,7 +3398,7 @@ fn author_review_pause_reason(root: &Path) -> Option<&'static str> {
             .all(|field| !feedback[*field].is_null() && request[*field] == feedback[*field])
             .then_some("waiting for the assigned evaluator review");
     }
-    if feedback["stage"] == "five_rollouts" {
+    if matches!(feedback["stage"].as_str(), Some("five_rollouts" | "formal_acceptance_evidence")) {
         if current["stage"] != feedback["stage"]
             || feedback["evaluation_id"].as_str().is_none_or(str::is_empty)
             || feedback["snapshot_sha256"].as_str().is_none_or(str::is_empty)
@@ -3413,7 +3413,11 @@ fn author_review_pause_reason(root: &Path) -> Option<&'static str> {
             .all(|field| !feedback[*field].is_null()
                 && current[*field] == feedback[*field]
                 && request[*field] == feedback[*field])
-            .then_some("waiting for five assigned evaluation rollouts");
+            .then_some(if feedback["stage"] == "formal_acceptance_evidence" {
+                "waiting for formal acceptance evidence verification"
+            } else {
+                "waiting for five assigned evaluation rollouts"
+            });
     }
     if feedback["feedback_source"] != "selftest_handoff"
         || current["feedback_source"] != "selftest_handoff" {
@@ -3572,6 +3576,21 @@ mod review_assignment_tests {
             assert!(!author_review_paused(&root),"stale {field} paused newer work");
             fs::write(root.join(file),value.to_string()).unwrap();
         }
+        // The reviewer has finished; a platform evidence gap still parks
+        // this exact author request until the formal decision is delivered.
+        let mut pending=value.clone();pending["stage"]=serde_json::json!("formal_acceptance_evidence");
+        fs::write(root.join("review-feedback.json"),pending.to_string()).unwrap();
+        fs::write(root.join("review-current-assignment.json"),pending.to_string()).unwrap();
+        assert_eq!(author_review_pause_reason(&root),Some("waiting for formal acceptance evidence verification"));
+        let mut newer=value.clone();newer["job_id"]=serde_json::json!("new-job");
+        fs::write(root.join("selftest/current-request.json"),newer.to_string()).unwrap();
+        assert!(!author_review_paused(&root));
+        fs::write(root.join("selftest/current-request.json"),value.to_string()).unwrap();
+        pending["state"]=serde_json::json!("completed");pending["author_must_pause"]=serde_json::json!(false);
+        pending["formal_decision"]=serde_json::json!("accepted");
+        fs::write(root.join("review-feedback.json"),pending.to_string()).unwrap();
+        fs::write(root.join("review-current-assignment.json"),pending.to_string()).unwrap();
+        assert!(!author_review_paused(&root));
         let _=fs::remove_dir_all(root);
     }
 

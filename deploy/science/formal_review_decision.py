@@ -50,9 +50,10 @@ def apply(state, ledger):
         row.update(scientific_acceptance=True, formal_decision='accepted',
                    acceptance_scope='completed_frozen_version_only',
                    formal_decision_sha256=hashlib.sha256(raw).hexdigest())
+        row.pop('acceptance_blockers', None)
 
 
-def record(state, key, operator, rationale):
+def record(state, key, operator, rationale, *, evidence=None):
     if os.geteuid() != 0:
         raise PermissionError('Formal decisions require the operator account')
     state = Path(state)
@@ -62,6 +63,8 @@ def record(state, key, operator, rationale):
                    review_reason_sha256=hashlib.sha256(row.get('reason', '').encode()).hexdigest(),
                    operator=operator, rationale=rationale, decided_at=time.time(),
                    **{field: key if field == 'key' else row[field] for field in IDENTITY})
+    if evidence is not None:
+        receipt['verified_evidence'] = evidence
     validate(dict(row, key=key), receipt)
     directory = state / 'formal-decisions'
     directory.mkdir(mode=0o700, exist_ok=True)

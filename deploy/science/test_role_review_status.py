@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from role_review_status import report
 
 W=Path('/mnt/data/zhanglinfeng/workspace')
@@ -42,8 +43,9 @@ class ReviewStatusTests(unittest.TestCase):
             root=Path(raw);home=root/'home';workspace=root/'workspace';home.mkdir();workspace.mkdir()
             assignment=home/'review-assignment.json'
             assignment.write_text(json.dumps({'key':'old:task','generation':5}))
-            completed=report(home,workspace,'completed','final_review','3/5 valid runs',
-                             recommendation='accept')
+            with patch('role_evaluation_batch.summary',return_value={'complete':True,'difficulty_threshold_met':True}):
+                completed=report(home,workspace,'completed','final_review','3/5 valid runs',
+                                 recommendation='accept')
             self.assertEqual(completed['review_recommendation'],'accept')
             self.assertEqual(report(home,workspace,'completed','final_review','retry',
                                     recommendation='reject'),completed)

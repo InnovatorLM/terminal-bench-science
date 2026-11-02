@@ -156,8 +156,14 @@ def _publish_author_feedback_locked(pr,row,config,root):
              'updated_at':time.time()}
     if row.get('state')=='completed':
         payload['review_recommendation']=row.get('review_recommendation','unrecorded')
-        payload['formal_decision']='accepted' if row.get('scientific_acceptance') is True else 'not_recorded'
+        payload['formal_decision']='accepted' if row.get('scientific_acceptance') is True else row.get('formal_decision','not_recorded')
         payload['scientific_acceptance']=row.get('scientific_acceptance') is True
+        if row.get('review_recommendation')=='accept' and not payload['scientific_acceptance']:
+            payload.update(state='waiting_platform',stage='formal_acceptance_evidence',
+                           formal_decision='pending_evidence',author_must_pause=True,
+                           acceptance_blockers=row.get('acceptance_blockers',['verification_pending']),
+                           next_action='The evaluator recommended acceptance; platform evidence checks are pending. '
+                           'Preserve this frozen task and wait for the specific evidence repair; do not rebuild or repeat self-tests.')
         if payload['scientific_acceptance']:
             payload['post_acceptance_required']=True
             prior=existing if existing.get('key')==key and accepted(existing) else {}
@@ -371,6 +377,12 @@ def advance_review(key,row,config,now=None,role_available=True):
             recommendation=status.get('review_recommendation','unrecorded')
             row['review_recommendation']=(recommendation if recommendation in
                                           ('accept','reject','revise') else 'unrecorded')
+            # Retain the authenticated completion before the role takes a new task.
+            row['review_completion']=dict(key=key,generation=row['generation'],role=row['role'],
+                review_recommendation=row['review_recommendation'],
+                reason_sha256=hashlib.sha256(row['reason'].encode()).hexdigest(),
+                status_sha256=hashlib.sha256(json.dumps(status,sort_keys=True).encode()).hexdigest(),
+                updated_at=status['updated_at'])
         else:row.pop('review_recommendation',None)
     elif row['state']=='reviewing' and now-float(row['assigned_at'])>REVIEW_ACTIVITY_TIMEOUT:
         row['evaluator_activity_confirmed'] = False
@@ -554,11 +566,35 @@ def publish_version_handoffs(config, handoffs):
         path=Path(config['roles']['curator']['root'])/'review-version-handoffs.json'
         atomic(path,payload);path.chmod(0o644)
 
+def finalize_acceptances(config,ledger):
+    from review_acceptance import finalize
+    from deployment_paths import universe_root
+    from evaluation_queue import root_file
+    candidates=any(row.get('state')=='completed' and row.get('review_recommendation')=='accept'
+                   and row.get('scientific_acceptance') is not True for row in ledger.values())
+    blocked={}
+    if candidates:
+        queue=json.loads(root_file(universe_root(W)/'.config/science-evaluation/queue.json').read_text())
+        # record() reads the durable completed state; receipt-first publication
+        # recovers through apply() after an interrupted dispatcher cycle.
+        atomic(STATE/'ledger.json',ledger)
+        blocked=finalize(STATE,ledger,config,Path(queue['state']),registered_execution)
+    atomic(STATE/'pending-acceptances.json',blocked)
+    if 'curator' in config['roles']:
+        path=Path(config['roles']['curator']['root'])/'review-acceptance-handoffs.json'
+        atomic(path,dict(owner='platform',pending=blocked));path.chmod(0o644)
+    for key,row in ledger.items():
+        if row.get('review_recommendation')=='accept':
+            publish_author_feedback({},dict(row,key=key),config)
+    atomic(STATE/'ledger.json',ledger)
+
 def reconcile(api,config,ledger):
     from deployment_paths import universe_root
     from selftest_review_dispatch import consume
     from formal_review_decision import apply
     apply(STATE, ledger)
+    # Local completion must progress even when Forgejo is temporarily slow.
+    finalize_acceptances(config,ledger)
     bound={key:row for key,row in ledger.items() if row.get('proposal_thread') or row.get('pr')}
     sync_post_acceptance(api,config,bound,[])
     atomic(STATE/'ledger.json',ledger)
@@ -706,6 +742,9 @@ def reconcile(api,config,ledger):
         publish_author_feedback(pr,row,config)
     atomic(STATE/'pending-submissions.json',pending)
     publish_version_handoffs(config,handoffs)
+    atomic(STATE/'ledger.json',ledger)
+    finalize_acceptances(config,ledger)
+    sync_post_acceptance(api,config,ledger,pulls)
     atomic(STATE/'ledger.json',ledger)
 
 def main():
