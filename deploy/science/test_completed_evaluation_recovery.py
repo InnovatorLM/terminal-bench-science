@@ -71,5 +71,59 @@ class CompletedRecoveryTests(unittest.TestCase):
         preserved=list(self.job.glob('publication-before-recovery-*/partial.txt'))
         self.assertEqual(len(preserved),1);self.assertEqual(preserved[0].read_text(),'original interrupted publication')
 
+    def test_recovery_refreshes_review_once_with_original_batch_and_preserved_defects(self):
+        import review_dispatcher as d
+        from role_evaluation_batch import requests
+        home=self.root/'role/home/role';home.mkdir(parents=True)
+        cfg={'roles':{'evaluator-01':{'root':str(self.root/'role'),'uid':os.getuid(),'gid':os.getgid()}}}
+        row=dict(key='commit:tasks/example',commit='a'*40,task='tasks/example',role='evaluator-01',
+                 generation=0,state='waiting_platform',stage='five_rollouts',assigned_at=100,
+                 evaluation_id='task-v1',snapshot_sha256='a'*64)
+        batch=requests(row)
+        for index,request in enumerate(batch):
+            result=dict(request,status='solver_complete',reward=1,n_errors=0,
+                        evidence_complete=True,source_version_bound=True,cleanup_confirmed=True)
+            if index==0:result.update(status='interrupted',reward=None)
+            (self.results/(request['job_id']+'.json')).write_text(json.dumps(result))
+        d.advance_review(row['key'],row,cfg,now=200)
+        self.assertEqual(row['generation'],1)
+        status=dict(key=row['key'],generation=1,state='waiting_author',stage='completeness',
+                    reason='Existing verifier defect; one result unavailable.',updated_at=201)
+        (home/'review-status.json').write_text(json.dumps(status))
+        (home/'activity-receipt.json').write_text(json.dumps(dict(status,receipt_type='evaluator-activity-v1')))
+        result=dict(batch[0],status='solver_complete',reward=1,n_errors=0,
+                    evidence_complete=True,source_version_bound=True,cleanup_confirmed=True)
+        (self.results/(batch[0]['job_id']+'.json')).write_text(json.dumps(result))
+        updates=[dict(job_id=batch[0]['job_id'],recovery_sha256='b'*64)]
+        with patch('recover_completed_evaluation.pending_review_updates',return_value=updates):
+            d.advance_review(row['key'],row,cfg,now=202,role_available=False)
+            self.assertEqual(row['state'],'waiting_author');self.assertEqual(row['reason'],status['reason'])
+            d.advance_review(row['key'],row,cfg,now=203)
+            self.assertEqual(row['generation'],2);self.assertEqual(row['stage'],'rollout_results_ready')
+            self.assertEqual(requests(row),batch)
+            self.assertEqual(row['reviews_before_publication_recovery'][0]['reason'],status['reason'])
+            d.advance_review(row['key'],row,cfg,now=204)
+            self.assertEqual(row['generation'],2)
+
+    def test_recovery_notification_requires_exact_operator_proof_and_is_deduplicated(self):
+        from recover_completed_evaluation import pending_review_updates
+        from role_evaluation_batch import requests
+        row=dict(key='commit:tasks/example',commit='a'*40,task='tasks/example',role='evaluator-01',
+                 generation=2,batch_generation=0,evaluation_id='task-v1',snapshot_sha256='a'*64)
+        batch=requests(row)
+        state=self.root/'.state/gewu-multiverse/evaluation-queue';state.mkdir(parents=True)
+        proofs=[dict(job_id=batch[0]['job_id'],kind='completed_execution_publication_recovery',
+                     recovered_status='solver_complete'),
+                dict(job_id='wrong',kind='completed_execution_publication_recovery',recovered_status='solver_complete'),
+                dict(job_id=batch[2]['job_id'],kind='untrusted',recovered_status='solver_complete'),[],
+                dict(job_id=batch[4]['job_id'],kind='completed_execution_publication_recovery',recovered_status='interrupted')]
+        for request,proof in zip(batch,proofs):
+            path=state/request['job_id'];path.mkdir();(path/'publication-recovery.json').write_text(json.dumps(proof))
+        with patch('deployment_paths.universe_root',return_value=self.root):
+            updates=pending_review_updates(row)
+            self.assertEqual(len(updates),1);self.assertEqual(updates[0]['job_id'],batch[0]['job_id'])
+            row['applied_publication_updates']=updates
+            self.assertEqual(pending_review_updates(row),[])
+
 
 if __name__=='__main__':unittest.main()

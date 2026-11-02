@@ -393,7 +393,11 @@ def advance_review(key,row,config,now=None,role_available=True):
         row.update(state='waiting_platform',stage='evaluator_runner_startup',
                    reason='Evaluator produced no matching activity and status receipt within the startup window.',
                    evaluator_assigned=False,updated_at=now)
-    if row['state']=='waiting_platform' and row.get('stage')=='five_rollouts':
+    publication_updates=[]
+    if row['state']=='waiting_author' and row.get('delivered_rollout_fingerprint'):
+        from recover_completed_evaluation import pending_review_updates
+        publication_updates=pending_review_updates(dict(row,key=key))
+    if (row['state']=='waiting_platform' and row.get('stage')=='five_rollouts') or publication_updates:
         from role_evaluation_batch import requests,summary
         batch_generation=row.setdefault('batch_generation',row['generation'])
         assignment=dict(row,key=key,generation=batch_generation)
@@ -421,8 +425,18 @@ def advance_review(key,row,config,now=None,role_available=True):
         if row.get('delivered_rollout_fingerprint')==result_fingerprint:
             return
         if not role_available:
-            row.update(reason=reason,rollout_result_status=stage)
+            if publication_updates:
+                row['pending_publication_updates']=publication_updates
+            else:row.update(reason=reason,rollout_result_status=stage)
             return
+        if publication_updates:
+            row.setdefault('reviews_before_publication_recovery',[]).append(
+                {field:row.get(field) for field in ('generation','state','stage','reason','updated_at')})
+            row.setdefault('applied_publication_updates',[]).extend(publication_updates)
+            row.pop('pending_publication_updates',None)
+            reason += (' Platform restored completed-run evidence without rerunning the model. '
+                       'Refresh the assessment using these same five jobs. Preserve the prior task defects '
+                       'in reviews_before_publication_recovery; do not repeat package checks or launch a new batch.')
         row.update(state='reviewing',stage=stage,reason=reason,
                    generation=row['generation']+1,assigned_at=now,updated_at=now,
                    evaluator_assigned=True,evaluator_activity_confirmed=False,

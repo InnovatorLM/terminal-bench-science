@@ -4,6 +4,8 @@
 
 ## 最新生产状态
 
+2026-11-03 增补见 `repair-status-20261102.md` 顶部：原帖复盘、可恢复大型轨迹、合格自测容量等待和已完成评测的发布恢复均已取得对应证据；完整增量备份与剩余项尚未全部验收。以下保留此前恢复阶段的观察，不应将历史等待/失败描述作为最新状态。
+
 宇宙已恢复：Forgejo 和监控页面 HTTP 200，10 个作者及 curator 的新会话均有 `skills_discovered`、`model_reply` 和 `tool_result`。生产 self-test worker 显式运行 `--workers 10`。evaluator-01 的历史任务为 completed，其余 evaluator 没有新派单，未强行启动空审核。
 
 - 恢复后的 Forgejo 模板父目录权限和旧日志路径已修正；另修复技能回执 `manifest.json` 被原生运行器当成技能目录的问题，改为隐藏 `.manifest.json` 并加入启动门检。14 角色热更，17 项针对性测试通过，真实新会话已验证加载成功。

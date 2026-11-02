@@ -16,3 +16,9 @@ python -B deploy/science/recover_completed_evaluation.py \
 六项离线恢复/队列回归通过，覆盖成功恢复、原始数据不变、幂等、活动 controller 拒绝、清理未知拒绝、源码变化或 native session 缺失拒绝、保留部分发布记录。模拟测试显式禁止启动子进程和读取真实凭证。
 
 真实 job 已恢复为 `solver_complete / reward=1`，新增模型调用和云任务均为 0。恢复审计保存在该 job 的 `publication-recovery.json`；原队列 interrupted 回执保存在 `result-before-recovery-*.json`。该题其余四次结果为 1、1、0、1，完整五次为 4/5=80%，应按既定规则严格拒绝难度门槛，最终科学评审由 evaluator 完成。
+
+## 恢复后更新审核结论
+
+若 evaluator 已因缺失交付返回 `waiting_author`，调度器读取本批次精确 job 的 operator 恢复审计，并在结果内容改变时重新通知原审核者。固定快照、`batch_generation` 和五个 job ID 保持原值；更新仅用于补充审核判断，不重新启动五次模型评测。
+
+原审核的 state、stage、reason 和时间保存在 `reviews_before_publication_recovery`，已经发现的题目缺陷继续保留。审核者忙于另一题时保存待通知记录，不覆盖旧结论；空闲后处理一次，恢复审计摘要用于去重。已正式接受的版本不受这一机制影响。离线回归覆盖忙碌等待、原五次绑定、旧缺陷保留、一次唤醒，以及错误/重复恢复审计的忽略。

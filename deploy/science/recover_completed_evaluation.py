@@ -10,6 +10,28 @@ import time
 import uuid
 
 
+def pending_review_updates(assignment):
+    """Identify operator publication repairs for this already reviewed batch."""
+    from deployment_paths import universe_root
+    from evaluation_queue import W, root_file
+    from role_evaluation_batch import requests
+    state=universe_root(W)/'.state/gewu-multiverse/evaluation-queue'
+    applied=assignment.get('applied_publication_updates',[])
+    updates=[]
+    for request in requests(assignment):
+        path=state/request['job_id']/'publication-recovery.json'
+        try:
+            raw=root_file(path).read_bytes();proof=json.loads(raw)
+        except (OSError,ValueError,TypeError):continue
+        if (not isinstance(proof,dict) or proof.get('job_id')!=request['job_id']
+                or proof.get('kind')!='completed_execution_publication_recovery'
+                or proof.get('recovered_status')!='solver_complete'):
+            continue
+        update=dict(job_id=request['job_id'],recovery_sha256=hashlib.sha256(raw).hexdigest())
+        if update not in applied:updates.append(update)
+    return updates
+
+
 def recover(config, request):
     from evaluation_queue import (W, REQUEST_KEYS, root_file, queue_dir, atomic_json,
                                   validated_template, digest_tree, aggregate, active_queue_worker)
