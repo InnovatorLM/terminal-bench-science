@@ -33,13 +33,15 @@ class NetworkPreflightTests(unittest.TestCase):
             path.write_text(content)
         return root
 
-    def queued_upload(self, root, text, mutate=None):
+    def queued_upload(self, root, text, mutate=None, prepare=None):
         template = root / '.config/harbor-api/template.json'
         template.parent.mkdir(parents=True)
         template.write_text(json.dumps({'environment': {'type': 'ack'}}))
         role = root / 'role'
         repo = role / 'workspace/repo'
         source = self.fixture(repo / 'tasks/example', text)
+        if prepare:
+            prepare(source)
         (source / 'tests/test.sh').chmod(0o755)
         for args in [['init', '-q'], ['config', 'user.email', 'test@localhost'],
                      ['config', 'user.name', 'test'], ['add', '.'], ['commit', '-qm', 'fixture']]:
@@ -164,6 +166,27 @@ class NetworkPreflightTests(unittest.TestCase):
             self.assertTrue((state / job / 'network-preflight.json').is_file())
             self.assertEqual(digest_tree(state / job / 'source/example'), source_hash)
             self.assertEqual(digest_tree(source), source_hash)
+
+    def test_missing_frozen_copy_input_never_acquires_builder_or_starts_cloud(self):
+        with tempfile.TemporaryDirectory(dir=W / '.tmp') as raw:
+            root = Path(raw)
+            source, role, job, request, entry, state, commit = self.queued_upload(root, 'schema_version="1.3"\n', prepare=lambda task:
+                (task / 'tests/Dockerfile').write_text('FROM scratch\nCOPY wheels /opt/wheels\n'))
+            original = digest_tree(source)
+            with patch.object(worker, 'W', root), patch.object(worker, 'STATE', state), \
+                    patch.object(worker, 'credential_values', return_value=[]), \
+                    patch.object(worker, 'builder_slot') as builder, patch.object(worker, 'owned_run') as runner:
+                worker.process('author-01', entry, request)
+            builder.assert_not_called(); runner.assert_not_called()
+            receipt = json.loads((role / 'selftest/results' / (job + '.json')).read_text())
+            self.assertEqual(receipt['error_class'], 'author_build_context_missing')
+            self.assertEqual(receipt['stage'], 'build_context_preflight')
+            self.assertTrue(receipt['source_git_tree_verified'])
+            self.assertEqual(receipt['source_commit'], commit)
+            self.assertFalse(receipt['cloud_execution_started'])
+            self.assertEqual(receipt['docker_context_preflight']['missing_sources'][0]['source'], 'wheels')
+            self.assertEqual(digest_tree(source), original)
+            self.assertTrue((state / job / 'build-context-preflight.json').is_file())
 
     def test_upload_version_mismatch_never_reaches_task_network_build_or_cloud(self):
         mutations = {

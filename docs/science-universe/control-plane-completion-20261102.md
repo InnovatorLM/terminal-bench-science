@@ -2,6 +2,8 @@
 
 本表对应 [原始 buglist](control-plane-bug-audit-20261102.md)，区分软件修复、真实基础设施验收和生产模型行为。工作区记为 `W=/mnt/data/zhanglinfeng/workspace`；当前运行目录为 `W/.tmp/gewu-terminal-bench-science-runtime-live`，实际文件系统仍为 CPFS。
 
+最新状态（08:42 UTC）：宇宙已进入维护暂停，14/14 角色确认暂停，两个队列 supervisor 已停止领取新任务。下文“仍运行”均为更早观察快照。此次部署修复及验收边界见[维护记录](selftest-handoff-maintenance-20261102.md)；恢复运行以实际部署回执为准。
+
 | 项目 | 当前结论 | 权威证据与边界 |
 | --- | --- | --- |
 | 1. 备份失败／新日志被旧库存挡住 | 连续周期和恢复抽查通过；全量备份仍未完成 | 55.11 GB 独立历史归档已抽样恢复。追加审计验证 3 个自动周期、10 作者最新轨迹摘要/源前缀 10/10、实际恢复 23 文件；追加周期后 bulk pending=42,895、verified=41,771。逐文件增加 source_checked_at，历史库存告警与新 priority/bulk 告警分开。新增 24 个 priority 告警中 22 个是 author-02 在扫描与读取间删除的原型文件，不能称为轨迹丢失，也不能保证短于备份周期的文件都被备份。last_success 仍为空。`W/.state/backups/live/recovery/continuous-priority-audit-20261102.json`。 |

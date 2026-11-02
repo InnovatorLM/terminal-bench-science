@@ -4,6 +4,7 @@ from pathlib import Path,PurePosixPath
 from evaluation_queue import W,atomic_json,digest_tree
 from check_harbor_task import inspect_task
 from acs_network_preflight import NetworkPreflightError
+from docker_context_preflight import DockerContextError
 from selftest_lifecycle import owned_run, recover_interrupted, install_stop_handlers
 from build_task_images import builder_slot,validate_dockerfile,build_failure_details
 from selftest_source import verify_source, SourceMismatchError
@@ -67,6 +68,8 @@ def process(role,entry,request):
    raise ValueError('Review request requires previous selftest and result-driven iteration; initial_review bypass is not supported')
   atomic_json(work/'request.json',q)
   if q['job_id']!=job or not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}',name) or not re.fullmatch('[a-f0-9]{40}',q['source_commit']):raise ValueError('Invalid request identity')
+  from selftest_feedback import record_current_request
+  record_current_request(root,dict(status,source_commit=q['source_commit'],source_task_path=q['source_task_path']))
   frozen=work/'upload.tar';snapshot_upload(archive,entry['uid'],140*1024*1024,frozen)
   if hashlib.sha256(frozen.read_bytes()).hexdigest()!=q['archive_sha256']:raise ValueError('Upload changed')
   repo=work/'source';task=repo/name;unpack(frozen,task)
@@ -139,6 +142,11 @@ def process(role,entry,request):
                 claimed_source_commit=q['source_commit'],claimed_source_repository=q['source_repository'],
                 claimed_source_task_path=q['source_task_path'],source_git_tree_verified=False,
                 error=sanitize(str(e),secrets)[:600],cloud_execution_started=False)
+ except DockerContextError as e:
+  from selftest_logs import sanitize
+  status.update(status='failed',error_class='author_build_context_missing',stage='build_context_preflight',
+                docker_context_preflight=e.report,error=sanitize(str(e),secrets)[:600],cloud_execution_started=False)
+  atomic_json(work/'build-context-preflight.json',e.report)
  except NetworkPreflightError as e:
   from selftest_logs import sanitize
   status.update(status='failed',error_class='task_acs_network_incompatible',stage='network_preflight',

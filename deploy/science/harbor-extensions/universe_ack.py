@@ -6,6 +6,8 @@ import base64
 import fnmatch
 import json
 import shlex
+import stat
+import tempfile
 from harbor.environments.ack import ACKEnvironment
 
 class UniverseACK(ACKEnvironment):
@@ -71,13 +73,38 @@ class UniverseACK(ACKEnvironment):
         try:
             await asyncio.wait_for(self.download_dir_filtered('/logs/verifier',target),timeout=40)
         except Exception as error:
-            # Missing reward is expected on timeout. The download helper saves
-            # available logs before reporting that no valid reward exists.
+            # Transfer failure must not prevent cleanup. A missing reward is
+            # diagnosed by Harbor's verifier after available logs are saved.
             if hasattr(self,'logger'):
                 self.logger.warning('Partial verifier evidence collection (%s); cleanup continues',type(error).__name__)
 
     def _get_image_url(self):
         return self._universe_image
+
+    async def download_file(self, source_path, target_path):
+        # ACK's tar transport can return successfully without a matching file.
+        # Stage into an empty directory so an old destination cannot certify a
+        # failed transfer; only publish a newly downloaded regular file.
+        target = Path(target_path)
+        def validate_destination():
+            if target.is_symlink() or any(parent.is_symlink() for parent in target.parents):
+                raise ValueError('Symlink in file download destination')
+            if target.exists() and not target.is_file():
+                raise ValueError('File download destination is not a regular file')
+        validate_destination()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.acs-download-', dir=target.parent) as staging:
+            downloaded = Path(staging) / target.name
+            await super().download_file(source_path, downloaded)
+            try:
+                mode = downloaded.lstat().st_mode
+            except FileNotFoundError:
+                raise FileNotFoundError('ACK download produced no file for ' + str(source_path)) from None
+            if not stat.S_ISREG(mode):
+                raise ValueError('ACK download did not produce a regular file for ' + str(source_path))
+            validate_destination()
+            downloaded.chmod(0o600)
+            downloaded.replace(target)
 
     async def download_dir(self, source_dir, target_dir):
         if str(source_dir) == '/logs/verifier':
@@ -148,7 +175,10 @@ print(json.dumps(files))'''
             # An invalid reward is retained verbatim for diagnosis, never fixed.
             raw_reward = decoded.get(Path('reward.txt'))
             if raw_reward is None:
-                raise ValueError('Missing verifier reward; available diagnostics retained')
+                # The directory transfer succeeded. Let Harbor report its
+                # native RewardFileNotFoundError (or parse reward.json), rather
+                # than wrapping a task's missing output as a download failure.
+                return
             try:
                 reward = raw_reward.decode().strip()
             except UnicodeDecodeError:

@@ -17,13 +17,13 @@ class IterationTests(unittest.TestCase):
                        completed_at=10,execution_task_path='proof',source_commit='b'*40,snapshot_sha256=digest_tree(task),
                        trials=[{'cleanup_confirmed':True},{'cleanup_confirmed':True}])
             current=dict(source_repository='repo',source_task_path='tasks/proof',received_at=11,
-                         execution_task_path='proof',source_commit='c'*40,snapshot_sha256='d'*64)
+                         execution_task_path='proof-stage',source_commit='c'*40,snapshot_sha256='d'*64)
             link=dict(previous_job=job,note='Fixed verifier after observing the prior oracle failure.')
             def save(p): (state/job/'status.json').write_text(json.dumps(p))
             save(prior);result=validate(link,current,state,'author-01')
             self.assertTrue(result['linked_execution_verified'])
             self.assertFalse(result['author_note_independently_reviewed'])
-            for field,value in [('role','author-02'),('status','building'),('completed_at',12),('source_task_path','tasks/other'),('source_git_tree_verified',False),('trials',[{'cleanup_confirmed':False}])]:
+            for field,value in [('role','author-02'),('status','building'),('completed_at',12),('source_repository','other-repo'),('source_task_path','tasks/other'),('source_git_tree_verified',False),('trials',[{'cleanup_confirmed':False}])]:
                 bad=copy.deepcopy(prior);bad[field]=value;save(bad)
                 with self.subTest(field=field),self.assertRaises(ValueError):validate(link,current,state,'author-01')
             save(prior)
@@ -32,6 +32,14 @@ class IterationTests(unittest.TestCase):
                 with self.subTest(field=field),self.assertRaises(ValueError):validate(link,bad,state,'author-01')
             with self.assertRaisesRegex(ValueError,'idea ID'):
                 validate(link,dict(current,idea_id='new-unbound-idea'),state,'author-01')
+            for path in (None, '', '.', '..', '../proof', '/proof', 'a/b', 'a\\b'):
+                save(dict(prior,execution_task_path=path))
+                with self.subTest(side='prior',path=path),self.assertRaisesRegex(ValueError,'execution task path'):
+                    validate(link,current,state,'author-01')
+                save(prior)
+                with self.subTest(side='current',path=path),self.assertRaisesRegex(ValueError,'execution task path'):
+                    validate(link,dict(current,execution_task_path=path),state,'author-01')
+            save(prior)
             (task/'data').write_text('tampered')
             with self.assertRaises(ValueError):validate(link,current,state,'author-01')
 

@@ -43,7 +43,7 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(receipt['active_iteration_seconds'],60)
             self.assertFalse(receipt['scientific_acceptance'])
             self.assertEqual(receipt['difficulty_viability_origin'],'author_explicit_review_request_not_scientific_attestation')
-            before=(work/'handoff-clock.json').read_bytes();obs.write_text('{}')
+            before=(work/'handoff-clock.json').read_bytes();obs.unlink()
             self.assertEqual(qualify(work,state,obs,template),receipt)
             self.assertEqual((work/'handoff-clock.json').read_bytes(),before)
             validate_receipt(receipt,status['source_commit'],status['source_task_path'])
@@ -145,7 +145,7 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(json.loads(destination.read_text())['status'],'interrupted')
             self.assertFalse((work/'handoff.json').exists())
 
-    def test_actual_registration_then_gate_publication_and_idempotent_retry(self):
+    def test_actual_supplement_registration_then_gate_publication_and_idempotent_retry(self):
         from selftest_handoff import handoff
         from check_harbor_task import inspect_task
         from author_submission_gate import approved
@@ -174,7 +174,23 @@ class HandoffTests(unittest.TestCase):
             queue_state=universe/'.state/evaluation';(queue_state/'registered').mkdir(parents=True)
             inbox=root/'inbox';inbox.mkdir();registry=root/'registry.json';registry.write_text('{}')
             (settings/'queue.json').write_text(json.dumps(dict(state=str(queue_state),registry=str(registry),role_queues=[dict(inbox=str(inbox),evaluator_uid=21012)])))
-            entry=dict(root=str(role),gid=0)
+            entry=dict(root=str(role),uid=os.getuid(),gid=0)
+            # The real author client supplements an already successful job.
+            # Preserve its immutable execution and source receipts throughout.
+            original={key:status[key] for key in ('job_id','idea_id','source_repository','source_task_path','source_commit')}
+            (work/'request.json').write_text(json.dumps(original))
+            (role/'selftest/results').mkdir(parents=True);(role/'selftest/inbox').mkdir()
+            (role/'selftest/results'/(work.name+'.json')).write_text(json.dumps(status))
+            saved={name:(work/name).read_bytes() for name in ('request.json','status.json','build/receipt.json')}
+            import contextlib,io
+            from role_acs_selftest import main as client
+            from selftest_review_supplement import consume_once
+            with contextlib.redirect_stdout(io.StringIO()):
+                client(['request-review',work.name,'--previous-job','a'*32,'--iteration-note',
+                        'Fixed the verifier using the prior execution diagnostic.'],base=role/'selftest')
+            config={'roles':{'author-01':entry}}
+            with patch('selftest_handoff.handoff',side_effect=ValueError('Temporary platform dependency')):
+                self.assertEqual(consume_once(config,state,universe,now=100)['attempted'],1)
             with patch('selftest_handoff.time.time',return_value=100),patch('selftest_handoff.subprocess.run',side_effect=subprocess.CalledProcessError(1,'mock registration failure')):
                 with self.assertRaises(subprocess.CalledProcessError):handoff(work,state,entry,universe)
             with patch.dict(os.environ,{'GEWU_UNIVERSE_ROOT':str(universe)}):
@@ -182,7 +198,10 @@ class HandoffTests(unittest.TestCase):
                 # Actual subprocess, Git freeze, schema checks, immutable catalog,
                 # identity bridge and final eligibility file. Cloud controls in
                 # this fixture are synthesized, not real ACS/model results.
-                result=handoff(work,state,entry,universe)
+                self.assertEqual(consume_once(config,state,universe,now=200)['attempted'],1)
+                result=json.loads((work/'handoff.json').read_text())
+                self.assertEqual(result['state'],'ready_for_independent_review')
+                self.assertEqual({name:(work/name).read_bytes() for name in saved},saved)
                 self.assertTrue(approved(commit,'tasks/proof'))
                 self.assertEqual(registered_execution(commit,'tasks/proof')['evaluation_id'],result['evaluation_id'])
                 self.assertEqual(handoff(work,state,entry,universe),result)
@@ -196,6 +215,10 @@ class HandoffTests(unittest.TestCase):
                 assignment=json.loads((evaluator/'home/role/review-assignment.json').read_text())
                 self.assertEqual(assignment['evaluation_id'],result['evaluation_id'])
                 self.assertEqual(assignment['commit'],commit)
+                self.assertEqual(assignment['budget_summary'],result['budget_summary'])
+                self.assertEqual(assignment['budget_summary']['budget_status'],'verified_within_budget')
+                self.assertEqual(assignment['budget_summary']['iteration_cutoff_at'],100)
+                self.assertEqual(assignment['budget_summary']['active_iteration_seconds'],60)
                 consume(config,ledger,universe,dispatcher_state)
                 self.assertEqual(len(ledger),1)
             self.assertEqual(len(json.loads(registry.read_text())),1)

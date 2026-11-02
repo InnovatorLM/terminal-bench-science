@@ -35,8 +35,12 @@ def validate(iteration, current, state, role):
             or any(not isinstance(t, dict) or t.get('cleanup_confirmed') is not True for t in trials)):
         raise ValueError('Prior cloud cleanup must be confirmed')
     execution_task = prior.get('execution_task_path')
-    if execution_task != current.get('execution_task_path'):
-        raise ValueError('Execution task mismatch')
+    # The logical repository/task (and bound idea) above define identity.
+    # Independent submissions may use distinct safe staging directory names.
+    for execution_path in (execution_task, current.get('execution_task_path')):
+        if (not isinstance(execution_path, str)
+                or not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}', execution_path)):
+            raise ValueError('Invalid frozen execution task path')
     if digest_tree(state/job/'source'/execution_task) != prior.get('snapshot_sha256'):
         raise ValueError('Prior frozen task changed')
     if prior.get('source_commit') == current.get('source_commit') or prior.get('snapshot_sha256') == current.get('snapshot_sha256'):

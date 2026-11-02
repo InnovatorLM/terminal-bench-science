@@ -23,6 +23,8 @@ print([(e.name, e.value) for e in d.entry_points if e.group == "pytest11"])
 
 固定版本 NumPy 等包还要核对目标 Python 版本是否受支持，以及 wheel 的 ABI/架构。只修复实际依赖，不因安装报错改变科学题意或 JSON/CSV 输出契约；`json` 是 Python 标准库，不是需要 pip 安装或删除的第三方依赖。
 
+若日志已取得包的 metadata、选中与目标 Python/ABI 匹配的 wheel，随后在 `files.pythonhosted.org` 等下载主机报 `ReadTimeoutError`，先按构建阶段依赖下载超时排查，不能归为包不存在、版本不兼容或 ACS 判题网络故障。记录最早失败命令、主机、下载进度和退出码，交平台检查构建容器的下载链路；也可准备包含完整依赖且已在目标环境验证的 wheelhouse。增加超时或重试只能作为有边界的尝试；同一快照反复排队不会补齐缺失依赖，不要用删除 NumPy 或改题意绕过问题。
+
 ## 提交内容与版本
 
 当前客户端打包 `--task` 指向的实际目录，平台按 `--commit` 的 Git 树逐文件/执行位验证。运行时生成的 `__pycache__`、未提交输出、被 `.gitignore` 忽略的证据文件仍可能进入上传，从而被拒绝。自测日志和临时环境放在题包外；提交必要的源码、数据和版本证明，避免把缓存塞进镜像。
@@ -35,4 +37,10 @@ print([(e.name, e.value) for e in d.entry_points if e.group == "pytest11"])
 
 负对照故意失败时，把该分支的退出码与预期对照一起记录；不要将 `pytest` 的预期非零当成平台故障。正对照必须实际通过，必须有新的 reward/报告文件，不能读取上次残留。初始化解释器或安装插件失败后立即停止当前演练，不继续运行后面的命令用最终 exit 0 掩盖错误。命令管道被 `head` 提前关闭产生 141，也应与任务程序报错分开。
 
-负对照没有 solver 输出是需要显式处理的预期情形：创建 verifier 日志目录，清除旧结果，明确写本次 reward=0 和缺输出诊断。不要让 `set -e` 在产生诊断前因文件不存在退出。初始化或依赖异常仍应暴露为异常，不能一律写 0 掩盖环境故障。参考解必须使用 Harbor 实际挂载的 solution 路径；不能凭本地目录布局假设 `/app/solution/solve.py` 存在。
+负对照没有 solver 输出是需要显式处理的预期情形：创建 verifier 日志目录，清除旧结果，明确写本次 reward=0 和缺输出诊断。不要让 `set -e` 在产生诊断前因文件不存在退出。初始化或依赖异常仍应暴露为异常，不能一律写 0 掩盖环境故障。
+
+Harbor 将整个 `solution/` 上传到 `/solution`，所以 `solution/solve.sh` 调用同目录 Python 文件时应使用 `/solution/solve.py`，或根据脚本自身位置解析路径；运行目录 `/app` 不会使 `/app/solution/solve.py` 自动存在。先读 `agent/oracle.txt` 和 `agent/exit-code.txt`：若参考解因路径错误退出，修改 `/tests` 权限不会产生缺失的答案文件。
+
+独立 verifier 只检查 `artifacts` 声明并实际成功传递的输出，如 `/app/relaunch_validation.json`。先确认 oracle 真的生成了文件，再确认本地 `artifacts/` 里有相应字节，最后确认 verifier 使用相同路径。旧 ACK 下载器可能在未收到文件时返回成功，因此旧 `manifest.json` 的 `status=ok` 不能单独证明文件存在。对于 nop 的预期缺输出，判题脚本应明确输出缺文件诊断和零分，不能在 `test -f` 处静默退出。
+
+`DownloadVerifierDirError` 的内层若是 `Missing verifier reward`，表示旧适配器把缺评分输出归成下载失败；不证明 ACS 网络有问题。新适配器保留已取得的日志并交 Harbor 报 `RewardFileNotFoundError`。两种情况下仍没有可计入正确率的分数，必须解决实际退出原因；不能手工为历史失败补写 reward。

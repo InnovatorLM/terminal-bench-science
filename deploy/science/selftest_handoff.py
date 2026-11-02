@@ -17,9 +17,16 @@ class AuthorEvidenceRequired(ValueError):
 def qualify(work, state, observation, template):
     from selftest_registration import prepare
     from selftest_iteration import validate
-    from selftest_budget import verify,read_observation,BudgetEvidenceRequired
+    from selftest_budget_admission import assess_budget, assert_current_idea_active
+    from selftest_review_supplement import effective_request
     status=json.loads(read_operator_file(work/'status.json'))
-    request=json.loads(read_operator_file(work/'request.json'))
+    request,supplements=effective_request(work)
+    try:
+        assert_current_idea_active(work,status,observation)
+    except ValueError as error:
+        if str(error).startswith('Idea abandoned;'):
+            raise AuthorEvidenceRequired(str(error)) from error
+        raise
     idea=status.get('idea_id');role=status.get('role')
     if not request.get('request_review') or not idea or request.get('idea_id')!=idea:
         raise AuthorEvidenceRequired('Explicit idea-bound review request required')
@@ -32,8 +39,10 @@ def qualify(work, state, observation, template):
     qualified=work/'handoff-qualified.json'
     if qualified.exists():
         receipt=json.loads(read_operator_file(qualified))
-        if receipt.get('schema_version')==3:
+        if receipt.get('schema_version') in (3,4):
             validate_receipt(receipt,status['source_commit'],status['source_task_path'])
+            if any(str(path) not in {item['path'] for item in receipt['evidence_files']} for path in supplements):
+                raise ValueError('Qualified receipt lacks immutable review supplement')
             prepare(work,status['source_commit'],status['source_task_path'],template)
             return receipt
         legacy=work/'handoff-qualified-legacy.json'
@@ -45,13 +54,7 @@ def qualify(work, state, observation, template):
     mechanical=work/'mechanical.json'
     validate_mechanical_check(mechanical,Path(bridge['snapshot']),hashlib.sha256(read_operator_file(mechanical)).hexdigest())
     clock=work/'handoff-clock.json'
-    atomic_json(clock,read_observation(observation,role,idea))
-    budget=verify(state,role,idea,clock,time.time())
-    if not budget['within_budget']:
-        raise BudgetEvidenceRequired('iteration_pause_evidence_required',
-            'The conservative five-hour bound is exceeded. Platform must establish independently verified excluded intervals or confirm the actual budget outcome; this does not prove five hours of author work.',
-            role=role,idea_id=idea,active_iteration_seconds_upper_bound=budget['active_iteration_seconds_upper_bound'],
-            recorded_idea_started_at=budget['recorded_idea_started_at'],total_excluded_seconds=budget['total_excluded_seconds'])
+    budget=assess_budget(work,state,status,observation,time.time())
     # The author-owned solution is part of the verified frozen Git tree and was
     # executed by the passing oracle control. Bind its actual bytes explicitly;
     # this proves execution, not scientific quality or independent model solving.
@@ -63,16 +66,18 @@ def qualify(work, state, observation, template):
                scientific_acceptance=False)
     evidence=work/'handoff-evidence.json';atomic_json(evidence,proof)
     previous = state/linkage['previous_job']/'status.json'
-    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,previous,clock,evidence,solution]
+    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,previous,clock,evidence,solution,*supplements]
+    if budget.get('admission_file'):files.append(Path(budget['admission_file']))
     check_files={'schema':[mechanical], 'container_build':[work/'build/receipt.json'],
                  'container_start':[work/'status.json'], 'author_solve':[solution,work/'status.json'],
                  'verifier_positive':[work/'status.json'], 'verifier_negative':[work/'status.json'],
-                 'post_iteration_rerun':[previous,work/'request.json',work/'status.json',evidence]}
-    receipt=dict(schema_version=3,origin='automatic_selftest_handoff',commit=status['source_commit'],task=status['source_task_path'],
+                 'post_iteration_rerun':[previous,work/'request.json',work/'status.json',evidence,*supplements]}
+    receipt=dict(schema_version=4 if budget['budget_status']=='legacy_budget_unknown' else 3,origin='automatic_selftest_handoff',commit=status['source_commit'],task=status['source_task_path'],
                  snapshot_sha256=bridge['snapshot_sha256'],runtime_image=template['environment']['kwargs']['runtime_image'],
                  checks={key:True for key in REQUIRED_ORDER},pre_submission_order=list(REQUIRED_ORDER),
                  iteration_applied=True,active_iteration_seconds=budget['active_iteration_seconds_upper_bound'],
-                 active_time_kind='conservative_bound_from_observed_idea_start_minus_operator_ACS_intervals',
+                 budget_status=budget['budget_status'],
+                 active_time_kind='unknown_legacy_history_completed_version_only' if budget['budget_status']=='legacy_budget_unknown' else 'conservative_bound_at_selftest_completion_minus_operator_ACS_intervals',
                  difficulty_viable=True,difficulty_viability_origin='author_explicit_review_request_not_scientific_attestation',
                  scientific_acceptance=False,
                  handoff_evidence=str(evidence),
@@ -133,19 +138,34 @@ def handoff(work, state, entry, universe):
     # commit, task path and snapshot; no review result is inferred here.
     review_queue=universe/'.state/gewu-multiverse/review-requests'
     review_queue.mkdir(mode=0o700,parents=True,exist_ok=True)
+    budget=json.loads(read_operator_file(work/'handoff-evidence.json'))['budget']
+    budget_summary=dict(budget_status=receipt.get('budget_status',budget.get('budget_status','verified_within_budget')),
+                        active_iteration_seconds=receipt['active_iteration_seconds'],
+                        iteration_cutoff_at=budget.get('iteration_cutoff_at',status['completed_at']),
+                        scope=budget.get('scope','completed_frozen_version_only'))
     atomic_json(review_queue/(key+'.json'),dict(schema_version=1,state='ready_for_independent_review',
         task=task,commit=commit,snapshot_sha256=receipt['snapshot_sha256'],evaluation_id=identifier,
-        author_role=status['role'],job_id=status['job_id'],scientific_acceptance=False))
+        author_role=status['role'],job_id=status['job_id'],idea_id=status['idea_id'],
+        received_at=status['received_at'],budget_summary=budget_summary,scientific_acceptance=False))
     return dict(state='ready_for_independent_review',evaluation_id=identifier,
-                snapshot_sha256=receipt['snapshot_sha256'],scientific_acceptance=False)
+                snapshot_sha256=receipt['snapshot_sha256'],budget_summary=budget_summary,scientific_acceptance=False)
 
 
 def reconcile(work, state, entry, universe):
+    from selftest_review_supplement import operator_lock
+    work=Path(work)
+    with operator_lock(work/'handoff.lock'):
+        return _reconcile(work,state,entry,universe)
+
+
+def _reconcile(work, state, entry, universe):
+    from selftest_feedback import publish_handoff
     work=Path(work)
     request=work/'request.json'
     if not request.exists():
         return
-    request_data=json.loads(read_operator_file(request))
+    from selftest_review_supplement import effective_request
+    request_data,supplements=effective_request(work)
     if not request_data.get('request_review'):
         # A successful author self-test is not silently dropped.  Publish a
         # durable, actionable handoff receipt so the author can explicitly
@@ -153,21 +173,26 @@ def reconcile(work, state, entry, universe):
         status=json.loads(read_operator_file(work/'status.json')) if (work/'status.json').exists() else {}
         if status.get('status')=='selftest_passed':
             result={'state':'waiting_author','stage':'review_request_required',
-                    'reason':'ACS selftest passed; submit an explicit review request with a stable idea ID and result-driven iteration linkage before evaluator assignment.',
+                    'reason':'ACS selftest passed; use role-acs-selftest request-review JOB --previous-job PRIOR --iteration-note NOTE to request review of this frozen execution without rerunning ACS. The original job must already bind a stable idea and verified iteration.',
                     'scientific_acceptance':False}
             atomic_json(work/'handoff.json',result)
             status['review_handoff']=result
             destination=Path(entry['root'])/'selftest/results'/(status['job_id']+'.json')
             atomic_json(destination,status,0o640); os.chown(destination,0,entry['gid'])
+            publish_handoff(work,state,entry,status,result)
         return
     output=work/'handoff.json'
     if output.exists() and json.loads(read_operator_file(output)).get('state')=='ready_for_independent_review':
         # A cached success from the legacy first-review bypass is not evidence.
         try:
             current=json.loads(read_operator_file(work/'status.json'))
+            from selftest_budget_admission import assert_current_idea_active
+            assert_current_idea_active(work,current)
             validate_receipt(json.loads(read_operator_file(work/'handoff-qualified.json')),current['source_commit'],current['source_task_path'])
         except (OSError,ValueError,KeyError,TypeError):pass
-        else:return
+        else:
+            publish_handoff(work,state,entry,current,json.loads(read_operator_file(output)))
+            return
     status=json.loads(read_operator_file(work/'status.json'))
     if status.get('status') not in ('selftest_passed','selftest_failed','failed','interrupted'):return
     try:
@@ -192,3 +217,4 @@ def reconcile(work, state, entry, universe):
     status=json.loads(read_operator_file(work/'status.json'));status['review_handoff']=result
     destination=Path(entry['root'])/'selftest/results'/(status['job_id']+'.json')
     atomic_json(destination,status,0o640);os.chown(destination,0,entry['gid'])
+    publish_handoff(work,state,entry,status,result)

@@ -234,6 +234,8 @@ def main():
         output.mkdir(mode=0o700)
         snapshot=output/'task';task_hash=freeze(args.repo,args.commit,args.task_path,snapshot)
         env_hash=validate_context(snapshot/'environment');tests_hash=validate_context(snapshot/'tests')
+        from docker_context_preflight import require_contexts
+        require_contexts(snapshot)
         docker=Docker(output)
         def resolve_base(image):
             return resolve_base_image(docker,image,os.environ.get('GEWU_DOCKER_LIBRARY_MIRROR'))

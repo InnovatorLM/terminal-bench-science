@@ -31,8 +31,12 @@ def prepare(work, commit, task, template):
     execution_task = status.get('execution_task_path')
     if not isinstance(execution_commit, str) or not re.fullmatch('[a-f0-9]{40}', execution_commit):
         raise ValueError('Missing frozen build commit')
-    if execution_task != Path(task).name:
-        raise ValueError('Frozen task path mismatch')
+    # A Git-verified source task may have been submitted from a staging
+    # directory with another basename. Preserve that execution identity for
+    # snapshot and receipt checks instead of confusing it with source identity.
+    if (not isinstance(execution_task, str)
+            or not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}', execution_task)):
+        raise ValueError('Invalid frozen task path')
     trials = status.get('trials')
     if not isinstance(trials, list) or len(trials) != 2:
         raise ValueError('Require oracle and negative control evidence')

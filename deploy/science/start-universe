@@ -204,6 +204,7 @@ broker_pid=$!
 evaluation_pid=''
 review_dispatch_pid=''
 selftest_pid=''
+review_supplement_pid=''
 watchdog_pid=''
 controller_pid=''
 finish() {
@@ -215,6 +216,10 @@ finish() {
     if [[ -n "$watchdog_pid" ]]; then
         kill -TERM "$watchdog_pid" 2>/dev/null || true
         wait "$watchdog_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$review_supplement_pid" ]]; then
+        kill -TERM "$review_supplement_pid" 2>/dev/null || true
+        wait "$review_supplement_pid" 2>/dev/null || true
     fi
     if [[ -n "$selftest_pid" ]]; then
         kill -TERM "$selftest_pid" 2>/dev/null || true
@@ -310,13 +315,18 @@ review_dispatch_pid=$!
     --workers "${GEWU_SELFTEST_WORKERS:-10}" \
     > "$SERVICE_STATE/author-selftest/production-worker.log" 2>&1 &
 selftest_pid=$!
+"$PY" "$W/gewu-multiverse/deploy/science/selftest_review_supplement.py" \
+    --broker-config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/author-selftest" \
+    --universe "$U" --poll-seconds 30 \
+    > "$SERVICE_STATE/author-selftest/review-supplement-consumer.log" 2>&1 &
+review_supplement_pid=$!
 mkdir -p "$SERVICE_STATE/command-watchdog"
 "$PY" "$W/gewu-multiverse/deploy/science/command_watchdog.py" \
     --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/command-watchdog" --session-state "$SERVICE_STATE" \
     > "$SERVICE_STATE/command-watchdog/production.log" 2>&1 &
 watchdog_pid=$!
 # Refuse a controller start if any owned background service already failed.
-for service_pid in "$broker_pid" "$evaluation_pid" "$review_dispatch_pid" "$selftest_pid" "$watchdog_pid"; do
+for service_pid in "$broker_pid" "$evaluation_pid" "$review_dispatch_pid" "$selftest_pid" "$review_supplement_pid" "$watchdog_pid"; do
     kill -0 "$service_pid" || { echo 'A required deployment service exited during startup.' >&2; exit 1; }
 done
 export USER=nobody LOGNAME=nobody

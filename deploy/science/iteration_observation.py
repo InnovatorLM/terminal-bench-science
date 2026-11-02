@@ -1,5 +1,6 @@
 """Operator-owned clock observations; never copy author notes or command output."""
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -18,9 +19,26 @@ def observe(directory, role, ledger, live, at):
     info=directory.lstat()
     if directory.is_symlink() or info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode&0o077:
         raise ValueError('Observations require operator-private directory')
+    # scan_clocks also locks the role ledger. Keep the observation's own
+    # read/validate/archive/replace transaction safe for every caller, including
+    # an operator recovery tool, rather than relying on that external lock.
+    fd=os.open(directory/(role+'.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+    try:
+        lock=os.fstat(fd)
+        if (not stat.S_ISREG(lock.st_mode) or lock.st_uid!=0 or lock.st_nlink!=1
+                or lock.st_mode&0o077):
+            raise ValueError('Observations require an operator-private lock')
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        return _observe_locked(directory,role,ledger,live,at)
+    finally:os.close(fd)
+
+
+def _observe_locked(directory, role, ledger, live, at):
     at=number(at);path=directory/(role+'.json')
     previous_raw=read_operator_file(path) if path.exists() else None
     previous=json.loads(previous_raw) if previous_raw else {'role':role,'ideas':{}}
+    if previous_raw and at<number(previous['observed_at']):
+        raise ValueError('Stale observation cannot rewind the observation boundary')
     ideas=ledger.get('ideas')
     if not isinstance(ideas,dict):raise ValueError('Invalid idea ledger')
     if set(previous['ideas'])-set(ideas):raise ValueError('Previously observed idea removed')
@@ -42,7 +60,7 @@ def observe(directory, role, ledger, live, at):
             raise ValueError('Invalid observed idea status')
         result['ideas'][idea]={'events':events,'first_observed_at':old['first_observed_at'] if old else at,
                               'status':row['status']}
-    result['previous_observation_sha256']=hashlib.sha256(read_operator_file(path)).hexdigest() if path.exists() else None
+    result['previous_observation_sha256']=hashlib.sha256(previous_raw).hexdigest() if previous_raw else None
     if previous.get('recovery_evidence'):result['recovery_evidence']=previous['recovery_evidence']
     # Retain evidence on structural transitions, not on every watchdog poll.
     # Historical first-observed boundaries must survive later migrations.

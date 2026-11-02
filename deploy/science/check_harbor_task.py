@@ -38,6 +38,8 @@ def inspect_task(snapshot, *, acs_environment=None):
         if not path.is_file() or not path.read_bytes().strip():
             raise ValueError('Standard Harbor file missing or empty: ' + name)
     config = TaskConfig.model_validate_toml(paths.config_path.read_text())
+    from docker_context_preflight import require_contexts
+    docker_context = require_contexts(snapshot)
     network = None
     if acs_environment is not None:
         from acs_network_preflight import require_compatible
@@ -63,6 +65,7 @@ def inspect_task(snapshot, *, acs_environment=None):
             'schema_parsed': True, 'required_files_nonempty': True, 'shell_syntax_valid': True,
             'schema_resolved_resources': resources, 'schema_resolved_timeouts': timeouts, 'task_code_executed': False,
             'scientific_acceptance': False, 'license_verified': False, 'runtime_verified': False}
+    report['docker_context_preflight'] = docker_context
     if network is not None:
         report['acs_network_preflight'] = network
     return report

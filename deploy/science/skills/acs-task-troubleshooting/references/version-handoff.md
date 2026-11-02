@@ -16,3 +16,16 @@ git -C "$REPOSITORY" archive "$COMMIT:$TASK" | tar -x -C "$STAGING"
 `STAGING` 使用角色可写的题包外目录，不能覆盖已有成果。上例得到题目本身，提交时 `--task "$STAGING" --source-repository "$REPOSITORY" --source-task-path "$TASK" --commit "$COMMIT"` 才能对应；`--commit` 不会自行切换上传内容。平台必须先验证字节与执行位，再用该内容诊断网络或构建。旧 worker 对错版本上传给出的网络报错不能作为目标 commit 的缺陷证据。
 
 交接写清下一步负责人后等待新的决定或反馈。不手改 generation、科学接收状态、历史预算和冻结快照。
+
+自测提交后，job ID、镜像 digest、回执及交接说明保存在题包外的工作记录中，并明确引用被测 commit。不要为了补写运行证据而改动冻结题包里的 `authoring/completeness-review.json`、README 或其他文件；这些文件也参与快照摘要，修改后就是另一个版本，旧通过结果不能自动覆盖它。如果已经产生纯证据变更，向 curator 列出被测版本、当前 PR 版本和仅该题的 diff，明确要求交接原被测版本，不靠反复重测追赶自己写入的回执。
+
+已通过的 job 如果提示 `review_request_required`，先核对原 `idea_id` 和更早自测的真实迭代链，再运行：
+
+```bash
+role-acs-selftest request-review "$JOB" --previous-job "$PRIOR_JOB" \
+  --iteration-note '根据前次自测的具体结果，说明本次已提交的实际修改'
+```
+
+它只补充审核意图及迭代关联，不构建镜像、不调用 ACS 或模型、不修改原 request/status/build、commit 和快照。查询返回的 `review-...` 请求 ID 或原 job 的 `review_handoff`，等待派单；不要再调用 `submit` 追赶交接状态。旧 job 必须本来就绑定 idea，前次 job 必须是同一作者、同一题目的已完成容器自测。原记录缺 idea 时不能追溯补造，构建失败也不能冒充已完成容器测试。
+
+交接成功不等于科学接收。预算未知、历史轨迹或实际 Pod 信息缺失等限制应保留；补交审核不能替代真实迭代、oracle/nop 和固定版本证据。

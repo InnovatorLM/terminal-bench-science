@@ -3358,24 +3358,57 @@ fn review_assignment_ready(root: &Path) -> bool {
     true
 }
 
-/// Authors are parked after submitting a review request. The dispatcher clears
-/// this durable marker only after the evaluator returns a result or asks for a
-/// concrete correction, preventing silent drift to another idea.
+/// Park authors during confirmed review or an exact self-test platform wait.
+/// Job, idea and version bindings keep an old result from stopping newer work.
 fn author_review_paused(root: &Path) -> bool {
     let Ok(bytes) = fs::read(root.join("review-feedback.json")) else { return false; };
     let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
-    if feedback["author_must_pause"] != true || feedback["state"] != "reviewing"
+    if feedback["author_must_pause"] != true
+        || !matches!(feedback["state"].as_str(), Some("reviewing" | "waiting_platform"))
         || feedback["key"].as_str().is_none_or(str::is_empty)
         || feedback["commit"].as_str().is_none_or(str::is_empty)
         || feedback["task"].as_str().is_none_or(str::is_empty)
         || !feedback["generation"].is_u64() { return false; }
     let Ok(current_bytes) = fs::read(root.join("review-current-assignment.json")) else { return false; };
     let Ok(current) = serde_json::from_slice::<serde_json::Value>(&current_bytes) else { return false; };
-    current["state"] == "reviewing"
+    let exact = current["state"] == feedback["state"]
         && current["key"] == feedback["key"]
         && current["generation"] == feedback["generation"]
         && current["commit"] == feedback["commit"]
-        && current["task"] == feedback["task"]
+        && current["task"] == feedback["task"];
+    if !exact {
+        return false;
+    }
+    if feedback["state"] == "reviewing" {
+        // Legacy PR assignments have no self-test identity. Bound direct
+        // reviews must still belong to the current accepted request.
+        if feedback["job_id"].as_str().is_none() {
+            return true;
+        }
+        let Ok(bytes) = fs::read(root.join("selftest/current-request.json")) else {
+            // Existing PR/direct reviews predate the request marker. Preserve
+            // their confirmed pause until a newer accepted request exists.
+            return feedback["idea_id"].is_null() && feedback["received_at"].is_null();
+        };
+        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+        return ["job_id","idea_id","commit","task","received_at"].iter()
+            .all(|field| !feedback[*field].is_null() && request[*field] == feedback[*field]);
+    }
+    if feedback["feedback_source"] != "selftest_handoff"
+        || current["feedback_source"] != "selftest_handoff" {
+        return false;
+    }
+    let Ok(request_bytes) = fs::read(root.join("selftest/current-request.json")) else { return false; };
+    let Ok(request) = serde_json::from_slice::<serde_json::Value>(&request_bytes) else { return false; };
+    for field in ["job_id", "idea_id", "commit", "task"] {
+        if feedback[field].as_str().is_none_or(str::is_empty)
+            || current[field] != feedback[field] || request[field] != feedback[field] {
+            return false;
+        }
+    }
+    feedback["received_at"].as_f64().is_some_and(|value| value.is_finite() && value > 0.0)
+        && current["received_at"] == feedback["received_at"]
+        && request["received_at"] == feedback["received_at"]
 }
 
 #[cfg(test)]
@@ -3447,9 +3480,43 @@ mod review_assignment_tests {
             assert!(!author_review_paused(&root),"stale {field} paused another assignment");
         }
         fs::write(root.join("review-current-assignment.json"),current.to_string()).unwrap();
+        let mut legacy=current.clone();
+        legacy["author_must_pause"]=serde_json::json!(true);
+        legacy["job_id"]=serde_json::json!("legacy-job");
+        fs::write(root.join("review-feedback.json"),legacy.to_string()).unwrap();
+        assert!(author_review_paused(&root));
+        fs::create_dir_all(root.join("selftest")).unwrap();
+        fs::write(root.join("selftest/current-request.json"),
+            serde_json::json!({"job_id":"newer-job"}).to_string()).unwrap();
+        assert!(!author_review_paused(&root));
         fs::write(root.join("review-feedback.json"), r#"{"author_must_pause":false,"state":"waiting_author"}"#).unwrap();
         assert!(!author_review_paused(&root));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn platform_wait_requires_current_job_idea_and_version() {
+        let root=crate::test_support::scratch_root("author-platform-wait-binding");
+        fs::create_dir_all(root.join("selftest")).unwrap();
+        let value=serde_json::json!({"author_must_pause":true,"state":"waiting_platform",
+            "key":"selftest:job","generation":0,"commit":"commit","task":"tasks/example",
+            "job_id":"job","idea_id":"idea","received_at":100,
+            "feedback_source":"selftest_handoff"});
+        fs::write(root.join("review-feedback.json"),value.to_string()).unwrap();
+        fs::write(root.join("review-current-assignment.json"),value.to_string()).unwrap();
+        assert!(!author_review_paused(&root));
+        fs::write(root.join("selftest/current-request.json"),value.to_string()).unwrap();
+        assert!(author_review_paused(&root));
+        for (field,newer) in [("job_id",serde_json::json!("new-job")),
+                              ("idea_id",serde_json::json!("new-idea")),
+                              ("commit",serde_json::json!("new-commit")),
+                              ("task",serde_json::json!("tasks/new")),
+                              ("received_at",serde_json::json!(101))] {
+            let mut current=value.clone();current[field]=newer;
+            fs::write(root.join("selftest/current-request.json"),current.to_string()).unwrap();
+            assert!(!author_review_paused(&root),"old platform wait paused newer {field}");
+        }
+        let _=fs::remove_dir_all(root);
     }
 
     #[test]
@@ -5282,15 +5349,32 @@ mod tests {
 
     fn publish_author_review(root: &Path, generation: u64, state: &str) {
         let role = root.join("agents/author-01");
-        let value = serde_json::json!({"key":"commit:tasks/example", "generation":generation,
+        let mut value = serde_json::json!({"key":"commit:tasks/example", "generation":generation,
             "commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "task":"tasks/example",
-            "state":state, "author_must_pause":state=="reviewing"});
+            "state":state, "author_must_pause":matches!(state,"reviewing"|"waiting_platform")});
+        if state=="waiting_platform" {
+            value["feedback_source"]=serde_json::json!("selftest_handoff");
+            value["job_id"]=serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            value["idea_id"]=serde_json::json!("example");
+            value["received_at"]=serde_json::json!(100);
+            fs::create_dir_all(role.join("selftest")).unwrap();
+            fs::write(role.join("selftest/current-request.json"),value.to_string()).unwrap();
+        }
         fs::write(role.join("review-current-assignment.json"),value.to_string()).unwrap();
         fs::write(role.join("review-feedback.json"),value.to_string()).unwrap();
     }
 
     #[test]
     fn author_review_stops_real_running_process_and_feedback_resumes() {
+        check_author_pause_stops_real_process_and_feedback_resumes("reviewing");
+    }
+
+    #[test]
+    fn author_platform_wait_stops_real_running_process_and_feedback_resumes() {
+        check_author_pause_stops_real_process_and_feedback_resumes("waiting_platform");
+    }
+
+    fn check_author_pause_stops_real_process_and_feedback_resumes(state: &str) {
         let root=scratch_root("author-review-real-running");
         let settings=write_ready(&root,&[("author-01",Desired::Started)]);
         let clock=Arc::new(FakeClock::new());
@@ -5307,7 +5391,7 @@ mod tests {
         assert!(lock_inner(&engine.inner).agents[0].running.is_some());
         let source=root.join("agents/author-01/workspace/retained-task.txt");
         fs::write(&source,"keep original work").unwrap();
-        publish_author_review(&root,3,"reviewing");
+        publish_author_review(&root,3,state);
         let deadline=Instant::now()+Duration::from_secs(5);
         while !real_child_completion_visible(&run,pid) && Instant::now()<deadline {
             tick(&mut engine,&clock,Duration::ZERO);

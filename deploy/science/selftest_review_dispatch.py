@@ -26,7 +26,8 @@ def consume(config, ledger, universe, state):
             if (execution is None or execution.get('evaluation_id')!=request.get('evaluation_id')
                     or execution.get('snapshot_sha256')!=request.get('snapshot_sha256')):
                 pending[key]={'state':'waiting_platform','stage':'immutable_execution_registration',
-                              'commit':commit,'task':task,'author_role':author}
+                              'commit':commit,'task':task,'author_role':author,
+                              **{field:request[field] for field in ('job_id','idea_id','received_at') if field in request}}
                 dispatcher.publish_author_feedback({},pending[key],config)
                 continue
             existing=[(k,row) for k,row in ledger.items() if row.get('commit')==commit and row.get('task')==task]
@@ -45,10 +46,15 @@ def consume(config, ledger, universe, state):
                 now=time.time()
                 row=dict(key=key,pr=None,role=available[0],author_role=author,
                          commit=commit,task=task,**execution,job_id=request['job_id'],
+                         **{field:request[field] for field in ('idea_id','received_at') if field in request},
+                         **({'budget_summary':request['budget_summary']} if 'budget_summary' in request else {}),
                          generation=0,state='reviewing',stage='completeness',
                          assigned_at=now,updated_at=now,evaluator_assigned=True,
                          evaluator_activity_confirmed=False,snapshot_kind='registered-task-content-sha256')
                 ledger[key]=row
+                atomic_json(Path(state)/'ledger.json',ledger)
+            if 'budget_summary' in request and row.get('budget_summary')!=request['budget_summary']:
+                row['budget_summary']=request['budget_summary']
                 atomic_json(Path(state)/'ledger.json',ledger)
             entry=config['roles'][row['role']]
             destination=Path(entry['root'])/'home/role/review-assignment.json'
@@ -58,7 +64,7 @@ def consume(config, ledger, universe, state):
             # durable allocation and delivery to the selected evaluator.
             try:delivered=json.loads(destination.read_text())
             except (OSError,ValueError):delivered={}
-            if any(delivered.get(k)!=payload.get(k) for k in ('key','generation','commit','task','evaluation_id','snapshot_sha256')):
+            if any(delivered.get(k)!=payload.get(k) for k in ('key','generation','commit','task','evaluation_id','snapshot_sha256','budget_summary')):
                 atomic_json(destination,payload)
                 os.chown(destination,entry['uid'],entry['gid'])
             wake=Path(entry['root'])/'review-dispatch.json'

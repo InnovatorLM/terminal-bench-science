@@ -38,7 +38,10 @@ def validate_receipt(receipt,commit,task):
     if order != list(REQUIRED_ORDER):raise ValueError('Pre-submission checks must be recorded in order')
     if receipt.get('iteration_applied') is not True:raise ValueError('No result-driven iteration')
     active=receipt.get('active_iteration_seconds')
-    if isinstance(active,bool) or not isinstance(active,(int,float)) or not math.isfinite(active) or not 0<=active<=18000:raise ValueError('Author iteration exceeds five hours')
+    legacy_unknown=receipt.get('schema_version')==4 and receipt.get('budget_status')=='legacy_budget_unknown'
+    if legacy_unknown:
+        if active is not None:raise ValueError('Unknown historical budget cannot claim a measured duration')
+    elif isinstance(active,bool) or not isinstance(active,(int,float)) or not math.isfinite(active) or not 0<=active<=18000:raise ValueError('Author iteration exceeds five hours')
     if receipt.get('difficulty_viable') is not True:raise ValueError('Direction abandoned: difficulty not viable')
     if not isinstance(receipt.get('evidence_files'),list) or not receipt['evidence_files']:raise ValueError('Missing actual execution evidence')
     for entry in receipt['evidence_files']:
@@ -49,7 +52,7 @@ def validate_receipt(receipt,commit,task):
     # recording no previous execution/iteration. They must be requalified.
     if receipt.get('schema_version')==2:
         raise ValueError('Legacy automatic preflight requires evidence requalification')
-    if receipt.get('schema_version')==3 or receipt.get('origin')=='automatic_selftest_handoff':
+    if receipt.get('schema_version') in (3,4) or receipt.get('origin')=='automatic_selftest_handoff':
         paths={entry['path'] for entry in receipt['evidence_files']}
         checks_evidence=receipt.get('check_evidence')
         if not isinstance(checks_evidence,dict) or any(
@@ -63,11 +66,28 @@ def validate_receipt(receipt,commit,task):
         if (bridge.get('source_commit')!=commit or bridge.get('source_task_path')!=task
                 or bridge.get('snapshot_sha256')!=receipt['snapshot_sha256']):
             raise ValueError('Handoff proof version mismatch')
+        # Bind an admission to this exact executed job, not another successful
+        # run of the same commit/task. Check the current idea disposition on
+        # every approval, including cached qualification and dispatch retries.
+        status_path=Path(proof_path).parent/'status.json'
+        if str(status_path) not in paths:raise ValueError('Missing bound selftest status')
+        status_raw=read_operator_file(status_path)
+        status=json.loads(status_raw)
+        if (hashlib.sha256(status_raw).hexdigest()!=bridge.get('selftest_status_sha256')
+                or status.get('source_commit')!=commit or status.get('source_task_path')!=task
+                or status.get('snapshot_sha256')!=receipt['snapshot_sha256']
+                or status.get('job_id')!=status_path.parent.name):
+            raise ValueError('Handoff source job identity mismatch')
+        from selftest_budget_admission import assert_current_idea_active
+        assert_current_idea_active(status_path.parent,status)
         if (iteration.get('initial_review') or iteration.get('linked_execution_verified') is not True
                 or iteration.get('changed_committed_task') is not True
                 or not re.fullmatch('[a-f0-9]{32}',str(iteration.get('previous_job','')))):
             raise ValueError('Handoff lacks verified result-driven iteration')
-        if budget.get('within_budget') is not True or budget.get('active_iteration_seconds_upper_bound')!=active:
+        if legacy_unknown:
+            from selftest_budget_admission import validate_admission
+            validate_admission(budget,commit,task,expected_status=status)
+        elif budget.get('within_budget') is not True or budget.get('active_iteration_seconds_upper_bound')!=active:
             raise ValueError('Handoff budget evidence mismatch')
     return receipt
 
@@ -78,3 +98,18 @@ def approved(commit,task):
     if not p.exists():return False
     validate_receipt(json.loads(read_operator_file(p,1024*1024)),commit,task)
     return True
+
+
+def review_budget_summary(commit,task):
+    """Expose the admission limitation to reviewers without private file paths."""
+    validate_identity(commit,task)
+    key=commit+'-'+hashlib.sha256(task.encode()).hexdigest()[:16]
+    path=universe_root(W)/'.state/science-author-preflight'/(key+'.json')
+    if not path.exists():return None
+    receipt=validate_receipt(json.loads(read_operator_file(path,1024*1024)),commit,task)
+    if receipt.get('schema_version') not in (3,4):return None
+    proof=json.loads(read_operator_file(receipt['handoff_evidence']))
+    return dict(budget_status=receipt.get('budget_status','verified_within_budget'),
+                active_iteration_seconds=receipt['active_iteration_seconds'],
+                iteration_cutoff_at=proof['budget'].get('iteration_cutoff_at'),
+                scope=proof['budget'].get('scope','completed_frozen_version_only'))

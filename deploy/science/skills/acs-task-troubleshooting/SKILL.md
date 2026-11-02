@@ -9,6 +9,8 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 
 遇到本地演练的 `/app`、`/tests` 或 `/opt` 路径问题、pytest/CTRF 插件、上传内容与 commit 不一致时，读 [本地演练与题包预检](references/package-preflight.md)。这些问题需要区分角色环境和实际题目镜像，不应通过反复换 Dockerfile 猜测。
 
+镜像出现 `COPY failed` 或 `author_build_context_missing` 时，读 [构建上下文检查](references/docker-context.md)，核对冻结版本中 agent/verifier 各自的输入目录。
+
 同一题已有完成的审核、当前 PR 却仍在等待时，先读 [已审核版本与当前 PR 的交接](references/version-handoff.md)。旧版本结论、当前版本资格、最终合并是三个状态，不能互相替代。
 
 ## 先确定是哪一段失败
@@ -27,7 +29,7 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 | `rewards=null`、裸 `ValueError`、verifier 没输出 | 尚无有效分数。读异常类型和最后失败命令：可能是题包/verifier缺陷，也可能是平台；不能一律归 ACS，也不能算模型答错。 |
 | oracle=0 或 nop=1，且运行无基础设施异常 | 作者检查参考解、artifact传递、判题标准/容差和泄漏。nop通过意味着负对照异常；不是题目“太难”。 |
 | OOMKilled 或明确资源耗尽 | 由平台核实后从 4c/8Gi 升到最多 8c/16Gi；一般计算慢或错误答案不构成扩容证据。磁盘不足单独检查镜像/解包与临时存储，不能用加CPU冒充修复。 |
-| `selftest_passed` 但 `review_handoff` 是 `waiting_author` | 按 stage/reason 补真实作者自解、结果驱动修改及新 commit 复跑；首次自测不证明已完成迭代。 |
+| `selftest_passed` 但 `review_handoff` 是 `waiting_author` | 先看 stage：`review_request_required` 使用交接文档中的 `request-review` 补申请，不重跑；确实缺作者自解或结果驱动迭代才修题并复跑。首次自测不证明已完成迭代。 |
 | `selftest_passed` 但 `review_handoff` 是 `waiting_platform` | 保留通过的原 job，提交登记/证据缺项一次，等待平台修复。不要为补交接重复跑相同自测。 |
 | 迭代计时的历史观测缺失或开始时间冲突 | 平台核对原始 observation、暂停区间和历史记录。作者保留现有 idea 和通过的 job；无需修改题目、全盘搜索平台源码、反复自测或重置五小时预算。 |
 | 五次 reward 已有但缺 trajectory/imageID/资源回显 | 是证据未闭环，先请求补收集/登记现存文件。配置请求不等于实际Pod回显，历史已删除Pod的信息不能编造。 |
@@ -49,3 +51,5 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 满 4 小时没有完成时先排查缺文件、环境/模型接口/工具故障、verifier缺陷。排除这些原因后确属题目困难的超时，记录依据并按模型错误计分，可作为难度的正面证据；不要伪造原始 verifier reward。未经分类的 timeout 或缺轨迹只能保留未完成证据，不能直接算错或宣称高质量。
 
 作者同一思路主动迭代超过 5 小时（扣除有平台记录的 ACS 时间），或已无法保证难度，应记录失败经验并换思路。不得重建 idea ID、清空历史或重复提交同版本来重置计时。
+
+已完成版本的作者预算截止于该次自测完成，后续交接等待不继续累计。若平台历史观测无法恢复，只有经过单独核对的已完成固定版本可带 `legacy_budget_unknown` 进入独立审核；这是未知时长，不是零用时或证明五小时内完成。evaluator 保留派单的 `budget_summary` 限制，独立审核科学质量。此例外不能延长作者继续迭代的预算，也不能恢复明确已放弃的思路。

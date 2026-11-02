@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import json
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import AsyncMock,patch
 from evaluation_queue import W
@@ -27,10 +29,9 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual((Path(raw)/'reward.txt').read_text(),'1\n')
             self.assertEqual((Path(raw)/'ctrf.json').stat().st_mode&0o777,0o600)
 
-    def test_unsafe_verifier_path_and_missing_reward_refused(self):
+    def test_unsafe_verifier_path_refused(self):
         obj=object.__new__(UniverseACK)
-        for data in [{'test-stdout.txt':base64.b64encode(b'pass').decode()},
-                     {'reward.txt':base64.b64encode(b'1').decode(),'../escape':base64.b64encode(b'bad').decode()}]:
+        for data in [{'reward.txt':base64.b64encode(b'1').decode(),'../escape':base64.b64encode(b'bad').decode()}]:
             with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
                 with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
                     with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',raw))
@@ -42,8 +43,7 @@ class EvidenceTests(unittest.TestCase):
             payload={'test-stdout.txt':b'Collected tests; waiting for result\n',
                      'test-stderr.txt':b'No result before timeout\n',
                      'details/progress.txt':b'phase: verify\n'}
-            with self.assertRaisesRegex(ValueError,'Missing verifier reward; available diagnostics retained'):
-                self.collect(payload,root)
+            self.collect(payload,root)
             for name,value in payload.items():
                 self.assertEqual((root/name).read_bytes(),value)
                 self.assertEqual((root/name).stat().st_mode&0o777,0o600)
@@ -63,9 +63,8 @@ class EvidenceTests(unittest.TestCase):
     def test_missing_reward_respects_log_filters_and_retains_protected_diagnostics(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw)
-            with self.assertRaises(ValueError):
-                self.collect({'test-stdout.txt':b'output','test-stderr.txt':b'error','debug.txt':b'debug'},root,
-                             include=['test-stdout.txt'],protect=['test-stderr.txt'])
+            self.collect({'test-stdout.txt':b'output','test-stderr.txt':b'error','debug.txt':b'debug'},root,
+                         include=['test-stdout.txt'],protect=['test-stderr.txt'])
             self.assertEqual((root/'test-stdout.txt').read_bytes(),b'output')
             self.assertEqual((root/'test-stderr.txt').read_bytes(),b'error')
             self.assertFalse((root/'debug.txt').exists())
@@ -109,6 +108,84 @@ class EvidenceTests(unittest.TestCase):
             obj._validate_definition()
             obj.environment_dir=Path(raw)/'absent'
             with self.assertRaises(FileNotFoundError):obj._validate_definition()
+
+    def test_real_harbor_verifier_reports_missing_reward_not_download_failure(self):
+        from harbor.models.task.task import Task
+        from harbor.models.trial.paths import TrialPaths
+        from harbor.verifier.verifier import Verifier, RewardFileNotFoundError
+        from acs_result_diagnostics import classify_trial
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);task_dir=root/'task';(task_dir/'tests').mkdir(parents=True)
+            (task_dir/'task.toml').write_text('schema_version="1.0"\n')
+            (task_dir/'instruction.md').write_text('Write a result.')
+            (task_dir/'tests/test.sh').write_text('#!/bin/sh\nset -e\ntest -f /app/result.json\n')
+            task=Task(task_dir);paths=TrialPaths(root/'trial');paths.mkdir()
+            obj=object.__new__(UniverseACK);obj.task_env_config=task.config.environment
+            encoded={'test-stdout.txt':base64.b64encode(b'').decode()}
+            async def execute(*,command,**kwargs):
+                if command.startswith('python3 -I -c '):
+                    return SimpleNamespace(return_code=0,stdout=json.dumps(encoded),stderr='')
+                return SimpleNamespace(return_code=1,stdout='',stderr='')
+            verifier=Verifier(task=task,trial_paths=paths,environment=obj,skip_tests_upload=True)
+            with patch.object(UniverseACK,'exec',AsyncMock(side_effect=execute)):
+                with self.assertRaises(RewardFileNotFoundError) as caught:
+                    asyncio.run(verifier.verify())
+            self.assertTrue(paths.test_stdout_path.is_file())
+            self.assertFalse(paths.reward_text_path.exists())
+            diagnostic=classify_trial({'verifier_result':None,'exception_info':{
+                'exception_type':type(caught.exception).__name__,'exception_message':str(caught.exception)}})
+            self.assertFalse(diagnostic['scored']);self.assertIsNone(diagnostic['reward'])
+
+    def test_real_ack_empty_tar_cannot_claim_success_or_reuse_old_file(self):
+        # Exercise the actual upstream downloader: an empty tar used to return
+        # success even when the remote source did not exist.
+        buf=io.BytesIO()
+        with tarfile.open(fileobj=buf,mode='w'):
+            pass
+        class Stream:
+            def __init__(self):self.open=True
+            def is_open(self):return self.open
+            def update(self,timeout):pass
+            def peek_stdout(self):return True
+            def read_stdout(self):self.open=False;return buf.getvalue()
+        obj=object.__new__(UniverseACK);obj._exec_api=SimpleNamespace(connect_get_namespaced_pod_exec=object())
+        obj.pod_name='offline';obj.namespace='default'
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            target=Path(raw)/'result.json';target.write_text('stale result')
+            with patch.object(UniverseACK,'_ensure_client',AsyncMock()), \
+                    patch('harbor.environments.ack.stream',return_value=Stream()):
+                with self.assertRaisesRegex(FileNotFoundError,'ACK download produced no file'):
+                    asyncio.run(obj.download_file('/app/missing.json',target))
+            self.assertEqual(target.read_text(),'stale result')
+            self.assertEqual(list(Path(raw).iterdir()),[target])
+
+    def test_file_download_requires_new_regular_file_and_rejects_symlinks(self):
+        obj=object.__new__(UniverseACK)
+        for kind in ('file','directory','symlink'):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                root=Path(raw);target=root/'output';outside=root/'outside';outside.write_text('original')
+                async def transfer(source,downloaded):
+                    if kind=='file':downloaded.write_bytes(b'new\x00bytes')
+                    elif kind=='directory':downloaded.mkdir()
+                    else:downloaded.symlink_to(outside)
+                with patch('universe_ack.ACKEnvironment.download_file',AsyncMock(side_effect=transfer)):
+                    if kind=='file':
+                        asyncio.run(obj.download_file('/app/output',target))
+                        self.assertEqual(target.read_bytes(),b'new\x00bytes')
+                        self.assertEqual(target.stat().st_mode&0o777,0o600)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'regular file'):
+                            asyncio.run(obj.download_file('/app/output',target))
+                        self.assertFalse(target.exists())
+                self.assertEqual(outside.read_text(),'original')
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);outside=root/'outside';outside.write_text('original')
+            target=root/'linked';target.symlink_to(outside)
+            with patch('universe_ack.ACKEnvironment.download_file',AsyncMock()) as transfer:
+                with self.assertRaisesRegex(ValueError,'Symlink'):
+                    asyncio.run(obj.download_file('/app/output',target))
+                transfer.assert_not_awaited()
+            self.assertEqual(outside.read_text(),'original')
 
     def test_capture_failure_does_not_block_cleanup(self):
         obj=object.__new__(UniverseACK)

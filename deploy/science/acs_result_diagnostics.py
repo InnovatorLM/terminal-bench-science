@@ -33,7 +33,20 @@ def classify_trial(result: dict[str, Any]) -> dict[str, Any]:
         return {'status':'infrastructure_error','diagnostic':'trial_exception_with_reward','scored':False,'reward':None}
 
     if verifier is None:
-        if exception_type == "ValueError" and "network policy" in exception_message:
+        if exception_type == "RewardFileNotFoundError":
+            # Missing verifier output needs cause review; it does not by
+            # itself establish task, platform, or network responsibility.
+            kind = "verifier_reward_missing"
+        elif exception_type == "DownloadVerifierDirError":
+            # Old adapters raised missing reward inside download_dir, so
+            # Harbor wrapped it as a transfer error. Preserve that distinction
+            # without changing the historical result or fabricating a score.
+            exception_traceback = str(exception.get("exception_traceback") or "").lower()
+            if "missing verifier reward" in exception_message or "missing verifier reward" in exception_traceback:
+                kind = "legacy_verifier_reward_missing"
+            else:
+                kind = "verifier_evidence_transfer_failed"
+        elif exception_type == "ValueError" and "network policy" in exception_message:
             kind = "platform_dynamic_network_policy_mismatch"
         elif exception_type:
             kind = "trial_exception_before_verifier"

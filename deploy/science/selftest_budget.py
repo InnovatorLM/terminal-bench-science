@@ -67,14 +67,17 @@ def maintenance_intervals(state, role, start, end):
     return merge(intervals,start,end)
 
 
-def verify(state, role, idea, observation, at):
-    at=number(at);observed=read_observation(observation,role,idea)
+def verify(state, role, idea, observation, at, *, completed_at=None):
+    at=number(at);end=at if completed_at is None else number(completed_at)
+    if end>at:raise ValueError('Completion is in the future')
+    observed=read_observation(observation,role,idea)
     if observed.get('role')!=role:raise ValueError('Clock observation role mismatch')
     row=observed.get('ideas',{}).get(idea)
     if not row or row.get('status')=='abandoned':raise ValueError('Missing or abandoned observed idea')
     events=row.get('events')
     if not events or events[0].get('action')!='start':raise ValueError('Missing original observed idea start')
     start=number(events[0]['at']);last=start
+    if end<start:raise ValueError('Completion precedes original idea start')
     for event in events:
         instant=number(event['at'])
         if instant<last or instant>at:raise ValueError('Invalid observed idea chronology')
@@ -102,6 +105,9 @@ def verify(state, role, idea, observation, at):
                 role=role,idea_id=idea,recorded_idea_started_at=start,first_observed_at=first,
                 earliest_selftest_job=earliest['job_id'],earliest_selftest_received_at=received)
     for received,status in statuses:
+        # Later independent jobs cannot lengthen or refund this completed
+        # version's authoring budget, nor make its cleanup uncertain again.
+        if received>end:continue
         for trial in status.get('trials',[]):
             if trial.get('cleanup_confirmed') is not True:raise ValueError('ACS cleanup not confirmed for idea')
             lower=number(trial.get('acs_started_at'));upper=number(trial.get('acs_finished_at'))
@@ -109,10 +115,10 @@ def verify(state, role, idea, observation, at):
             intervals.append((lower,upper))
         jobs.append(status['job_id'])
     if not jobs:raise ValueError('No source-bound selftest for observed idea')
-    acs=merge(intervals,start,at)
-    maintenance=maintenance_intervals(state,role,start,at)
-    excluded=merge([*acs,*maintenance],start,at);refund=sum(b-a for a,b in excluded)
-    active=at-start-refund
+    acs=merge(intervals,start,end)
+    maintenance=maintenance_intervals(state,role,start,end)
+    excluded=merge([*acs,*maintenance],start,end);refund=sum(b-a for a,b in excluded)
+    active=end-start-refund
     return dict(idea_id=idea,active_iteration_seconds_upper_bound=active,
                 recorded_idea_started_at=start,observed_before_selftest=True,
                 acs_excluded_seconds=sum(b-a for a,b in acs),verified_acs_intervals=acs,
@@ -120,5 +126,6 @@ def verify(state, role, idea, observation, at):
                 verified_maintenance_intervals=maintenance,
                 total_excluded_seconds=refund,verified_excluded_intervals=excluded,
                 selftest_jobs=sorted(jobs),within_budget=active<=18000,
+                iteration_cutoff_at=end,observed_at=latest,
                 unverified_pauses_refunded=False,event_origin_attested=False,
                 scientific_acceptance=False)

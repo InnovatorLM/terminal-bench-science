@@ -235,8 +235,9 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(api.issues,[])
 
     @patch('review_dispatcher.registered_execution',return_value={'evaluation_id':'example-v1','snapshot_sha256':'a'*64})
+    @patch('author_submission_gate.review_budget_summary',return_value={'budget_status':'legacy_budget_unknown','active_iteration_seconds':None,'iteration_cutoff_at':100,'scope':'completed_frozen_version_only'})
     @patch("author_submission_gate.approved", return_value=True)
-    def test_exclusive_wait_resume_and_revision(self, approved, execution):
+    def test_exclusive_wait_resume_and_revision(self, approved, budget, execution):
         import tempfile,json,os
         from pathlib import Path
         import review_dispatcher as m
@@ -254,6 +255,8 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(row['evaluation_id'],'example-v1')
                 self.assertEqual(row['snapshot_sha256'],'a'*64)
                 receipt=Path(cfg['roles'][row['role']]['root'])/'home/role/review-status.json'
+                assignment=json.loads((receipt.parent/'review-assignment.json').read_text())
+                self.assertEqual(assignment['budget_summary'],budget.return_value)
                 receipt.write_text(json.dumps({'key':'30:abc','generation':0,'state':'waiting_author','stage':'completeness','updated_at':100}))
                 (receipt.parent/'activity-receipt.json').write_text(json.dumps({'receipt_type':'evaluator-activity-v1','key':'30:abc','generation':0,'updated_at':100}))
                 m.reconcile(api,cfg,ledger);self.assertEqual(api.issues[0]['state'],'closed')

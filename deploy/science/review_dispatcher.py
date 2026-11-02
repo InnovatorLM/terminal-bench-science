@@ -61,8 +61,29 @@ def author_for_pr(pr, config):
 def publish_author_feedback(pr, row, config):
     author=row.get('author_role') or author_for_pr(pr,config)
     if not author: return
-    key=row.get('key') or str(row.get('pr'))+':'+str(row.get('commit'))
     root=Path(config['roles'][author]['root'])
+    from selftest_feedback import feedback_lock
+    with feedback_lock(root):
+        _publish_author_feedback_locked(pr,row,config,root)
+
+def _publish_author_feedback_locked(pr,row,config,root):
+    from selftest_feedback import BINDING_FIELDS,current_request,same_binding,current_idea_matches
+    key=row.get('key') or str(row.get('pr'))+':'+str(row.get('commit'))
+    row=dict(row)
+    current_selftest=current_request(root)
+    if (current_selftest and row.get('job_id') is not None
+            and (row['job_id']!=current_selftest.get('job_id')
+                 or (row.get('idea_id') is not None and row['idea_id']!=current_selftest.get('idea_id')))):
+        return
+    if row.get('feedback_source')=='selftest_handoff':
+        if (not same_binding(current_selftest,row)
+                or not current_idea_matches(root,row.get('idea_id'))):return
+    elif (current_selftest.get('commit')==row.get('commit')
+            and current_selftest.get('task')==row.get('task')):
+        # Exact-version review can take over a recovered self-test handoff. A
+        # different job/idea explicitly supplied by a caller is never replaced.
+        for field in BINDING_FIELDS:
+            row.setdefault(field,current_selftest.get(field))
     # Never let an older PR revision overwrite a newer exact-commit handoff
     # already owned by this author.  Without this guard, the periodic Forgejo
     # scan can replace a current reviewing assignment with stale waiting data.
@@ -73,6 +94,15 @@ def publish_author_feedback(pr, row, config):
             existing_key=str(existing.get('key',''))
             same_version=(existing.get('task')==row.get('task') and
                           existing.get('commit',existing.get('required_commit'))==row.get('commit'))
+            if (existing.get('feedback_source')=='selftest_handoff'
+                    and existing.get('state')=='waiting_platform'
+                    and same_binding(existing,current_selftest)):
+                # Re-scanning an old PR (even the same commit's unqualified
+                # preflight) cannot replace the actionable platform ownership.
+                handoff_update=row.get('feedback_source')=='selftest_handoff' and same_binding(existing,row)
+                real_review=(same_binding(existing,row) and row.get('evaluation_id')
+                             and row.get('role') in config['roles'])
+                if not handoff_update and not real_review:return
             # A historical direct assignment is still reconciled every cycle.
             # Its completed receipt must not replace the current PR's repair
             # instructions just because that history is visited first.
@@ -90,21 +120,23 @@ def publish_author_feedback(pr, row, config):
     payload={'key':key,'generation':row.get('generation',0), 'commit':row.get('commit'),
              'state':row.get('state'),'stage':row.get('stage'),'reason':row.get('reason',''),
              'task':row.get('task'),'evaluator':row.get('role'),
-             # The author is paused only after the evaluator has confirmed
-             # activity for this exact generation. A just-published assignment
-             # is still waiting for the evaluator runner to read it.
+             # Review ownership needs confirmed evaluator activity. A separate
+             # exact-job platform wait also parks the author until repaired.
              'author_must_pause':(row.get('state')=='reviewing'
-                                  and row.get('evaluator_activity_confirmed') is True),
+                                  and row.get('evaluator_activity_confirmed') is True)
+                                 or (row.get('state')=='waiting_platform'
+                                     and row.get('feedback_source')=='selftest_handoff'),
              'updated_at':time.time()}
+    for field in (*BINDING_FIELDS,'feedback_source','error_type','evidence_gap',
+                  'retry_requires_task_change','selftest_rerun_required'):
+        if field in row:payload[field]=row[field]
     if pr.get('number') is not None or row.get('pr') is not None:
         payload['pr']=pr.get('number',row.get('pr'))
     if row.get('prior_reviews'):
         payload['prior_reviews']=row['prior_reviews']
         payload['next_action']=row.get('next_action','')
-    # A platform-waiting author is not paused: it has a concrete, bounded
-    # action to complete before evaluator ownership can exist. Persist that
-    # action beside the status so a fresh author session cannot drift to an
-    # unrelated candidate while this PR is the next eligible submission.
+    # An exact self-test platform wait parks the author until the platform
+    # repairs this job's handoff. It never asks the author to rerun ACS.
     if row.get('state') == 'waiting_platform':
         payload['next_action'] = ('Platform intervention is required for this exact assignment. '
                                   'Preserve the task, self-test and immutable evidence; '
@@ -128,7 +160,8 @@ def publish_author_feedback(pr, row, config):
     # Public exact-current marker consumed by the controller.  It is separate
     # from the evaluator's private assignment and is replaced atomically so an
     # old author feedback file cannot pause a newer session.
-    current = {k: payload.get(k) for k in ('key','generation','commit','task','state')}
+    current = {k: payload.get(k) for k in ('key','generation','commit','task','state',
+                                         *BINDING_FIELDS,'feedback_source') if k in payload}
     atomic(root/'review-current-assignment.json', current)
     (root/'review-current-assignment.json').chmod(0o644)
 
@@ -273,7 +306,7 @@ def reconcile(api,config,ledger):
             direct_key,row=direct[0]
             publish_author_feedback(pr,dict(row,key=direct_key),config)
             continue
-        from author_submission_gate import approved
+        from author_submission_gate import approved, review_budget_summary
         gate_error=None
         try:eligible=approved(pr['head']['sha'],task)
         except (OSError,ValueError,KeyError,TypeError) as error:
@@ -337,6 +370,8 @@ def reconcile(api,config,ledger):
                        issue=None, assigned_at=time.time(),
                        evaluator_assigned=True,
                        evaluator_activity_confirmed=False)
+        summary=review_budget_summary(pr['head']['sha'],task)
+        if summary is not None:row['budget_summary']=summary
         root=Path(config['roles'][row['role']]['root'])
         advance_review(key,row,config)
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):

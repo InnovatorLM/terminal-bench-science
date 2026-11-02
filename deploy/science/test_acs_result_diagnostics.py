@@ -22,6 +22,41 @@ class TrialDiagnosticsTest(unittest.TestCase):
         self.assertEqual(got["diagnostic"], "verifier_result_missing")
         self.assertFalse(got["scored"])
 
+    def test_missing_reward_exception_requires_cause_review(self):
+        got = classify_trial({"verifier_result": None, "exception_info": {
+            "exception_type": "RewardFileNotFoundError",
+            "exception_message": "No reward file found",
+        }})
+        self.assertEqual(got["diagnostic"], "verifier_reward_missing")
+        self.assertFalse(got["scored"])
+        self.assertIsNone(got["reward"])
+
+    def test_verifier_transfer_error_is_distinct_from_missing_reward(self):
+        got = classify_trial({"verifier_result": None, "exception_info": {
+            "exception_type": "DownloadVerifierDirError",
+            "exception_message": "Failed to download verifier directory from environment",
+            "exception_traceback": "ConnectionError: connection closed during transfer",
+        }})
+        self.assertEqual(got["diagnostic"], "verifier_evidence_transfer_failed")
+        self.assertFalse(got["scored"])
+        self.assertIsNone(got["reward"])
+
+    def test_legacy_missing_reward_wrapped_as_download_error(self):
+        for key in ("exception_message", "exception_traceback"):
+            with self.subTest(evidence_key=key):
+                exception = {
+                    "exception_type": "DownloadVerifierDirError",
+                    "exception_message": "Failed to download verifier directory from environment",
+                    key: "ValueError: Missing verifier reward; see retained verifier logs",
+                }
+                result = {"verifier_result": None, "exception_info": exception}
+                original = {"verifier_result": None, "exception_info": dict(exception)}
+                got = classify_trial(result)
+                self.assertEqual(got["diagnostic"], "legacy_verifier_reward_missing")
+                self.assertFalse(got["scored"])
+                self.assertIsNone(got["reward"])
+                self.assertEqual(result, original)
+
     def test_valid_reward_is_scored(self):
         got = classify_trial({"verifier_result": {"rewards": {"reward": 1}}})
         self.assertEqual(got["diagnostic"], "ok")
@@ -37,6 +72,9 @@ class TrialDiagnosticsTest(unittest.TestCase):
 
     def test_exceptions_cannot_be_hidden_by_a_reward(self):
         for key,value in [('exception_info',{'exception_type':'ValueError'}),
+                          ('exception_info',{'exception_type':'RewardFileNotFoundError'}),
+                          ('exception_info',{'exception_type':'DownloadVerifierDirError',
+                                             'exception_message':'Missing verifier reward'}),
                           ('exception_info',{'exception_type':'AgentTimeoutError'}),
                           ('cleanup_exception_info',{'exception_type':'RuntimeError'})]:
             with self.subTest(key=key,value=value):
