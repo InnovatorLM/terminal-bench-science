@@ -7,6 +7,13 @@ REPO='/repos/team/terminal-bench-science'
 MARK='<!-- exclusive-review-v1 -->'
 STATES={'reviewing','waiting_author','waiting_platform','completed'}
 REVIEW_ACTIVITY_TIMEOUT=300
+# Forgejo's pull-list response becomes very slow for this repository when a
+# large page is requested: it expands metadata for every open PR, and a page
+# of 50 can sit in the HTTP handler until the dispatcher timeout.  Keep the
+# polling request bounded so one large or recently-updated PR cannot prevent
+# all review assignments from being reconciled.  Pagination still visits the
+# complete list, just in small stable batches.
+FORGEJO_PAGE_SIZE=5
 
 def atomic(path,data):
     stage=path.with_suffix('.pending');stage.write_text(json.dumps(data,ensure_ascii=False,indent=2));stage.chmod(0o600);stage.replace(path)
@@ -195,7 +202,7 @@ class Api:
     def pages(self,path):
         out=[]
         for page in range(1,1001):
-            batch=self.call('GET',path+('&' if '?' in path else '?')+'limit=50&page='+str(page))
+            batch=self.call('GET',path+('&' if '?' in path else '?')+'limit='+str(FORGEJO_PAGE_SIZE)+'&page='+str(page))
             if not batch:return out
             out+=batch
             # Forgejo may spend a long time answering pages beyond the end of
