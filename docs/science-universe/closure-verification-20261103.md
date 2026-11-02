@@ -28,8 +28,16 @@
 5. self-test 默认 10 个 worker，同作者一个任务；继承存活 worker 锁计入容量。30 秒指标区分排队、构建、ACS 阶段。本机构建仍只有一个槽位，worker 数不能冒充同时构建数或实际 Pod 数。详见 [容量说明](selftest-capacity.md)。
 6. verifier 在构建前检查入口和静态输入；shared/继承 separate 的合法复用保留，显式 verifier 镜像按 Harbor 契约优先并固定 digest。详见 [构建前检查](verifier-preflight-20261103.md)。
 
-本轮新增校验均为本地/已有证据核验，没有新增模型或云评测费用。针对各修改的回归测试已分别记录于对应文档；重叠测试套件不累加为独立测试总数。
+恢复前的上述校验使用本地或已有证据，没有为验证重复启动模型/云评测。恢复后的真实角色活动见下文。针对各修改的回归测试已分别记录于对应文档；重叠测试套件不累加为独立测试总数。
 
 ## 恢复状态
 
-此文首次写入时生产宇宙仍暂停。角色能力与证据交付已通过现场检查；剩余恢复工作是周期备份入口修复、最新关键文件恢复抽检、源码备份及启动后的实际服务观察。完整运行树备份仍是 partial，不能把关键文件恢复成功称为全量环境备份完成。恢复后在此节追加具体进程、队列和轨迹观察结果。
+截至 2026-11-02 23:45 UTC，生产宇宙已恢复，launcher 为 395271，controller 为 397370。Forgejo 主页 HTTP 200；9 位作者、evaluator-01 与 curator 共 11 个角色已有新会话，均记录了实际模型回复和工具活动，原始 `transcript.jsonl` 持续写入。author-07 正常等待其独占 evaluator 审核；evaluator-02/03 的派单状态分别为 completed/waiting_author，当前不应为制造活动而重新启动重复审核。
+
+评测 supervisor 实际回执为上限 50、派发未暂停；self-test 新 supervisor 已写出实时 `queue-status.json`，容量 10、恢复时没有待处理请求。command watchdog 存活，本轮日志未出现时钟对账失败或 inspection_required。观察回执为 `resumed-role-activity.json` 与 `resume-observation-*.json`，不能用旧轨迹 mtime 更新代替新会话证据。
+
+修复了直接调用当前 runtime/start 时工作区 `.tmp` 路径跳过定时备份的问题。现在单一备份进程由 launcher 托管，每轮预算 300 秒、间隔 600 秒，续接既有目标 `.state/backups/live/recovery`；外层启动器不另起重复定时器。启动后已观察到实际备份进程及断点推进。备份 23 项、launcher 13 项测试通过。
+
+恢复前已实际还原 570 个关键文件并核验哈希；569 个普通文件与最新源一致，Forgejo 数据库通过全部 132 张表的 schema 与行内容校验。5 份源端不存在的历史 binding 单独列缺项，不冒充备份丢失或补造文件。源码 HEAD `0028843` 已归档并从归档抽检恢复，原有 15 个未提交文件独立保存且未代提交。关键恢复与源码回执位于工作区 `.state/backups/live/resume-verification-20261102T231507Z/`。完整运行树备份仍是 partial，不能把关键文件恢复成功称为全量历史备份完成。
+
+另观察到一项后续性能优化：控制器启动会重复全量读取历史轨迹。589 份历史 transcript 约 1.12 GB，启动期间累计读取约 4.99 GB，至 author-08 新会话约 229 秒。恢复已完成，本轮未为此再次停止宇宙；具体代码路径保存在 `startup-history-scan.json`，后续应优化已结束会话的索引读取。
