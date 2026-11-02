@@ -96,6 +96,11 @@ def build(args):
         if protocol == 'responses' and args.agent != 'codex-preinstall':
             config['agents'][0]['kwargs'].pop('max_tokens')
             config['agents'][0]['kwargs']['config']['model']['model_kwargs']['max_output_tokens'] = 4096
+    try:
+        from .execution_budget import apply
+    except ImportError:
+        from execution_budget import apply
+    apply(config)
     return config
 
 

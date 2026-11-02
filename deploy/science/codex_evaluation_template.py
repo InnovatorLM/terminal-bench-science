@@ -10,7 +10,7 @@ def prepare(base, receipt):
     c.update(job_name='tbs-universe-linfeng-template',n_attempts=1,n_concurrent_trials=1)
     c['retry']={'max_retries':0}
     c.setdefault('verifier',{}).update(include_logs=[],exclude_logs=[])
-    c['agents']=[dict(name='codex-preinstall',model_name='openai/deepseek-v4.1-flash-1017',
+    c['agents']=[dict(name=None,import_path='universe_codex:UniverseCodex',model_name='openai/deepseek-v4.1-flash-1017',
         override_timeout_sec=14400,kwargs={'version':receipt['harness_versions']['codex']},
         env=dict(OPENAI_API_KEY='${OPENAI_API_KEY}',OPENAI_BASE_URL='https://dawnfm.gravarc.cn/v1',
                  OPENAI_API_BASE='https://dawnfm.gravarc.cn/v1',CODEX_MODEL_PROVIDER='dawnfm',
@@ -31,6 +31,8 @@ def prepare(base, receipt):
                       'resources':{'requests':resources.copy(),'limits':resources.copy()}}]}
     for key in list(c):
         if key.startswith('export'):c.pop(key)
+    from acs_helpers.execution_budget import apply
+    apply(c)
     check_config(c)
     return c
 

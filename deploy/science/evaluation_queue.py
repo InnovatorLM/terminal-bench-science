@@ -124,7 +124,9 @@ def validated_template(entry, request):
     if environment.get('use_sandbox_claim') is not False or any(not re.fullmatch(image_pattern, environment.get(key, '')) for key in ['runtime_image', 'verifier_image']):
         raise ValueError('Require direct Pods and digest-pinned project ACR images')
     agent = config['agents'][0]
-    codex = agent.get('name') == 'codex-preinstall' and not agent.get('import_path')
+    codex = (agent.get('name') == 'codex-preinstall' and not agent.get('import_path') or
+             agent.get('name') in (None, 'codex-preinstall') and
+             agent.get('import_path') == 'universe_codex:UniverseCodex')
     legacy = agent.get('import_path') == 'universe_metrics:MetadataOnlyMiniSwe'
     if agent.get('model_name') != 'openai/deepseek-v4.1-flash-1017' or not (codex or legacy):
         raise ValueError('Model/harness refused')
@@ -175,16 +177,24 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
         errors += evaluation.get('n_errors', 0)
         rewards.extend(float(key) for key in evaluation.get('reward_stats', {}).get('reward', {}))
     metadata = []
+    timeout_details = None
     if result_path.exists():
         for path in result_path.parent.glob('*/result.json'):
             trial = json.loads(path.read_text())
             diagnostics.append(classify_trial(trial))
+            if diagnostics[-1]['diagnostic']=='agent_timeout_requires_cause_review':
+                from timeout_review import timeout_context
+                timeout_details=timeout_context(trial,config)
             data = ((trial.get('agent_result') or {}).get('metadata') or {}).get('aggregate_metrics')
             if isinstance(data, dict):
                 metadata.append({key: value for key, value in data.items() if key in {'input_tokens', 'output_tokens', 'model_messages', 'tool_result_messages', 'native_tool_calls'} and (value is None or type(value) is int and value >= 0)})
     unscored = [item for item in diagnostics if not item['scored']]
-    timeout_review = any(item['diagnostic'] == 'agent_timeout_requires_cause_review' for item in unscored)
-    infrastructure = any(item['diagnostic'] != 'agent_timeout_requires_cause_review' for item in unscored)
+    if not diagnostics and report.get('error_type') == 'TimeoutError':
+        diagnostics.append({'status': 'incomplete', 'diagnostic': 'controller_timeout_requires_cause_review',
+                            'scored': False, 'reward': None})
+        unscored = diagnostics[:]
+    timeout_review = any(item['diagnostic'].endswith('timeout_requires_cause_review') for item in unscored)
+    infrastructure = any(not item['diagnostic'].endswith('timeout_requires_cause_review') for item in unscored)
     status = ('infrastructure_failed' if infrastructure else
               'agent_timeout_requires_cause_review' if timeout_review else
               'solver_complete' if complete and cleanup and errors == 0 else 'failed')
@@ -193,6 +203,7 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
     if status == 'solver_complete' and not evidence['complete']:
         status = 'incomplete_evidence'
     return {'status': status, **public_status(evidence),
+            **({'timeout_review_context':timeout_details} if timeout_details is not None else {}),
             'reward': rewards[0] if len(rewards) == 1 and complete and not unscored else None,
             'cleanup_confirmed': cleanup, 'n_errors': errors if stats.get('evals') else None,
             'input_tokens': stats.get('n_input_tokens'), 'output_tokens': stats.get('n_output_tokens'),
@@ -306,6 +317,14 @@ def process(config, request_path, mock=False):
             private.mkdir(mode=0o700)
             atomic_json(private / 'identity.json', {'evaluation_id': request['evaluation_id'], 'snapshot_sha256': entry['snapshot_sha256'], 'snapshot_path': entry['snapshot'], 'provider': 'dawnfm', 'model': 'deepseek-v4.1-flash-1017', 'runtime_image': template['environment']['kwargs']['runtime_image'], 'verifier_image': template['environment']['kwargs']['verifier_image']})
             options['private_trajectory_dir'] = str(private)
+        if dispatch == 'solver':
+            agent=template['agents'][0]
+            # Preserve registered template bytes; record the actual platform
+            # adapter without a competing built-in name that would bypass it.
+            from runtime_trust import configure_agent
+            configure_agent(agent)
+            from acs_helpers.execution_budget import apply as apply_execution_budget
+            execution_budget = apply_execution_budget(template)
         atomic_json(job / 'config.json', template)
         env = os.environ.copy()
         env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(Path(__file__).parent / 'harbor-extensions') + ':' + str(Path(__file__).parent) + ':' + str(W / '.local/harbor-extensions'))
@@ -332,7 +351,7 @@ def process(config, request_path, mock=False):
                 if stop_requested:
                     stop(None, None)
                 try:
-                    child.wait(timeout=75600 if dispatch == 'quality_diagnostic' and quality_backend == 'acs' else 15600 if dispatch == 'solver' else 1800)
+                    child.wait(timeout=75600 if dispatch == 'quality_diagnostic' and quality_backend == 'acs' else execution_budget['worker_seconds'] if dispatch == 'solver' else 1800)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGTERM)
                     child.wait(timeout=180)
@@ -366,7 +385,7 @@ def process(config, request_path, mock=False):
             report = json.loads((job / 'report.json').read_text())
             result_path = job / 'runs' / template['job_name'] / 'result.json'
             unchanged = digest_tree(Path(entry['snapshot'])) == entry['snapshot_sha256']
-            from execution_evidence import inspect, materialize_private_trajectory
+            from execution_evidence import inspect, materialize_private_trajectory, trial_directories
             if private is not None and (private/'retention.json').exists():
                 try:materialize_private_trajectory(private,result_path,entry,template)
                 except (OSError,ValueError,KeyError,TypeError) as error:
@@ -375,7 +394,7 @@ def process(config, request_path, mock=False):
             atomic_json(job / 'evidence-manifest.json', evidence)
             answer.update(aggregate(report, result_path, template, entry['snapshot_sha256'], unchanged))
             # Failed runs also need a diagnostic packet when the verifier never starts.
-            if evidence['checks']['trajectory_retained'] or evidence['checks']['verifier_retained']:
+            if trial_directories(result_path.parent):
                 from publish_evidence import publish
                 from selftest_logs import credential_values
                 packet_root = Path(config['results']).parent / 'evidence'
@@ -384,11 +403,15 @@ def process(config, request_path, mock=False):
                 if packet_root.is_symlink() or packet_root.stat().st_mode & 0o022:
                     raise ValueError('Unsafe evaluator evidence directory')
                 packet = packet_root / request['job_id']
-                trial = next(result_path.parent.glob('*/result.json')).parent
+                trials = trial_directories(result_path.parent)
+                if len(trials) != 1:
+                    raise ValueError('Expected exactly one diagnostic trial')
+                trial = trials[0]
                 receipt = publish(trial, packet, credential_values(Path(config['results']).parents[1]), config['evaluator_uid'])
                 # Only the role-visible relative reference is returned; raw paths stay private.
                 answer['evidence_packet'] = '/evaluation/evidence/' + request['job_id']
                 answer['sanitized_trajectory_exported'] = receipt['trajectory_available']
+                answer['published_evidence_manifest_sha256']=hashlib.sha256((packet/'manifest.json').read_bytes()).hexdigest()
                 binding = {'run_id': report['run_id'], 'snapshot_sha256': entry['snapshot_sha256'],
                            'evidence_manifest_sha256': answer['evidence_manifest_sha256'],
                            'pod_evidence': report.get('pod_observations', {}),

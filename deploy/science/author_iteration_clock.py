@@ -96,6 +96,16 @@ def main():
     parser.add_argument('--acs-run-id')
     parser.add_argument('--reason')
     args = parser.parse_args()
+    if args.action == 'start':
+        from post_acceptance import blocks_new_idea
+        followups = Path('/post-acceptance.json')
+        feedback = Path('/review-feedback.json')
+        pending = (json.loads(followups.read_text()).get('pending') if followups.exists() else
+                   feedback.exists() and blocks_new_idea(json.loads(feedback.read_text())))
+        if pending:
+            raise SystemExit('The previous task is accepted. First publish its Markdown lessons reply '
+                             'on proposal_thread from /post-acceptance.json (or /review-feedback.json). The dispatcher records '
+                             'publication automatically; then start the next idea. Do not repeat old self-tests.')
     directory = Path('/home/role/.state/author-iteration')
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = directory/'ledger.json'

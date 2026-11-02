@@ -16,6 +16,7 @@ class UniverseACK(ACKEnvironment):
         from acs_scheduling import enforce
         overrides['spec'] = enforce(overrides.get('spec', {}))
         role = 'verifier' if Path(environment_dir).name == 'tests' else 'runtime'
+        self._universe_role = role
         image = verifier_image if role == 'verifier' else runtime_image
         import re
         if not re.fullmatch(r'.+@sha256:[a-f0-9]{64}',image):
@@ -52,13 +53,63 @@ class UniverseACK(ACKEnvironment):
     async def start(self, force_build=False):
         await super().start(force_build=force_build)
         await self._capture_pod_evidence('started')
+        if self._universe_role == 'runtime' and getattr(self, 'trial_paths', None):
+            self._agent_checkpoint_task = asyncio.create_task(self._checkpoint_agent_logs())
+
+    async def _checkpoint_agent_logs(self):
+        while True:
+            await asyncio.sleep(60)
+            if getattr(self, '_agent_evidence_downloaded', False):
+                return
+            await self._retain_incomplete_agent_evidence(checkpoint=True)
+
+    async def _download_agent_evidence(self, target):
+        from acs_evidence_transport import download_agent
+        if not hasattr(self, '_agent_collection_lock'):
+            self._agent_collection_lock = asyncio.Lock()
+        async with self._agent_collection_lock:
+            return await download_agent(self, target)
 
     async def stop(self, delete=True):
         try:
+            checkpoint = getattr(self, '_agent_checkpoint_task', None)
+            if checkpoint is not None:
+                checkpoint.cancel()
+                try:
+                    await checkpoint
+                except asyncio.CancelledError:
+                    pass
             await self._capture_pod_evidence('before_stop')
+            await self._retain_incomplete_agent_evidence()
             await self._retain_incomplete_verifier_evidence()
         finally:
             await super().stop(delete=delete)
+
+    async def _retain_incomplete_agent_evidence(self, checkpoint=False):
+        paths = getattr(self, 'trial_paths', None)
+        target = getattr(paths, 'agent_dir', None)
+        if (target is None or getattr(self, '_core_api', None) is None
+                or getattr(self, '_universe_role', 'runtime') != 'runtime'):
+            return
+        if not checkpoint and getattr(self, '_agent_evidence_downloaded', False):
+            return
+        try:
+            result = await asyncio.wait_for(self._download_agent_evidence(target), timeout=90)
+            record = dict(result, status='checkpoint' if checkpoint else 'collected')
+        except Exception as error:
+            record = dict(status='collection_failed', error_type=type(error).__name__)
+            if hasattr(self, 'logger'):
+                self.logger.warning('Partial agent evidence collection (%s); cleanup continues', type(error).__name__)
+        # The original files remain private. A failed later collection does not
+        # delete the last successfully retained checkpoint.
+        try:
+            from datetime import datetime, timezone
+            from acs_evidence_transport import safe_destination
+            path = safe_destination(Path(target) / 'acs-collection.json')
+            record['observed_at'] = datetime.now(timezone.utc).isoformat()
+            path.write_text(json.dumps(record)); path.chmod(0o600)
+        except (OSError, ValueError):
+            pass
 
     async def _retain_incomplete_verifier_evidence(self):
         # Harbor downloads verifier output only after verify() returns. A
@@ -95,7 +146,8 @@ class UniverseACK(ACKEnvironment):
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.acs-download-', dir=target.parent) as staging:
             downloaded = Path(staging) / target.name
-            await super().download_file(source_path, downloaded)
+            from acs_evidence_transport import download_file
+            await asyncio.wait_for(download_file(self, source_path, downloaded), timeout=120)
             try:
                 mode = downloaded.lstat().st_mode
             except FileNotFoundError:
@@ -107,11 +159,19 @@ class UniverseACK(ACKEnvironment):
             downloaded.replace(target)
 
     async def download_dir(self, source_dir, target_dir):
+        if str(source_dir) == '/logs/agent':
+            await asyncio.wait_for(self._download_agent_evidence(target_dir), timeout=90)
+            self._agent_evidence_downloaded = True
+            return
         if str(source_dir) == '/logs/verifier':
             return await self.download_dir_filtered(source_dir, target_dir)
         return await super().download_dir(source_dir, target_dir)
 
     async def download_dir_filtered(self, source_dir, target_dir, *, include=None, exclude=None, protect=None):
+        if str(source_dir) == '/logs/agent':
+            # Raw solver evidence is mandatory even if a caller filters the
+            # display logs. Access control and redaction happen on publication.
+            return await self.download_dir(source_dir, target_dir)
         # Use text-safe transport for all verifier evidence, not just reward.
         if str(source_dir) == '/logs/verifier':
             script = '''import pathlib,json,base64

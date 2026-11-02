@@ -68,16 +68,26 @@ def publish_author_feedback(pr, row, config):
 
 def _publish_author_feedback_locked(pr,row,config,root):
     from selftest_feedback import BINDING_FIELDS,current_request,same_binding,current_idea_matches
+    from post_acceptance import accepted, template
     key=row.get('key') or str(row.get('pr'))+':'+str(row.get('commit'))
     row=dict(row)
     current_selftest=current_request(root)
+    is_accepted = accepted(row)
+    selected_acceptance = is_accepted and acceptance_is_current(root,row)
+    if is_accepted and not selected_acceptance:
+        return
+    if selected_acceptance and current_selftest:
+        # Reusing an accepted frozen version can have a newer self-test job.
+        # Rebind only its delivery; the immutable review/decision stays intact.
+        row['accepted_review_job_id']=row.get('job_id')
+        row.update({field:current_selftest.get(field) for field in BINDING_FIELDS})
     if (current_selftest and row.get('job_id') is not None
             and (row['job_id']!=current_selftest.get('job_id')
                  or (row.get('idea_id') is not None and row['idea_id']!=current_selftest.get('idea_id')))):
         return
     if row.get('feedback_source')=='selftest_handoff':
         if (not same_binding(current_selftest,row)
-                or not current_idea_matches(root,row.get('idea_id'))):return
+                or (not is_accepted and not current_idea_matches(root,row.get('idea_id')))):return
     elif (current_selftest.get('commit')==row.get('commit')
             and current_selftest.get('task')==row.get('task')):
         # Exact-version review can take over a recovered self-test handoff. A
@@ -88,12 +98,18 @@ def _publish_author_feedback_locked(pr,row,config,root):
     # already owned by this author.  Without this guard, the periodic Forgejo
     # scan can replace a current reviewing assignment with stale waiting data.
     existing_path=root/'review-feedback.json'
+    existing={}
     if existing_path.exists():
         try:
             existing=json.loads(existing_path.read_text())
             existing_key=str(existing.get('key',''))
             same_version=(existing.get('task')==row.get('task') and
                           existing.get('commit',existing.get('required_commit'))==row.get('commit'))
+            if (accepted(existing) and acceptance_is_current(root,existing)
+                    and (same_version or existing.get('task')==row.get('task'))
+                    and not is_accepted):
+                # A stale PR scan cannot revoke an accepted frozen version.
+                return
             if (existing.get('feedback_source')=='selftest_handoff'
                     and existing.get('state')=='waiting_platform'
                     and same_binding(existing,current_selftest)):
@@ -102,18 +118,27 @@ def _publish_author_feedback_locked(pr,row,config,root):
                 handoff_update=row.get('feedback_source')=='selftest_handoff' and same_binding(existing,row)
                 real_review=(same_binding(existing,row) and row.get('evaluation_id')
                              and row.get('role') in config['roles'])
-                if not handoff_update and not real_review:return
+                if not handoff_update and not real_review and not selected_acceptance:return
+            if (existing.get('state')=='waiting_platform' and existing.get('stage')=='five_rollouts'
+                    and same_binding(existing,current_selftest) and not selected_acceptance):
+                # The exact frozen review owns this wait. An older PR HEAD
+                # cannot turn it into an instruction to rebuild or self-test.
+                real_review=(same_binding(row,current_selftest)
+                             and row.get('evaluation_id')==existing.get('evaluation_id')
+                             and row.get('role') in config['roles'])
+                if not real_review:return
             # A historical direct assignment is still reconciled every cycle.
             # Its completed receipt must not replace the current PR's repair
             # instructions just because that history is visited first.
             if (existing.get('pr') is not None and row.get('pr') is None
                     and existing.get('task') == row.get('task') and not same_version
-                    and row.get('state') == 'completed'):
+                    and row.get('state') == 'completed' and not selected_acceptance):
                 return
             if (same_version and existing_key == key
                     and int(existing.get('generation',0)) > int(row.get('generation',0))):
                 return
-            if existing.get('state')=='reviewing' and existing_key and existing_key != key and not same_version:
+            if (existing.get('state')=='reviewing' and existing_key and existing_key != key
+                    and not same_version and not selected_acceptance):
                 return
         except (OSError,ValueError,TypeError):
             pass
@@ -125,13 +150,33 @@ def _publish_author_feedback_locked(pr,row,config,root):
              'author_must_pause':(row.get('state')=='reviewing'
                                   and row.get('evaluator_activity_confirmed') is True)
                                  or (row.get('state')=='waiting_platform'
-                                     and row.get('feedback_source')=='selftest_handoff'),
+                                     and (row.get('feedback_source')=='selftest_handoff'
+                                          or row.get('stage')=='five_rollouts')),
              'updated_at':time.time()}
     if row.get('state')=='completed':
         payload['review_recommendation']=row.get('review_recommendation','unrecorded')
         payload['formal_decision']='accepted' if row.get('scientific_acceptance') is True else 'not_recorded'
-    for field in (*BINDING_FIELDS,'feedback_source','error_type','evidence_gap',
-                  'retry_requires_task_change','selftest_rerun_required'):
+        payload['scientific_acceptance']=row.get('scientific_acceptance') is True
+        if payload['scientific_acceptance']:
+            payload['post_acceptance_required']=True
+            prior=existing if existing.get('key')==key and accepted(existing) else {}
+            for field in ('proposal_thread','proposal_url','lessons_comment','post_acceptance_state'):
+                if field in row:payload[field]=row[field]
+                elif field in prior:payload[field]=prior[field]
+            if prior.get('post_acceptance_state')=='completed' and prior.get('lessons_comment'):
+                payload.update(post_acceptance_state='completed',lessons_comment=prior['lessons_comment'])
+            payload.setdefault('post_acceptance_state','pending')
+            payload['lessons_template']=template(dict(row,key=key))
+            payload['next_action']=(
+                'The frozen version is accepted. Reply on the same proposal/PR thread with a Markdown '
+                'experience post using lessons_template and proposal_thread. Describe real results, '
+                'known limitations and transferable patterns. Do not resume obsolete version reconciliation. '
+                'Publication is recorded automatically; no separate receipt or approval is needed.'
+                if payload['post_acceptance_state']!='completed' else
+                'The accepted-version lessons reply is public on the proposal thread; use its transferable '
+                'patterns to begin the next idea. Do not wait for another review of this accepted version.')
+    for field in (*BINDING_FIELDS,'evaluation_id','snapshot_sha256','feedback_source','error_type','evidence_gap',
+                  'retry_requires_task_change','selftest_rerun_required','accepted_review_job_id'):
         if field in row:payload[field]=row[field]
     if pr.get('number') is not None or row.get('pr') is not None:
         payload['pr']=pr.get('number',row.get('pr'))
@@ -163,10 +208,121 @@ def _publish_author_feedback_locked(pr,row,config,root):
     # Public exact-current marker consumed by the controller.  It is separate
     # from the evaluator's private assignment and is replaced atomically so an
     # old author feedback file cannot pause a newer session.
-    current = {k: payload.get(k) for k in ('key','generation','commit','task','state',
+    current = {k: payload.get(k) for k in ('key','generation','commit','task','state','stage','evaluation_id','snapshot_sha256',
                                          *BINDING_FIELDS,'feedback_source') if k in payload}
+    for field in ('formal_decision','scientific_acceptance','post_acceptance_required',
+                  'post_acceptance_state','proposal_thread','proposal_url','lessons_comment'):
+        if field in payload:
+            current[field]=payload[field]
     atomic(root/'review-current-assignment.json', current)
     (root/'review-current-assignment.json').chmod(0o644)
+
+def acceptance_is_current(root,row):
+    """Never send an old acceptance over a different current task or idea."""
+    from selftest_feedback import current_request
+    current=current_request(root)
+    if current and any(current.get(k)!=row.get(k) for k in ('commit','task')):
+        return False
+    try:
+        clock=json.loads((root/'home/role/.state/author-iteration/ledger.json').read_text())
+        active=[idea for idea,value in clock.get('ideas',{}).items()
+                if value.get('status') in ('active','acs_wait','platform_wait','session_paused')]
+        idea=current.get('idea_id') or row.get('idea_id')
+        if active and idea and active != [idea]:return False
+    except (OSError,ValueError,TypeError):pass
+    return True
+
+def retrospective_work_finished(root,row):
+    """A published retrospective and closed idea retire old PR repair prompts.
+
+    A failed revision submitted before acceptance may remain the latest self-test.
+    Its PR HEAD must not pull an author back after finishing the accepted task.
+    A deliberately active revision of the same task remains eligible for review.
+    """
+    from post_acceptance import accepted
+    from selftest_feedback import current_request
+    if (not accepted(row) or row.get('post_acceptance_state')!='completed'
+            or not row.get('lessons_comment')):
+        return False
+    current=current_request(root)
+    idea=(current.get('idea_id') if current.get('task')==row.get('task')
+          else row.get('idea_id'))
+    if not idea:return False
+    try:
+        clock=json.loads((root/'home/role/.state/author-iteration/ledger.json').read_text())
+        return clock.get('ideas',{}).get(idea,{}).get('status')=='finished'
+    except (OSError,ValueError,TypeError,AttributeError):
+        return False
+
+def retire_proposal_reconciliation(root,row,thread):
+    """Archive only the obsolete original-thread prompt; preserve other work."""
+    from selftest_feedback import feedback_lock, read_json
+    with feedback_lock(root):
+        if not retrospective_work_finished(root,row):return
+        feedback=read_json(root/'review-feedback.json')
+        assignment=read_json(root/'review-current-assignment.json')
+        if (feedback.get('stage')!='version_reconciliation'
+                or feedback.get('pr')!=thread or feedback.get('task')!=row.get('task')):
+            return
+        identity=('key','generation','commit','task')
+        same_assignment=bool(assignment) and all(assignment.get(k)==feedback.get(k) for k in identity)
+        archive=STATE/'retired-author-feedback'
+        archive.mkdir(mode=0o700,exist_ok=True)
+        archive_name=hashlib.sha256(row['key'].encode()).hexdigest()+'.json'
+        atomic(archive/archive_name,dict(
+            retired_at=time.time(), accepted_key=row.get('key'),
+            lessons_comment=row['lessons_comment'],feedback=feedback,
+            assignment=assignment if same_assignment else None,
+            reason='Original proposal retrospective is public and its author idea is finished.'))
+        (root/'review-feedback.json').unlink()
+        if same_assignment:(root/'review-current-assignment.json').unlink()
+
+def sync_post_acceptance(api,config,ledger,pulls):
+    """Find the proposal thread and remember one published author retrospective."""
+    from post_acceptance import accepted, public_lessons_comment, comment_summary, template
+    comments_by_thread={};followups={};all_pulls=None
+    for key,row in ledger.items():
+        author=row.get('author_role')
+        if not accepted(row) or author not in config['roles']:continue
+        thread=row.get('proposal_thread') or row.get('pr')
+        if not thread:
+            candidates=[pr for pr in pulls if author_for_pr(pr,config)==author
+                        and row.get('task') in re.findall(r'tasks/[a-zA-Z0-9_./-]+',pr.get('body') or '')]
+            if not candidates:
+                if all_pulls is None:all_pulls=api.pages('/pulls?state=all')
+                candidates=[pr for pr in all_pulls if author_for_pr(pr,config)==author
+                            and row.get('task') in re.findall(r'tasks/[a-zA-Z0-9_./-]+',pr.get('body') or '')]
+            if len(candidates)==1:
+                thread=candidates[0]['number']
+                row['proposal_url']=candidates[0].get('html_url')
+        if thread:
+            row['proposal_thread']=thread
+            row['proposal_url']=row.get('proposal_url') or (
+                (getattr(api,'base_url',None) or 'http://127.0.0.1:3000').rstrip('/')
+                +'/team/terminal-bench-science/issues/'+str(thread))
+            if row.get('post_acceptance_state')!='completed':
+                if thread not in comments_by_thread:
+                    comments_by_thread[thread]=api.pages('/issues/'+str(thread)+'/comments')
+                comment=public_lessons_comment(comments_by_thread[thread],dict(row,key=key),author,thread)
+                if comment:
+                    row.update(post_acceptance_state='completed',lessons_comment=comment_summary(comment,thread))
+        row.setdefault('post_acceptance_state','pending')
+        public={field:row.get(field) for field in (
+            'commit','task','snapshot_sha256','evaluation_id','state','formal_decision',
+            'scientific_acceptance','reason','proposal_thread','proposal_url',
+            'post_acceptance_state','lessons_comment')}
+        public.update(key=key,post_acceptance_required=True,lessons_template=template(dict(row,key=key)))
+        followups.setdefault(author,[]).append(public)
+        publish_author_feedback({},dict(row,key=key),config)
+    # Keep retrospective work separate from a newer self-test or PR's status.
+    # An author may already have submitted an unsuccessful revision before the
+    # acceptance was delivered. That must neither erase the old acceptance nor
+    # falsely label the new revision accepted.
+    for author,items in followups.items():
+        payload=dict(pending=[r for r in items if r['post_acceptance_state']!='completed'],
+                     completed=[r for r in items if r['post_acceptance_state']=='completed'])
+        path=Path(config['roles'][author]['root'])/'post-acceptance.json'
+        atomic(path,payload);path.chmod(0o644)
 
 def matching_review_status(root, entry, key, generation):
     """Only a matching pair written by the assigned role is activity evidence."""
@@ -192,7 +348,9 @@ def matching_review_status(root, entry, key, generation):
         return None
     return status
 
-def advance_review(key,row,config,now=None):
+def advance_review(key,row,config,now=None,role_available=True):
+    from post_acceptance import accepted
+    if accepted(row):return  # A finalized decision is immutable, not a live status receipt.
     now=time.time() if now is None else now
     entry=config['roles'][row['role']];root=Path(entry['root'])
     # Legacy exact self-test handoffs have no PR fields or assigned timestamp.
@@ -216,9 +374,58 @@ def advance_review(key,row,config,now=None):
         row.update(state='waiting_platform',stage='evaluator_runner_startup',
                    reason='Evaluator produced no matching activity and status receipt within the startup window.',
                    evaluator_assigned=False,updated_at=now)
+    if row['state']=='waiting_platform' and row.get('stage')=='five_rollouts':
+        from role_evaluation_batch import requests,summary
+        batch_generation=row.setdefault('batch_generation',row['generation'])
+        assignment=dict(row,key=key,generation=batch_generation)
+        results=Path(entry['root'])/'evaluation/results'
+        jobs=requests(assignment)
+        if not all((results/(job['job_id']+'.json')).exists() for job in jobs):
+            return
+        try:
+            batch=summary(assignment,results)
+        except (OSError,ValueError,KeyError,TypeError):
+            batch=None
+            stage='rollout_results_invalid'
+            reason='Five rollout files exist, but result identity or content needs diagnosis.'
+        else:
+            stage='rollout_results_ready' if batch['complete'] else 'rollout_results_invalid'
+            reason=('Five rollout results are available for diagnosis and review; '
+                    f"{batch['valid_trials']} of five meet evidence requirements."
+                    + ('' if batch['complete'] else ' Invalid runs cannot establish model accuracy.'))
+        # A reviewer may diagnose an invalid batch and park it again. Wake
+        # only for changed result bytes, new jobs, or a new timeout judgment;
+        # unchanged failures cannot create an endless review/wait loop.
+        result_fingerprint=hashlib.sha256(json.dumps([
+            [(job['job_id'],hashlib.sha256((results/(job['job_id']+'.json')).read_bytes()).hexdigest())
+             for job in jobs],batch],sort_keys=True).encode()).hexdigest()
+        if row.get('delivered_rollout_fingerprint')==result_fingerprint:
+            return
+        if not role_available:
+            row.update(reason=reason,rollout_result_status=stage)
+            return
+        row.update(state='reviewing',stage=stage,reason=reason,
+                   generation=row['generation']+1,assigned_at=now,updated_at=now,
+                   evaluator_assigned=True,evaluator_activity_confirmed=False,
+                   last_activity_at=None,delivered_rollout_fingerprint=result_fingerprint)
+
+def role_available_for(ledger,key,role):
+    return not any(other_key!=key and other.get('role')==role and other.get('state')=='reviewing'
+                   for other_key,other in ledger.items())
 
 def sync_direct_assignments(config,ledger):
     """Consume persisted exact assignments even when no PR supplied them."""
+    from formal_review_decision import apply
+    apply(STATE, ledger)
+    from rollout_replacement import apply as apply_replacements
+    apply_replacements(STATE,ledger,config)
+    active_by_role={}
+    for key,row in ledger.items():
+        if row.get('state')!='reviewing':continue
+        role=row.get('role')
+        if role in active_by_role:
+            raise ValueError('Two active reviews assigned to the same evaluator')
+        active_by_role[role]=key
     for key,row in ledger.items():
         if row.get('pr') is not None:
             continue
@@ -230,7 +437,8 @@ def sync_direct_assignments(config,ledger):
         # generation as soon as the registration appears. Keep the identity
         # binding strict so a different task/version can never be substituted.
         if (row.get('state') == 'waiting_platform'
-                and row.get('stage') == 'immutable_execution_registration'):
+                and row.get('stage') == 'immutable_execution_registration'
+                and role_available_for(ledger,key,row['role'])):
             try:
                 execution = registered_execution(row['commit'], row['task'])
             except (OSError, ValueError, KeyError, TypeError):
@@ -245,11 +453,23 @@ def sync_direct_assignments(config,ledger):
                            evaluator_assigned=True,
                            evaluator_activity_confirmed=False,
                            last_activity_at=None)
-        advance_review(key,row,config)
+        role=row['role']
+        role_available=active_by_role.get(role) in (None,key)
+        advance_review(key,row,config,role_available=role_available)
+        if row['state']=='reviewing':
+            active_by_role[role]=key
         root=Path(config['roles'][row['role']]['root'])
-        wake=dict(key=key,generation=row['generation'],state=row['state'])
-        wake.update({field:row[field] for field in ('task','commit','evaluation_id','snapshot_sha256') if field in row})
-        atomic(root/'review-dispatch.json',wake);(root/'review-dispatch.json').chmod(0o644)
+        if row['state']=='reviewing':
+            assignment=root/'home/role/review-assignment.json'
+            try:delivered=json.loads(assignment.read_text())
+            except (OSError,ValueError,TypeError):delivered={}
+            if delivered.get('key')!=key or delivered.get('generation')!=row['generation']:
+                atomic(assignment,dict(row,key=key))
+                os.chown(assignment,config['roles'][row['role']]['uid'],config['roles'][row['role']]['gid'])
+        if active_by_role.get(role) in (None,key):
+            wake=dict(key=key,generation=row['generation'],state=row['state'])
+            wake.update({field:row[field] for field in ('task','commit','evaluation_id','snapshot_sha256') if field in row})
+            atomic(root/'review-dispatch.json',wake);(root/'review-dispatch.json').chmod(0o644)
         # Keep the authoritative identity and existing role-local assignment;
         # only the operator ledger/wake/author feedback consume result state.
         publish_author_feedback({},dict(row,key=key),config)
@@ -262,10 +482,17 @@ class Api:
         req=urllib.request.Request(base+'/api/v1'+REPO+path,data=json.dumps(data).encode() if data is not None else None,method=method,headers={'Authorization':'token '+self.token,'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
     def pages(self,path):
-        out=[]
+        out=[];seen=set()
         for page in range(1,1001):
             batch=self.call('GET',path+('&' if '?' in path else '?')+'limit='+str(FORGEJO_PAGE_SIZE)+'&page='+str(page))
             if not batch:return out
+            if '/comments' in path:
+                # The deployed Forgejo comments endpoint returns the complete
+                # list and ignores page/limit. Also support paginated servers.
+                fresh=[item for item in batch if item['id'] not in seen]
+                if not fresh:return out
+                seen.update(item['id'] for item in fresh)
+                batch=fresh
             out+=batch
             # Forgejo may spend a long time answering pages beyond the end of
             # a large repository. A short page is authoritative termination.
@@ -298,15 +525,39 @@ def publish_version_handoffs(config, handoffs):
 def reconcile(api,config,ledger):
     from deployment_paths import universe_root
     from selftest_review_dispatch import consume
+    from formal_review_decision import apply
+    apply(STATE, ledger)
+    bound={key:row for key,row in ledger.items() if row.get('proposal_thread') or row.get('pr')}
+    sync_post_acceptance(api,config,bound,[])
+    atomic(STATE/'ledger.json',ledger)
     consume(config,ledger,universe_root(W),STATE)
     sync_direct_assignments(config,ledger)
     pulls=api.pages('/pulls?state=open')
+    sync_post_acceptance(api,config,ledger,pulls)
     pending={};handoffs={}
     for pr in pulls:
         if pr.get('draft') or 'draft' in pr['title'].lower():continue
         match=re.search(r'tasks/[a-zA-Z0-9_./-]+',pr.get('body') or '')
         if not match:continue
         task=match.group(0).rstrip('./');key=str(pr['number'])+':'+pr['head']['sha']
+        from post_acceptance import accepted
+        from selftest_feedback import current_request
+        author=author_for_pr(pr,config)
+        selected=current_request(Path(config['roles'][author]['root'])) if author else {}
+        finished=[dict(row,key=k) for k,row in ledger.items()
+                  if author and row.get('author_role')==author and row.get('task')==task
+                  and row.get('proposal_thread')==pr['number']
+                  and retrospective_work_finished(Path(config['roles'][author]['root']),row)]
+        if finished:
+            retire_proposal_reconciliation(Path(config['roles'][author]['root']),finished[0],pr['number'])
+            continue
+        if author and any(accepted(row) and row.get('author_role')==author
+                          and row.get('task')==task and row.get('proposal_thread')==pr['number']
+                          and (not selected or all(selected.get(k)==row.get(k) for k in ('commit','task')))
+                          for row in ledger.values()):
+            # The author explicitly selected the accepted version. Preserve
+            # that decision without transferring it to this PR's different HEAD.
+            continue
         direct=[(k,row) for k,row in ledger.items() if row.get('pr') is None
                 and row.get('commit')==pr['head']['sha'] and row.get('task')==task]
         if direct:
@@ -343,8 +594,9 @@ def reconcile(api,config,ledger):
             if old and old.get('issue'):
                 api.call('PATCH','/issues/'+str(old['issue']),{'state':'closed'})
                 old.update(state='waiting_author',stage='author_container_preflight',reason='Author pre-submission container checks and iteration evidence required')
-                wake=Path(config['roles'][old['role']]['root'])/'review-dispatch.json'
-                atomic(wake,dict(key=key,generation=old['generation'],state=old['state']));wake.chmod(0o644)
+                if role_available_for(ledger,key,old['role']):
+                    wake=Path(config['roles'][old['role']]['root'])/'review-dispatch.json'
+                    atomic(wake,dict(key=key,generation=old['generation'],state=old['state']));wake.chmod(0o644)
             continue
         try:execution=registered_execution(pr['head']['sha'],task)
         except (OSError,ValueError,KeyError,TypeError):execution=None
@@ -371,6 +623,7 @@ def reconcile(api,config,ledger):
             continue
         elif (row.get('state') == 'waiting_platform'
               and row.get('stage') == 'immutable_execution_registration'
+              and role_available_for(ledger,key,row['role'])
               and execution is not None):
             # A registration may be completed after the dispatcher parked the
             # exact author version. Resume it as a new generation without
@@ -383,16 +636,18 @@ def reconcile(api,config,ledger):
         summary=review_budget_summary(pr['head']['sha'],task)
         if summary is not None:row['budget_summary']=summary
         root=Path(config['roles'][row['role']]['root'])
-        advance_review(key,row,config)
+        advance_review(key,row,config,role_available=role_available_for(ledger,key,row['role']))
         if row['state'] in ('waiting_author','waiting_platform','completed') and row.get('issue'):
             issue=api.call('GET','/issues/'+str(row['issue']))
             if issue['state']=='open':api.call('PATCH','/issues/'+str(row['issue']),{'state':'closed'})
-        if row['state'] in ('waiting_author','waiting_platform') and event!=row['event']:
+        if (row['state'] in ('waiting_author','waiting_platform') and event!=row['event']
+                and row.get('stage')!='five_rollouts'):
             if not any(v['state']=='reviewing' and v['role']==row['role'] for k,v in ledger.items() if k!=key):
                 row.update(state='reviewing',event=event,generation=row['generation']+1,issue=None,assigned_at=time.time())
         wake=root/'review-dispatch.json'
         if row['state']!='reviewing':
-            atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
+            if role_available_for(ledger,key,row['role']):
+                atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
             publish_author_feedback(pr,row,config)
             continue
         marker=MARK+' '+key+' generation='+str(row['generation'])

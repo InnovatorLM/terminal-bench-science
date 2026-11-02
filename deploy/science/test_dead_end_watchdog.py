@@ -185,6 +185,17 @@ class DeadEndTests(unittest.TestCase):
         self.assertEqual(m.decision(first,self.observation(sessions=['one']),103600)['action'],'insufficient_evidence')
         self.assertEqual(m.decision(first,self.observation(shared_failure=[]),103600)['action'],'insufficient_evidence')
 
+    def test_recovered_observation_clears_error_without_resetting_cooldown(self):
+        prior=dict(action='inspection_required',error_type='ValueError',
+                   observation_reason='observation_budget_exceeded',source_signature=None,
+                   stable_since=100,last_attempt=50,attempted_signature='old')
+        current=m.decision(prior,self.observation(waiting=['review_or_platform']),200)
+        self.assertEqual(current['action'],'waiting')
+        self.assertNotIn('error_type',current)
+        self.assertNotIn('observation_reason',current)
+        self.assertEqual(current['last_attempt'],50)
+        self.assertEqual(current['attempted_signature'],'old')
+
     def test_waits_and_progress_restart_stasis_window(self):
         first=m.decision({},self.observation(),100000)
         for waiting in ('selftest','review_or_platform','local_command','selftest_platform'):

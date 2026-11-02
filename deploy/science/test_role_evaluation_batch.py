@@ -29,6 +29,34 @@ class BatchTests(unittest.TestCase):
             file=root/(first['jobs'][0]['job_id']+'.json');file.write_text('{}')
             with self.assertRaises(ValueError):submit(a,root)
 
+    def test_status_distinguishes_unsubmitted_queued_and_finished_jobs(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);results=root/'results';results.mkdir();inbox=root/'inbox';inbox.mkdir()
+            a=self.assignment()
+            before=summary(a,results)
+            self.assertFalse(before['batch_submitted'])
+            self.assertTrue(all(r['status']=='not_submitted' for r in before['jobs']))
+            jobs=submit(a,inbox)['jobs'];pending=summary(a,results)
+            self.assertTrue(pending['batch_submitted'])
+            self.assertTrue(all(r['status']=='pending' for r in pending['jobs']))
+            request=jobs[0];(inbox/(request['job_id']+'.json')).unlink()
+            (results/(request['job_id']+'.json')).write_text(json.dumps(dict(request,status='infrastructure_failed')))
+            self.assertTrue(summary(a,results)['batch_submitted'])
+
+    def test_resumed_review_reuses_original_batch(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);original=self.assignment()
+            first=submit(original,root)
+            resumed=dict(original,generation=1,batch_generation=0)
+            self.assertEqual(submit(resumed,root),first)
+            self.assertEqual(len(list(root.glob('*.json'))),5)
+            assignment=root/'assignment';catalog=root/'catalog'
+            assignment.write_text(json.dumps(resumed))
+            catalog.write_text(json.dumps({'evaluations':[original]}))
+            self.assertEqual(read_assignment(assignment,catalog),resumed)
+            assignment.write_text(json.dumps(dict(resumed,batch_generation=2)))
+            with self.assertRaises(ValueError):read_assignment(assignment,catalog)
+
     def test_summary_requires_five_valid_results_and_never_accepts(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);a=self.assignment();jobs=requests(a)

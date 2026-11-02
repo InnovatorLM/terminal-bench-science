@@ -22,5 +22,14 @@ def prepare(directory, official, codex, rg):
     directory.mkdir()
     for name,source in [('codex',codex),('rg',rg)]:
         shutil.copyfile(source,directory/name);(directory/name).chmod(0o755)
-    (directory/'Dockerfile').write_text('FROM '+official+'\nCOPY codex rg /usr/local/bin/\nRUN codex --version && rg --version\n')
-    return {'harness':'codex','harness_versions':versions,'native_binaries':records,'runtime_tag':'codex-'+versions['codex']}
+    from runtime_trust import ca_bundle, receipt
+    bundle=ca_bundle();shutil.copyfile(bundle,directory/'ca-certificates.crt')
+    (directory/'ca-certificates.crt').chmod(0o644)
+    (directory/'Dockerfile').write_text('FROM '+official+'\nCOPY codex rg /usr/local/bin/\n'
+        'COPY ca-certificates.crt /opt/gewu-runtime/ca-certificates.crt\n'
+        'ENV SSL_CERT_FILE=/opt/gewu-runtime/ca-certificates.crt\n'
+        'ENV REQUESTS_CA_BUNDLE=/opt/gewu-runtime/ca-certificates.crt\n'
+        'ENV CURL_CA_BUNDLE=/opt/gewu-runtime/ca-certificates.crt\n'
+        'RUN codex --version && rg --version\n')
+    return {'harness':'codex','harness_versions':versions,'native_binaries':records,
+            'public_ca_bundle':receipt(bundle),'runtime_tag':'codex-'+versions['codex']}

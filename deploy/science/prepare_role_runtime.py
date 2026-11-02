@@ -76,6 +76,8 @@ for index, role in enumerate(roles):
     os.chown(target, 65534, 65534)
     target.chmod(0o644)
     if kind == 'author':
+        from author_post_acceptance_policy import update as update_post_acceptance
+        update_post_acceptance(root/'instruction.md')
         from role_policy import retire_pilot_feedback
         retire_pilot_feedback(root)
     target = root / 'home/role/git-credential.json'

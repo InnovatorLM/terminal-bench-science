@@ -10,6 +10,10 @@ description: Independently evaluate a frozen Harbor task with five ACS rollouts 
 
 已部署 `role-evaluation-batch` 时，完成完整性检查后用 `role-evaluation-batch submit` 一次提交本次派单的五个独立并行job，再用 `role-evaluation-batch status` 查看汇总。重复submit沿用相同批次，不生成额外作业；不得手改generation以绕过失败。只有五份有效、版本一致且轨迹、verifier、运行与资源证据及清理确认完整的结果才能形成正式结论；缺证据标记 incomplete_evidence，不因已有 reward 就跳过。无效结果先诊断并请求平台补跑；汇总阈值不等于科学质量接收。旧部署缺少命令时报告waiting_platform，不自行安装凭证或猜测执行ID。
 
+提交后若结果未齐备，运行 `role-review-status waiting_platform --stage five_rollouts --reason 'Waiting for the five assigned rollout results'` 并结束会话。五份结果文件出现后平台会用新代次唤醒；新代次保留原五个 job ID。继续检查无效结果和证据，不能把文件齐备等同于五次有效，也不要在会话内长时间 sleep 轮询。
+
+`status` 只读状态，不提交任务。看到 `not_submitted` 或 `batch_submitted=false` 时先调用 `submit` 并核验五个 job 的入队回执，不能声称已等待 ACS；等待命令会拒绝未提交批次。若已发现题意、数据或评分器的明确缺陷，先 `waiting_author` 交还修复，不为已有缺陷的版本消耗五次模型评测，也不要把未提交归咎于平台队列。
+
 先做完整性与 runtime/工具调用 smoke。之后用指定 dawnfm / deepseek-v4.1-flash-1017 独立运行五次，默认4c/8Gi、资源不足最高8c/16Gi、不限解题步数、每次4小时。检查实际返回配置，不能只因本文件写了就认为生效。
 
 保存每次 result、agent轨迹、verifier输出、镜像digest、run ID及清理证据。基础设施/适配器失败或无verifier结果不能算模型答错；先修复补跑。四小时超时先查题目缺失与环境缺陷；排除后确属难题才计模型失败。有效通过率<=60%可接收，但必须结合科学正确性、题意/测试一致性、捷径检查和轨迹审查，不能用五次全错自动证明高质量。
@@ -24,3 +28,7 @@ description: Independently evaluate a frozen Harbor task with five ACS rollouts 
 - 作者在提交前自行检查现实来源与难度设计，并完成实际自解、容器自测和基于结果的迭代；审核者独立核对来源与案例关联，在五次有效结果齐备后执行上述难度判定。平台启动验收使用已有简单题目，不以该验收题是否满足新题难度门槛阻塞启动。
 
 异常处理与等待去重见 `/skills/acs-task-troubleshooting/SKILL.md`。不要把缺证据当作 ACS 不支持轨迹，也不要通过重复 submit 修改批次组成。
+
+对超时逐次使用 `/skills/acs-task-troubleshooting/references/timeout-evidence.md`；对相似失败或参考解与题面冲突使用 `references/contract-and-provenance.md`（位于同一 troubleshooting 技能目录）。保留原始异常和 reward，分类结论与原始评分分开记录。
+
+超时原因审查后，用 `role-evaluation-batch review-timeout --job <本批次job> --assessment <判断JSON>` 保存逐次判断；格式见上述 timeout-evidence。只有证据支持的 `difficulty` 以独立 `scoring_reward=0` 纳入五次汇总，原始 reward 不变。报告同时交付五个 evidence packet 路径和 timeout-review 记录；不要只报一个正确率。

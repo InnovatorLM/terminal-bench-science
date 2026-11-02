@@ -23,11 +23,22 @@ def report(home,workspace,state,stage,reason,recommendation=None):
                 stage=stage,reason=reason,updated_at=time.time())
     if state=='completed':record['review_recommendation']=recommendation or 'unrecorded'
     terminal=home/'review-terminal-status.json'
+    terminal_record=False
     if terminal.is_file() and not terminal.is_symlink():
         previous=json.loads(terminal.read_text())
         if (previous.get('key')==record['key'] and previous.get('generation')==record['generation']
                 and previous.get('state') in TERMINAL):
             record=previous
+            terminal_record=True
+    if not terminal_record:
+        if state=='waiting_platform' and stage in ('rollouts','five_rollouts','acs_rollouts'):
+            from role_evaluation_batch import summary
+            evaluation=home.parents[1]/'evaluation'
+            batch=summary(assignment,evaluation/'results',evaluation/'inbox')
+            if not batch['batch_submitted']:
+                raise ValueError('Batch has not been submitted. Run role-evaluation-batch submit before waiting. '
+                                 'For known task defects, report waiting_author instead.')
+            record['stage']='five_rollouts'
     write(home/'review-status.json',record)
     if record['state'] in TERMINAL:write(terminal,record)
     activity={k:record[k] for k in ('key','generation','state','stage','updated_at')}

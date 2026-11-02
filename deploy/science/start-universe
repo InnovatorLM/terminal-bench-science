@@ -198,6 +198,8 @@ for role, entry in config['roles'].items():
     install_skills(entry['root'], role)
     install_skills(Path(sys.argv[2])/'.config/gewu-multiverse/agents'/role, role)
 install(config, sys.argv[2])
+from author_post_acceptance_policy import install as install_post_acceptance
+install_post_acceptance(config, sys.argv[2])
 PY_TASK_POLICY
 "$PY" "$W/gewu-multiverse/deploy/science/role_capabilities.py" \
     --config "$GEWU_ROLE_BROKER_CONFIG" --settings "$U/.config/gewu-multiverse/multiverse.toml"
@@ -326,7 +328,7 @@ selftest_pid=$!
 review_supplement_pid=$!
 mkdir -p "$SERVICE_STATE/command-watchdog"
 "$PY" "$W/gewu-multiverse/deploy/science/command_watchdog.py" \
-    --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/command-watchdog" --session-state "$SERVICE_STATE" \
+    --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/command-watchdog" --session-state "$SERVICE_STATE" --owner-pid "$$" \
     > "$SERVICE_STATE/command-watchdog/production.log" 2>&1 &
 watchdog_pid=$!
 # Refuse a controller start if any owned background service already failed.

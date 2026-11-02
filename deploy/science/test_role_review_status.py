@@ -7,6 +7,22 @@ from role_review_status import report
 W=Path('/mnt/data/zhanglinfeng/workspace')
 
 class ReviewStatusTests(unittest.TestCase):
+    def test_wait_for_rollouts_requires_submission_and_normalizes_stage(self):
+        from role_evaluation_batch import submit
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);home=root/'home/role';home.mkdir(parents=True)
+            workspace=root/'workspace';workspace.mkdir()
+            evaluation=root/'evaluation';(evaluation/'inbox').mkdir(parents=True);(evaluation/'results').mkdir()
+            assignment=dict(key='key',generation=0,evaluation_id='one',snapshot_sha256='a'*64)
+            (home/'review-assignment.json').write_text(json.dumps(assignment))
+            with self.assertRaisesRegex(ValueError,'has not been submitted'):
+                report(home,workspace,'waiting_platform','rollouts','Waiting')
+            self.assertFalse((home/'review-terminal-status.json').exists())
+            submit(assignment,evaluation/'inbox')
+            result=report(home,workspace,'waiting_platform','rollouts','Waiting')
+            self.assertEqual(result['stage'],'five_rollouts')
+            self.assertEqual(report(home,workspace,'reviewing','start','retry'),result)
+
     def test_terminal_handoff_survives_restart_but_new_generation_can_run(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);home=root/'home';workspace=root/'workspace';home.mkdir();workspace.mkdir()

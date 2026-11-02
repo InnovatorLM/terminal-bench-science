@@ -28,31 +28,52 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
               'pod_evidence_complete': validate_pods(report, config)['complete']}
     hashes = {}
     errors = []
-    trials = list(run_root.glob('*/result.json'))
+    trials = trial_directories(run_root)
+    raw_agent_files = []
     if len(trials) == 1:
-        trial = trials[0].parent
+        trial = trials[0]
         def read(name):
             data = read_file(trial / name, run_root)
             hashes[str((trial / name).relative_to(run_root))] = hashlib.sha256(data).hexdigest()
             return data
+        # Hash partial native evidence independently. Missing result.json or an
+        # unfinished ATIF conversion must not hide the actual Codex session.
+        for path in sorted((trial / 'agent').rglob('*')):
+            if path.is_file():
+                try:
+                    name = str(path.relative_to(trial))
+                    read(name)
+                    if name != 'agent/acs-collection.json': raw_agent_files.append(name)
+                except (OSError, ValueError, TypeError) as exc:
+                    errors.append(type(exc).__name__)
+        result = {}
         try:
             result = json.loads(read('result.json'))
             checks['trial_complete'] = bool(result.get('finished_at')) and not result.get('exception_info') and not result.get('cleanup_exception_info')
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            errors.append(type(exc).__name__)
+        try:
             trace = json.loads(read('agent/trajectory.json'))
             steps = trace.get('steps')
             checks['trajectory_retained'] = (str(trace.get('schema_version', '')).startswith('ATIF-')
                 and isinstance(steps, list) and bool(steps)
                 and all(isinstance(step, dict) for step in steps)
                 and any(step.get('source') == 'agent' for step in steps))
-            reward = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
-            actual = float(read('verifier/reward.txt').decode().strip())
-            log = read('verifier/test-stdout.txt')
-            checks['verifier_retained'] = (type(reward) in (int, float) and math.isfinite(reward)
-                and reward in (0, 1) and actual == reward and bool(log.strip()))
-            # Bind the raw harness logs as well as the normalized trace.
-            for path in sorted((trial / 'agent').rglob('*')):
-                if path.is_file():
-                    read(str(path.relative_to(trial)))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            errors.append(type(exc).__name__)
+        try:
+            rewards = (result.get('verifier_result') or {}).get('rewards', {})
+            if (trial/'verifier/reward.json').is_file():
+                actual_rewards=json.loads(read('verifier/reward.json'))
+            else:
+                actual_rewards={'reward':float(read('verifier/reward.txt').decode().strip())}
+            # A verifier may deliberately be silent. Retaining the log file
+            # proves collection; its byte count does not determine scoring.
+            read('verifier/test-stdout.txt')
+            valid=(isinstance(rewards,dict) and bool(rewards)
+                and all(type(v) in (int,float) and math.isfinite(v) for v in rewards.values()))
+            checks['verifier_retained'] = (valid and actual_rewards == rewards
+                and rewards.get('reward') in (0,1))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             errors.append(type(exc).__name__)
     else:
@@ -62,12 +83,21 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
     missing = [key for key, passed in checks.items() if not passed]
     return {'schema_version': 1, 'run_id': report.get('run_id'), 'snapshot_sha256': snapshot_sha256,
             'complete': not missing and not errors, 'checks': checks, 'missing': missing,
-            'errors': errors, 'files': hashes, 'scientific_acceptance': False}
+            'errors': errors, 'files': hashes, 'raw_agent_files': raw_agent_files,
+            'agent_logs_retained': bool(raw_agent_files), 'scientific_acceptance': False}
+
+
+def trial_directories(run_root):
+    root = Path(run_root)
+    return sorted({p.parent for p in root.glob('*/result.json')} |
+                  {p.parent for p in root.glob('*/trial.log')} |
+                  {p.parent for p in root.glob('*/agent') if p.is_dir()})
 
 
 def public_status(evidence):
     return {'evidence_complete': evidence['complete'], 'evidence_status': 'complete' if evidence['complete'] else 'incomplete_evidence',
             'trajectory_retained': evidence['checks']['trajectory_retained'],
+            'agent_logs_retained': evidence.get('agent_logs_retained', False),
             'verifier_evidence_retained': evidence['checks']['verifier_retained'],
             'pod_evidence_complete': evidence['checks']['pod_evidence_complete'],
             'source_version_bound': evidence['checks']['source_version_bound'],

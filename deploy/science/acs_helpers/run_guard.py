@@ -15,8 +15,10 @@ from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 try:
     from .pod_evidence import execution_identity, observe, merge_captured, validate as validate_pod_evidence
+    from .execution_budget import budgets
 except ImportError:
     from pod_evidence import execution_identity, observe, merge_captured, validate as validate_pod_evidence
+    from execution_budget import budgets
 
 
 KINDS = ('sandboxsets', 'sandboxclaims', 'sandboxes', 'pods', 'jobs', 'configmaps')
@@ -56,8 +58,10 @@ def check_config(c):
     if any(resources[k].get('cpu') != cpu or resources[k].get('memory') != memory for k in ('requests', 'limits')):
         raise ValueError('Pod requests/limits must match selected resource profile')
     deadline = podspec.get('activeDeadlineSeconds', 0)
-    if not 0 < deadline <= 14400:
-        raise ValueError('Require bounded Pod activeDeadlineSeconds <=14400')
+    # Accept legacy registered templates at validation time. Launchers replace
+    # their infrastructure TTL before execution without changing task bytes.
+    if type(deadline) is not int or not 0 < deadline <= budgets(c)['pod_seconds']:
+        raise ValueError('Pod lifetime exceeds the bounded execution budget')
     return run_id, kw
 
 
@@ -245,18 +249,22 @@ def main():
                 model = agent.get('model_name', '').removeprefix('openai/')
                 if model != settings_value['OPENAI_MODEL'] or agent['env']['OPENAI_BASE_URL'].rstrip('/') != settings_value['OPENAI_BASE_URL'].rstrip('/') or agent['env']['LLM_PROVIDER'] != settings_value['LLM_PROVIDER']:
                     raise ValueError('Loaded provider/model settings do not match job configuration')
+            budget = budgets(c)
+            if kw['pod_overrides']['spec']['activeDeadlineSeconds'] < budget['pod_seconds']:
+                raise ValueError('Pod lifetime must include setup, verifier and evidence collection')
+            report['execution_budget'] = budget
             with out.with_suffix('.harbor.log').open('w') as log:
                 proc = subprocess.Popen([str(Path(args.harbor).resolve()), 'run', '--config', str(path), '--yes'],
                                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                                         env=dict(os.environ,GEWU_POD_EVIDENCE_DIR=str(journal)))
-                deadline = time.monotonic() + 14700
+                deadline = time.monotonic() + budget['controller_seconds']
                 while proc.poll() is None:
                     snapshot = cluster.snapshot(run_id)
                     remember(snapshot, known)
                     observe(snapshot, report)
                     save()
                     if time.monotonic() > deadline:
-                        raise TimeoutError('Harbor controller exceeded 14700 seconds')
+                        raise TimeoutError('Harbor controller exceeded its execution and collection budget')
                     time.sleep(1)
                 report['harbor_exit_code'] = proc.returncode
             result_path = job_dir / 'result.json'
@@ -275,7 +283,7 @@ def main():
         if proc is not None and proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)
             try:
-                proc.wait(timeout=10)
+                proc.wait(timeout=180)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()

@@ -238,6 +238,10 @@ def decision(previous, observation, now):
     same = previous.get('source_signature') == observation['source_signature']
     stable_since = previous.get('stable_since', now) if same else now
     result = dict(previous, **observation)
+    # A successful new observation resolves the prior inspection error. Keep
+    # reset cooldown/history, but do not label healthy waits as current errors.
+    result.pop('error_type', None)
+    result.pop('observation_reason', None)
     result.update(stable_since=stable_since, observed_at=now,
                   action='observe', last_attempt=previous.get('last_attempt', 0),
                   attempted_signature=previous.get('attempted_signature'))

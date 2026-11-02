@@ -12,6 +12,7 @@ def install_clock(root):
     directory = Path(root)/'usr/local/bin'
     for source, name, mode in [
         ('iteration_budget.py', 'iteration_budget.py', 0o644),
+        ('post_acceptance.py', 'post_acceptance.py', 0o644),
         ('author_iteration_clock.py', 'author-iteration-clock', 0o755),
         ('author_iteration_clock.py', 'role-iteration', 0o755),
     ]:
@@ -37,4 +38,5 @@ def install(config):
         local_runtime=str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-')
         if (not root.is_relative_to(W) and not local_runtime) or directory.resolve()!=directory:raise ValueError('Unsafe client destination')
         _install_file(directory, 'role_acs_selftest.py', 'role-acs-selftest')
+        _install_file(directory, 'role_forgejo.py', 'role-forgejo')
         install_clock(root)

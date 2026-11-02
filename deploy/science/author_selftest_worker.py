@@ -122,9 +122,11 @@ def process(role,entry,request):
    for container in spec['containers']:
     container['image']=images['official']['published_digest']
     for k in ['requests','limits']:container['resources'][k].update(cpu='4',memory='8Gi')
+   from acs_helpers.execution_budget import apply as apply_execution_budget
+   execution_budget=apply_execution_budget(c)
    cfg=work/(agent+'.json');atomic_json(cfg,c);report=work/(agent+'-report.json')
    acs_started_at=time.time()
-   with (work/(agent+'.log')).open('w') as log:r=owned_run([str(Path(__file__).with_name('run-acs-evaluation')),str(cfg),str(report)],env=env,stdout=log,stderr=log,timeout=15000,cleanup_grace=150)
+   with (work/(agent+'.log')).open('w') as log:r=owned_run([str(Path(__file__).with_name('run-acs-evaluation')),str(cfg),str(report)],env=env,stdout=log,stderr=log,timeout=execution_budget['worker_seconds'],cleanup_grace=180)
    d=json.loads(report.read_text()) if report.exists() else {};trials=[];diagnostics=[]
    if d.get('result_path'):
     for f in Path(d['result_path']).parent.glob('*/result.json'):

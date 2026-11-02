@@ -33,10 +33,11 @@ def publish(src, dst, secrets=(), gid=None):
     dst.mkdir(mode=0o700, parents=True)
     names = ['result.json', 'config.json', 'trial.log', 'agent/trajectory.json',
              'agent/mini-swe-agent.trajectory.json', 'agent/mini-swe-agent.txt',
-             'verifier/reward.txt', 'verifier/test-stdout.txt', 'verifier/test-stderr.txt']
+             'verifier/reward.txt', 'verifier/reward.json', 'verifier/test-stdout.txt', 'verifier/test-stderr.txt']
     names += [str(path.relative_to(src)) for path in sorted((src/'agent').rglob('*'))
               if path.is_file() and path.suffix in {'.json','.jsonl','.txt','.log'} and str(path.relative_to(src)) not in names]
     files = {}
+    partial_jsonl = {}
     try:
         for name in names:
             path = src / name
@@ -48,7 +49,17 @@ def publish(src, dst, secrets=(), gid=None):
                 content = {'agent': {key: config.get('agent', {}).get(key) for key in ('name', 'model_name')},
                            'task_name': Path(config.get('task', {}).get('path', '')).name}
             elif name.endswith('.jsonl'):
-                content='\n'.join(json.dumps(redact(json.loads(line),secrets),ensure_ascii=False) for line in raw.decode().splitlines() if line.strip())+'\n'
+                lines=[]
+                for number,line in enumerate(raw.decode('utf-8',errors='replace').splitlines(),1):
+                    if not line.strip():continue
+                    try:lines.append(json.dumps(redact(json.loads(line),secrets),ensure_ascii=False))
+                    except ValueError:
+                        # A cancelled writer can leave a partial final event.
+                        # Preserve it, sanitized, and label it instead of losing
+                        # the entire earlier session and diagnostic packet.
+                        lines.append(sanitize(line,secrets))
+                        partial_jsonl.setdefault(name,[]).append(number)
+                content='\n'.join(lines)+'\n'
             elif name.endswith('.json'):
                 content = redact(json.loads(raw), secrets)
             else:
@@ -64,8 +75,9 @@ def publish(src, dst, secrets=(), gid=None):
         trace = json.loads((dst / 'agent/trajectory.json').read_text()) if 'agent/trajectory.json' in files else {}
         trajectory = (str(trace.get('schema_version', '')).startswith('ATIF-') and isinstance(trace.get('steps'), list)
                       and any(isinstance(step, dict) and step.get('source') == 'agent' for step in trace['steps']))
-        verifier = all(name in files for name in ('verifier/reward.txt', 'verifier/test-stdout.txt'))
+        verifier = ('verifier/test-stdout.txt' in files and any(name in files for name in ('verifier/reward.txt','verifier/reward.json')))
         manifest = {'trajectory_available': trajectory, 'verifier_available': verifier, 'files': files,
+                    'partial_jsonl_lines': partial_jsonl,
                     'sanitized': True, 'raw_trajectory_exported': False, 'scientific_acceptance': False,
                     'redaction_scope': 'Known credential values, structured secret fields, bearer tokens and private keys; not an exhaustive secret audit'}
         path = dst / 'manifest.json';path.write_text(json.dumps(manifest, indent=2));path.chmod(0o600)

@@ -182,6 +182,20 @@ def _reconcile(work, state, entry, universe):
             publish_handoff(work,state,entry,status,result)
         return
     output=work/'handoff.json'
+    # Restoring an already accepted commit is a handoff, not another review.
+    # Check the original signed identity before budget/registration gates; do
+    # not manufacture a new clock exemption or repeat cloud evaluations.
+    from completed_review_reuse import lookup, record as record_reuse
+    current=json.loads(read_operator_file(work/'status.json'))
+    completed=lookup(current,universe)
+    if completed is not None:
+        record_reuse(work,current,completed)
+        atomic_json(output,completed)
+        visible=dict(current,review_handoff=completed)
+        destination=Path(entry['root'])/'selftest/results'/(current['job_id']+'.json')
+        atomic_json(destination,visible,0o640);os.chown(destination,0,entry['gid'])
+        publish_handoff(work,state,entry,current,completed)
+        return
     if output.exists() and json.loads(read_operator_file(output)).get('state')=='ready_for_independent_review':
         # A cached success from the legacy first-review bypass is not evidence.
         try:

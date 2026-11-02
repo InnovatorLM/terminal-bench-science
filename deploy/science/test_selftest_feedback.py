@@ -121,6 +121,43 @@ class SelftestFeedbackTests(unittest.TestCase):
         self.publish(dict(state='ready_for_independent_review'))
         self.assertEqual((self.root/'review-feedback.json').read_bytes(),before)
 
+    def test_same_accepted_version_releases_new_job_without_qualification_or_cloud(self):
+        from formal_review_decision import record,apply
+        from completed_review_reuse import lookup
+        universe=self.base/'universe';state=universe/'.state/gewu-multiverse/review-dispatcher'
+        state.mkdir(parents=True)
+        self.status.update(source_git_tree_verified=True,snapshot_sha256='c'*64)
+        (self.work/'status.json').write_text(json.dumps(self.status))
+        key='b'*40+':tasks/example'
+        row=dict(key=key,commit='b'*40,task='tasks/example',snapshot_sha256='c'*64,
+                 author_role='author-01',role='evaluator-01',evaluation_id='accepted-v1',
+                 state='completed',stage='final',generation=5,reason='Five valid runs; accepted.',
+                 job_id='d'*32,review_recommendation='accept')
+        ledger={key:row};path=state/'ledger.json';path.write_text(json.dumps(ledger))
+        record(state,key,'operator','User authorized acceptance of this exact frozen task version.')
+        apply(state,ledger);path.write_text(json.dumps(ledger))
+        self.publish()
+        self.assertTrue(self.feedback()['author_must_pause'])
+        old_status=(self.work/'status.json').read_bytes();clock=self.clock.read_bytes()
+        with patch('selftest_handoff.handoff') as handoff:
+            reconcile(self.work,self.state,self.entry,universe)
+            reconcile(self.work,self.state,self.entry,universe)
+            handoff.assert_not_called()
+        result=self.feedback()
+        self.assertEqual(result['state'],'completed')
+        self.assertEqual(result['formal_decision'],'accepted')
+        self.assertFalse(result['author_must_pause'])
+        self.assertEqual(result['job_id'],self.work.name)
+        self.assertEqual(result['key'],key)
+        self.assertEqual(result['generation'],5)
+        self.assertEqual((self.work/'status.json').read_bytes(),old_status)
+        self.assertEqual(self.clock.read_bytes(),clock)
+        self.assertEqual(json.loads(path.read_text()),ledger)
+        self.assertFalse((universe/'.state/gewu-multiverse/review-requests').exists())
+        for wrong in [dict(self.status,source_commit='e'*40),dict(self.status,snapshot_sha256='f'*64),
+                      dict(self.status,role='author-02'),dict(self.status,source_git_tree_verified=False)]:
+            self.assertIsNone(lookup(wrong,universe))
+
     def test_same_time_different_job_cannot_guess_latest(self):
         self.assertTrue(record_current_request(self.root,self.status))
         self.assertFalse(record_current_request(self.root,dict(self.status,job_id='c'*32)))

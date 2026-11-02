@@ -136,25 +136,13 @@ class EvidenceTests(unittest.TestCase):
                 'exception_type':type(caught.exception).__name__,'exception_message':str(caught.exception)}})
             self.assertFalse(diagnostic['scored']);self.assertIsNone(diagnostic['reward'])
 
-    def test_real_ack_empty_tar_cannot_claim_success_or_reuse_old_file(self):
-        # Exercise the actual upstream downloader: an empty tar used to return
-        # success even when the remote source did not exist.
-        buf=io.BytesIO()
-        with tarfile.open(fileobj=buf,mode='w'):
-            pass
-        class Stream:
-            def __init__(self):self.open=True
-            def is_open(self):return self.open
-            def update(self,timeout):pass
-            def peek_stdout(self):return True
-            def read_stdout(self):self.open=False;return buf.getvalue()
-        obj=object.__new__(UniverseACK);obj._exec_api=SimpleNamespace(connect_get_namespaced_pod_exec=object())
-        obj.pod_name='offline';obj.namespace='default'
+    def test_missing_remote_file_cannot_claim_success_or_reuse_old_file(self):
+        obj=object.__new__(UniverseACK)
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             target=Path(raw)/'result.json';target.write_text('stale result')
-            with patch.object(UniverseACK,'_ensure_client',AsyncMock()), \
-                    patch('harbor.environments.ack.stream',return_value=Stream()):
-                with self.assertRaisesRegex(FileNotFoundError,'ACK download produced no file'):
+            response=SimpleNamespace(return_code=0,stdout='{"size":null,"regular":false}')
+            with patch.object(UniverseACK,'exec',AsyncMock(return_value=response)):
+                with self.assertRaisesRegex(FileNotFoundError,'source file is missing'):
                     asyncio.run(obj.download_file('/app/missing.json',target))
             self.assertEqual(target.read_text(),'stale result')
             self.assertEqual(list(Path(raw).iterdir()),[target])
@@ -164,11 +152,11 @@ class EvidenceTests(unittest.TestCase):
         for kind in ('file','directory','symlink'):
             with self.subTest(kind=kind),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
                 root=Path(raw);target=root/'output';outside=root/'outside';outside.write_text('original')
-                async def transfer(source,downloaded):
+                async def transfer(environment,source,downloaded):
                     if kind=='file':downloaded.write_bytes(b'new\x00bytes')
                     elif kind=='directory':downloaded.mkdir()
                     else:downloaded.symlink_to(outside)
-                with patch('universe_ack.ACKEnvironment.download_file',AsyncMock(side_effect=transfer)):
+                with patch('acs_evidence_transport.download_file',AsyncMock(side_effect=transfer)):
                     if kind=='file':
                         asyncio.run(obj.download_file('/app/output',target))
                         self.assertEqual(target.read_bytes(),b'new\x00bytes')
@@ -181,7 +169,7 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);outside=root/'outside';outside.write_text('original')
             target=root/'linked';target.symlink_to(outside)
-            with patch('universe_ack.ACKEnvironment.download_file',AsyncMock()) as transfer:
+            with patch('acs_evidence_transport.download_file',AsyncMock()) as transfer:
                 with self.assertRaisesRegex(ValueError,'Symlink'):
                     asyncio.run(obj.download_file('/app/output',target))
                 transfer.assert_not_awaited()

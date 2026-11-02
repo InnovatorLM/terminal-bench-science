@@ -219,8 +219,17 @@ def retry_signature(work, state, role, universe):
               Path(__file__), Path(__file__).with_name('selftest_handoff.py'),
               Path(__file__).with_name('selftest_budget_admission.py'),
               Path(__file__).with_name('selftest_budget.py'),
+              Path(__file__).with_name('completed_review_reuse.py'),
               Path(__file__).with_name('selftest_registration.py'),
               Path(__file__).with_name('selftest_iteration.py')]
+    # A newly formalized decision may resolve a legacy wait for this exact
+    # version without author edits or another cloud execution.
+    try:
+        status=json.loads(read_operator_file(work/'status.json'))
+        from formal_review_decision import name_for
+        key=status['source_commit']+':'+status['source_task_path']
+        paths.append(Path(universe)/'.state/gewu-multiverse/review-dispatcher/formal-decisions'/name_for(key))
+    except (OSError,ValueError,KeyError,TypeError):pass
     idea=None
     try:
         request, _ = effective_request(work)

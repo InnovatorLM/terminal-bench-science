@@ -48,6 +48,8 @@ def provision(name, uid):
     (root / 'dev/null').touch(); (root / 'dev/null').chmod(0o666)
     shutil.copyfile(UNIVERSE / 'governance/public/author-instruction.md', root / 'instruction.md')
     (root / 'instruction.md').chmod(0o644)
+    from author_post_acceptance_policy import update as update_post_acceptance
+    update_post_acceptance(root/'instruction.md')
     # Public material only; no evaluator files or historical author HOME/worktree.
     for src in (UNIVERSE / 'governance/public').glob('*.md'):
         shutil.copyfile(src, root / 'references' / src.name)

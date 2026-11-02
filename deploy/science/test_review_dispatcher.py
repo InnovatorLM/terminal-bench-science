@@ -27,6 +27,44 @@ class FakeApi:
         return issue
 
 class DispatchTests(unittest.TestCase):
+    def setUp(self):
+        # These tests cover PR dispatch; the handoff consumer has its own
+        # suite. Never scan a running universe's queue from unit tests.
+        consumer=patch('selftest_review_dispatch.consume',return_value={})
+        consumer.start();self.addCleanup(consumer.stop)
+
+    def test_formal_acceptance_is_bound_to_completed_version_and_survives_dispatch(self):
+        import json, os, tempfile
+        from pathlib import Path
+        import review_dispatcher as m
+        from formal_review_decision import apply, record
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw)
+            key='a'*40+':tasks/science/example'
+            row=dict(key=key,commit='a'*40,task='tasks/science/example',
+                     snapshot_sha256='b'*64,evaluation_id='old-evaluation',
+                     role='evaluator-01',author_role='author-10',generation=5,
+                     state='completed',stage='final_review',reason='Five valid runs: 3/5.',
+                     scientific_acceptance=False)
+            ledger={key:row}
+            (root/'ledger.json').write_text(json.dumps(ledger))
+            path=record(root,key,'workspace-operator','User authorized formal acceptance of this frozen reviewed version.')
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            apply(root,ledger)
+            self.assertTrue(row['scientific_acceptance'])
+            self.assertEqual(row['formal_decision'],'accepted')
+            cfg={'roles':{'author-10':{'root':str(root/'author-10'),
+                                        'uid':os.getuid(),'gid':os.getgid()}}}
+            (root/'author-10').mkdir()
+            with patch.object(m,'STATE',root):
+                m.publish_author_feedback({},row,cfg)
+            feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+            self.assertEqual(feedback['formal_decision'],'accepted')
+            self.assertEqual(m.completed_versions(ledger,'author-10',row['task'],'new')[0]
+                             ['formal_decision'],'accepted')
+            with self.assertRaisesRegex(ValueError,'frozen review'):
+                apply(root,{key:dict(row,snapshot_sha256='c'*64)})
+
     @patch('author_submission_gate.approved', return_value=False)
     def test_current_pr_keeps_completed_history_without_restarting_review(self, approved):
         import tempfile,json,os
@@ -226,6 +264,139 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(wake['state'],'reviewing')
             self.assertEqual(wake['generation'],3)
             execution.assert_called_once_with('abc','tasks/science/example')
+
+    def test_five_rollouts_wait_and_resume_once_for_valid_or_invalid_results(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        from role_evaluation_batch import requests
+        for invalid in (False,True):
+            with self.subTest(invalid=invalid),tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+                root=Path(raw);home=root/'evaluator-01/home/role';home.mkdir(parents=True)
+                (root/'evaluator-01/evaluation/results').mkdir(parents=True)
+                (root/'author-07/selftest').mkdir(parents=True)
+                cfg={'roles':{'evaluator-01':{'root':str(root/'evaluator-01'),
+                                             'uid':os.getuid(),'gid':os.getgid()},
+                              'author-07':{'root':str(root/'author-07'),
+                                           'uid':os.getuid(),'gid':os.getgid()}}}
+                key='abc:tasks/example';row=dict(key=key,role='evaluator-01',
+                    author_role='author-07',task='tasks/example',commit='abc',
+                    job_id='selftest',idea_id='idea',received_at=100,
+                    evaluation_id='frozen-task',snapshot_sha256='a'*64,
+                    generation=0,state='waiting_platform',stage='five_rollouts',
+                    assigned_at=100,evaluator_assigned=True)
+                (root/'author-07/selftest/current-request.json').write_text(json.dumps(row))
+                jobs=requests(row);results=root/'evaluator-01/evaluation/results'
+                with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=200):
+                    m.sync_direct_assignments(cfg,{key:row})
+                    self.assertEqual(row['state'],'waiting_platform')
+                    self.assertEqual(row['generation'],0)
+                    feedback=json.loads((root/'author-07/review-feedback.json').read_text())
+                    self.assertTrue(feedback['author_must_pause'])
+                    m.publish_author_feedback({'number':49},dict(author_role='author-07',
+                        commit='old-pr-head',task='tasks/example',state='waiting_author',
+                        stage='author_container_preflight'),cfg)
+                    self.assertEqual(json.loads((root/'author-07/review-feedback.json').read_text()),feedback)
+                    for index,job in enumerate(jobs):
+                        value=dict(job,status='solver_complete',cleanup_confirmed=True,
+                            evidence_complete=True,source_version_bound=True,n_errors=0,reward=0)
+                        if invalid and index==4:value['snapshot_sha256']='b'*64
+                        (results/(job['job_id']+'.json')).write_text(json.dumps(value))
+                        if index<4:
+                            m.sync_direct_assignments(cfg,{key:row})
+                            self.assertEqual(row['state'],'waiting_platform')
+                    m.sync_direct_assignments(cfg,{key:row})
+                    self.assertEqual(row['state'],'reviewing')
+                    self.assertEqual(row['generation'],1)
+                    self.assertEqual(row['batch_generation'],0)
+                    self.assertEqual(row['stage'],'rollout_results_invalid' if invalid else 'rollout_results_ready')
+                    assignment=json.loads((home/'review-assignment.json').read_text())
+                    self.assertEqual(assignment['generation'],1)
+                    self.assertEqual(requests(assignment),jobs)
+                    m.sync_direct_assignments(cfg,{key:row})
+                    self.assertEqual(row['generation'],1)
+                    # After reading the results, the evaluator may park again
+                    # for an infrastructure repair. Identical results do not wake it.
+                    status=dict(key=key,generation=1,state='waiting_platform',
+                                stage='five_rollouts',reason='Diagnosed; waiting for platform repair.',updated_at=201)
+                    (home/'review-status.json').write_text(json.dumps(status))
+                    (home/'activity-receipt.json').write_text(json.dumps(dict(status,receipt_type='evaluator-activity-v1')))
+                    for _ in range(2):
+                        m.sync_direct_assignments(cfg,{key:row})
+                        self.assertEqual(row['generation'],1)
+                        self.assertEqual(row['state'],'waiting_platform')
+                    path=results/(jobs[0]['job_id']+'.json')
+                    changed=json.loads(path.read_text());changed['new_evidence']='newly collected diagnostic'
+                    path.write_text(json.dumps(changed))
+                    m.sync_direct_assignments(cfg,{key:row})
+                    self.assertEqual(row['generation'],2)
+                    self.assertEqual(row['state'],'reviewing')
+
+    def test_parked_pr_cannot_overwrite_another_active_direct_review(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        for qualified in (True,False):
+            with self.subTest(qualified=qualified),tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+                root=Path(raw);home=root/'evaluator-01/home/role';home.mkdir(parents=True)
+                cfg={'roles':{'evaluator-01':dict(root=str(root/'evaluator-01'),uid=os.getuid(),gid=os.getgid())}}
+                api=FakeApi();api.issues=[dict(number=1,state='open')]
+                busy_key='frozen:tasks/busy'
+                busy=dict(key=busy_key,commit='frozen',task='tasks/busy',role='evaluator-01',
+                          state='reviewing',stage='completeness',generation=0,assigned_at=100)
+                old=dict(pr=30,commit='abc',task='tasks/science/example',role='evaluator-01',
+                         state='waiting_platform',stage='evaluator_runner_startup',generation=0,
+                         event=m.fingerprint(api.pulls[0],[]),issue=1,
+                         evaluation_id='old',snapshot_sha256='a'*64)
+                ledger={busy_key:busy,'30:abc':old}
+                with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=200),\
+                     patch('author_submission_gate.approved',return_value=qualified),\
+                     patch('author_submission_gate.review_budget_summary',return_value=None),\
+                     patch.object(m,'registered_execution',return_value=dict(evaluation_id='old',snapshot_sha256='a'*64)):
+                    m.reconcile(api,cfg,ledger)
+                self.assertEqual(json.loads((home/'review-assignment.json').read_text())['key'],busy_key)
+                wake=json.loads((root/'evaluator-01/review-dispatch.json').read_text())
+                self.assertEqual(wake['key'],busy_key)
+                self.assertEqual(wake['state'],'reviewing')
+
+    def test_waiting_rollouts_do_not_replace_busy_evaluator_assignment(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        from role_evaluation_batch import requests
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);home=root/'evaluator-01/home/role';home.mkdir(parents=True)
+            results=root/'evaluator-01/evaluation/results';results.mkdir(parents=True)
+            author=root/'author-07';(author/'selftest').mkdir(parents=True)
+            cfg={'roles':{'evaluator-01':{'root':str(root/'evaluator-01'),
+                                         'uid':os.getuid(),'gid':os.getgid()},
+                          'author-07':{'root':str(author),'uid':os.getuid(),'gid':os.getgid()}}}
+            waiting_key='old:tasks/bee';busy_key='new:tasks/other'
+            waiting=dict(key=waiting_key,role='evaluator-01',author_role='author-07',
+                         task='tasks/bee',commit='old',job_id='selftest',idea_id='idea',
+                         received_at=100,evaluation_id='frozen-task',snapshot_sha256='a'*64,
+                         generation=0,state='waiting_platform',stage='five_rollouts',
+                         assigned_at=100,evaluator_assigned=True)
+            busy=dict(key=busy_key,role='evaluator-01',task='tasks/other',commit='new',
+                      generation=0,state='reviewing',stage='completeness',assigned_at=100)
+            (author/'selftest/current-request.json').write_text(json.dumps(waiting))
+            for job in requests(waiting):
+                (results/(job['job_id']+'.json')).write_text(json.dumps(dict(
+                    job,status='failed',cleanup_confirmed=True,evidence_complete=False)))
+            ledger={waiting_key:waiting,busy_key:busy}
+            with patch.object(m,'STATE',root),patch.object(m.time,'time',return_value=200):
+                m.sync_direct_assignments(cfg,ledger)
+                self.assertEqual(waiting['state'],'waiting_platform')
+                self.assertEqual(waiting['rollout_result_status'],'rollout_results_invalid')
+                self.assertIn('results are available',waiting['reason'])
+                self.assertEqual(json.loads((home/'review-assignment.json').read_text())['key'],busy_key)
+                self.assertEqual(json.loads((root/'evaluator-01/review-dispatch.json').read_text())['key'],busy_key)
+                self.assertTrue(json.loads((author/'review-feedback.json').read_text())['author_must_pause'])
+                busy['state']='completed'
+                m.sync_direct_assignments(cfg,ledger)
+                self.assertEqual(waiting['state'],'reviewing')
+                self.assertEqual(waiting['stage'],'rollout_results_invalid')
+                self.assertEqual(json.loads((home/'review-assignment.json').read_text())['key'],waiting_key)
 
     def test_execution_lookup_matches_exact_version_and_rejects_changed_snapshot(self):
         import tempfile,json,os

@@ -26,7 +26,7 @@ SENSITIVE = ('*.env', '*token*', '*secret*', '*credential*', 'app.ini', 'auth.js
 CACHES = {'.cache', '.tmp', '__pycache__', '.venv', 'node_modules', '.mypy_cache', '.pytest_cache'}
 ROLE_PAYLOADS = {'workspace', 'selftest', 'evaluation', 'skills', 'home', 'runs',
                  'instruction.md', 'capabilities.json', 'review-feedback.json',
-                 'review-current-assignment.json', 'review-dispatch.json'}
+                 'review-current-assignment.json', 'review-dispatch.json', 'post-acceptance.json'}
 
 
 class BudgetExpired(Exception):

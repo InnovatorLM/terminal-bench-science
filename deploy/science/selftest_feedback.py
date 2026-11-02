@@ -121,6 +121,8 @@ def release_handoff(root, source):
     with feedback_lock(root):
         feedback = read_json(root/'review-feedback.json')
         assignment = read_json(root/'review-current-assignment.json')
+        from post_acceptance import accepted
+        if accepted(feedback):return
         if (same_binding(feedback, source) and same_binding(assignment, source)
                 and feedback.get('feedback_source') == 'selftest_handoff'
                 and assignment.get('feedback_source') == 'selftest_handoff'):
@@ -146,7 +148,8 @@ def publish_handoff(work, state, entry, status, result):
             record_current_request(root, other)
             release_handoff(root, source)
             return
-    if not current_idea_matches(root, source['idea_id']):
+    reused=(result.get('state')=='completed' and result.get('stage')=='previously_accepted_version')
+    if not reused and not current_idea_matches(root, source['idea_id']):
         release_handoff(root, source)
         return
     if not record_current_request(root, status):
@@ -156,7 +159,7 @@ def publish_handoff(work, state, entry, status, result):
         # The dispatcher will independently deliver the real review assignment.
         release_handoff(root, source)
         return
-    if result.get('state') not in ('waiting_platform', 'waiting_author'):
+    if result.get('state') not in ('waiting_platform', 'waiting_author') and not reused:
         return
     from review_dispatcher import publish_author_feedback
     row = dict(result, **source, key='selftest:'+source['job_id'], generation=0,
@@ -164,4 +167,6 @@ def publish_handoff(work, state, entry, status, result):
     # role denotes an evaluator in dispatcher rows, so do not use author role
     # as an invented evaluator assignment.
     row.pop('role')
+    if reused:
+        row.update(key=result['review_key'],generation=result['review_generation'],role=result['evaluator'])
     publish_author_feedback({}, row, {'roles': {source['role']: entry}})

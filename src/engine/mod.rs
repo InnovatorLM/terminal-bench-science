@@ -1506,10 +1506,12 @@ impl Inner {
         if operator_role_held(self.options.layout.state_root(), &agent.name) {
             return Some("operator reset holds this role; awaiting explicit release".into());
         }
-        if agent.name.starts_with("author-")
-            && author_review_paused(&self.options.layout.agents_dir().join(&agent.name))
-        {
-            return Some("waiting for the assigned evaluator review".into());
+        if agent.name.starts_with("author-") {
+            if let Some(reason) = author_review_pause_reason(
+                &self.options.layout.agents_dir().join(&agent.name),
+            ) {
+                return Some(reason.into());
+            }
         }
         if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some() {
             if self.options.confinement != crate::confinement::Method::RoleBroker {
@@ -3360,55 +3362,79 @@ fn review_assignment_ready(root: &Path) -> bool {
 
 /// Park authors during confirmed review or an exact self-test platform wait.
 /// Job, idea and version bindings keep an old result from stopping newer work.
-fn author_review_paused(root: &Path) -> bool {
-    let Ok(bytes) = fs::read(root.join("review-feedback.json")) else { return false; };
-    let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+fn author_review_pause_reason(root: &Path) -> Option<&'static str> {
+    let Ok(bytes) = fs::read(root.join("review-feedback.json")) else { return None; };
+    let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return None; };
     if feedback["author_must_pause"] != true
         || !matches!(feedback["state"].as_str(), Some("reviewing" | "waiting_platform"))
         || feedback["key"].as_str().is_none_or(str::is_empty)
         || feedback["commit"].as_str().is_none_or(str::is_empty)
         || feedback["task"].as_str().is_none_or(str::is_empty)
-        || !feedback["generation"].is_u64() { return false; }
-    let Ok(current_bytes) = fs::read(root.join("review-current-assignment.json")) else { return false; };
-    let Ok(current) = serde_json::from_slice::<serde_json::Value>(&current_bytes) else { return false; };
+        || !feedback["generation"].is_u64() { return None; }
+    let Ok(current_bytes) = fs::read(root.join("review-current-assignment.json")) else { return None; };
+    let Ok(current) = serde_json::from_slice::<serde_json::Value>(&current_bytes) else { return None; };
     let exact = current["state"] == feedback["state"]
         && current["key"] == feedback["key"]
         && current["generation"] == feedback["generation"]
         && current["commit"] == feedback["commit"]
         && current["task"] == feedback["task"];
     if !exact {
-        return false;
+        return None;
     }
     if feedback["state"] == "reviewing" {
         // Legacy PR assignments have no self-test identity. Bound direct
         // reviews must still belong to the current accepted request.
         if feedback["job_id"].as_str().is_none() {
-            return true;
+            return Some("waiting for the assigned evaluator review");
         }
         let Ok(bytes) = fs::read(root.join("selftest/current-request.json")) else {
             // Existing PR/direct reviews predate the request marker. Preserve
             // their confirmed pause until a newer accepted request exists.
-            return feedback["idea_id"].is_null() && feedback["received_at"].is_null();
+            return (feedback["idea_id"].is_null() && feedback["received_at"].is_null())
+                .then_some("waiting for the assigned evaluator review");
         };
-        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return None; };
         return ["job_id","idea_id","commit","task","received_at"].iter()
-            .all(|field| !feedback[*field].is_null() && request[*field] == feedback[*field]);
+            .all(|field| !feedback[*field].is_null() && request[*field] == feedback[*field])
+            .then_some("waiting for the assigned evaluator review");
+    }
+    if feedback["stage"] == "five_rollouts" {
+        if current["stage"] != feedback["stage"]
+            || feedback["evaluation_id"].as_str().is_none_or(str::is_empty)
+            || feedback["snapshot_sha256"].as_str().is_none_or(str::is_empty)
+            || current["evaluation_id"] != feedback["evaluation_id"]
+            || current["snapshot_sha256"] != feedback["snapshot_sha256"]
+        {
+            return None;
+        }
+        let Ok(request_bytes) = fs::read(root.join("selftest/current-request.json")) else { return None; };
+        let Ok(request) = serde_json::from_slice::<serde_json::Value>(&request_bytes) else { return None; };
+        return ["job_id", "idea_id", "commit", "task", "received_at"].iter()
+            .all(|field| !feedback[*field].is_null()
+                && current[*field] == feedback[*field]
+                && request[*field] == feedback[*field])
+            .then_some("waiting for five assigned evaluation rollouts");
     }
     if feedback["feedback_source"] != "selftest_handoff"
         || current["feedback_source"] != "selftest_handoff" {
-        return false;
+        return None;
     }
-    let Ok(request_bytes) = fs::read(root.join("selftest/current-request.json")) else { return false; };
-    let Ok(request) = serde_json::from_slice::<serde_json::Value>(&request_bytes) else { return false; };
+    let Ok(request_bytes) = fs::read(root.join("selftest/current-request.json")) else { return None; };
+    let Ok(request) = serde_json::from_slice::<serde_json::Value>(&request_bytes) else { return None; };
     for field in ["job_id", "idea_id", "commit", "task"] {
         if feedback[field].as_str().is_none_or(str::is_empty)
             || current[field] != feedback[field] || request[field] != feedback[field] {
-            return false;
+            return None;
         }
     }
-    feedback["received_at"].as_f64().is_some_and(|value| value.is_finite() && value > 0.0)
+    (feedback["received_at"].as_f64().is_some_and(|value| value.is_finite() && value > 0.0)
         && current["received_at"] == feedback["received_at"]
-        && request["received_at"] == feedback["received_at"]
+        && request["received_at"] == feedback["received_at"])
+        .then_some("waiting for platform evidence recovery")
+}
+
+fn author_review_paused(root: &Path) -> bool {
+    author_review_pause_reason(root).is_some()
 }
 
 #[cfg(test)]
@@ -3472,6 +3498,7 @@ mod review_assignment_tests {
         assert!(!author_review_paused(&root));
         fs::write(root.join("review-current-assignment.json"), serde_json::json!({"state":"reviewing","key":"k","generation":0,"commit":"c","task":"tasks/example"}).to_string()).unwrap();
         assert!(author_review_paused(&root));
+        assert_eq!(author_review_pause_reason(&root), Some("waiting for the assigned evaluator review"));
         let current=serde_json::json!({"state":"reviewing","key":"k","generation":0,"commit":"c","task":"tasks/example"});
         for (field,value) in [("key",serde_json::json!("another")),("generation",serde_json::json!(1)),
                               ("commit",serde_json::json!("newer")),("task",serde_json::json!("tasks/other"))] {
@@ -3507,6 +3534,7 @@ mod review_assignment_tests {
         assert!(!author_review_paused(&root));
         fs::write(root.join("selftest/current-request.json"),value.to_string()).unwrap();
         assert!(author_review_paused(&root));
+        assert_eq!(author_review_pause_reason(&root), Some("waiting for platform evidence recovery"));
         for (field,newer) in [("job_id",serde_json::json!("new-job")),
                               ("idea_id",serde_json::json!("new-idea")),
                               ("commit",serde_json::json!("new-commit")),
@@ -3515,6 +3543,34 @@ mod review_assignment_tests {
             let mut current=value.clone();current[field]=newer;
             fs::write(root.join("selftest/current-request.json"),current.to_string()).unwrap();
             assert!(!author_review_paused(&root),"old platform wait paused newer {field}");
+        }
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollout_wait_pauses_only_the_matching_frozen_author_request() {
+        let root=crate::test_support::scratch_root("author-rollout-wait-binding");
+        fs::create_dir_all(root.join("selftest")).unwrap();
+        let value=serde_json::json!({"author_must_pause":true,"state":"waiting_platform",
+            "stage":"five_rollouts","key":"commit:task","generation":0,
+            "commit":"commit","task":"tasks/example","job_id":"selftest",
+            "idea_id":"idea","received_at":100,"evaluation_id":"frozen-task",
+            "snapshot_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
+        fs::write(root.join("review-feedback.json"),value.to_string()).unwrap();
+        fs::write(root.join("review-current-assignment.json"),value.to_string()).unwrap();
+        fs::write(root.join("selftest/current-request.json"),value.to_string()).unwrap();
+        assert_eq!(author_review_pause_reason(&root),
+            Some("waiting for five assigned evaluation rollouts"));
+        for (file,field,newer) in [
+            ("review-current-assignment.json","generation",serde_json::json!(1)),
+            ("review-current-assignment.json","snapshot_sha256",serde_json::json!("new")),
+            ("selftest/current-request.json","job_id",serde_json::json!("new-job")),
+            ("selftest/current-request.json","commit",serde_json::json!("new-commit")),
+        ] {
+            let mut changed=value.clone();changed[field]=newer;
+            fs::write(root.join(file),changed.to_string()).unwrap();
+            assert!(!author_review_paused(&root),"stale {field} paused newer work");
+            fs::write(root.join(file),value.to_string()).unwrap();
         }
         let _=fs::remove_dir_all(root);
     }

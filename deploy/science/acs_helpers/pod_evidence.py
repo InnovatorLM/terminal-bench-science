@@ -49,6 +49,7 @@ def pod_snapshot(pod, run_id):
             'role': (meta.get('labels') or {}).get('universe-role'), 'run_id': run_id,
             'created_at': meta.get('creationTimestamp'), 'deletion_timestamp': meta.get('deletionTimestamp'),
             'phase': status.get('phase'), 'node': spec.get('nodeName'),
+            'active_deadline_seconds': spec.get('activeDeadlineSeconds'),
             'started_at': status.get('startTime'), 'containers': containers}
 
 

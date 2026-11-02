@@ -13,6 +13,10 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 
 同一题已有完成的审核、当前 PR 却仍在等待时，先读 [已审核版本与当前 PR 的交接](references/version-handoff.md)。旧版本结论、当前版本资格、最终合并是三个状态，不能互相替代。
 
+Oracle/nop 通过但模型多次以相同理由失败、或准备正式提交前，读 [题意、评分与数据来源交叉检查](references/contract-and-provenance.md)。四小时超时、退出码 137、缺失轨迹时，读 [超时证据审查](references/timeout-evidence.md)，先判定故障归属再决定是否计作模型错误。
+
+Codex 一直 `Reconnecting`、没有首次模型响应或工具调用时，读 [模型连接与证书检查](references/runtime-tls.md)。容器缺少公共 CA 信任根也会表现为连接失败，不能据此判定模型接口限流或题目困难。
+
 ## 先确定是哪一段失败
 
 | 证据/状态 | 谁处理，下一步 |
