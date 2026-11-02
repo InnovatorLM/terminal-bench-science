@@ -157,6 +157,14 @@ def publish_handoff(work, state, entry, status, result):
     if not record_current_request(root, status):
         return
     if result.get('state') == 'ready_for_independent_review':
+        feedback=read_json(root/'review-feedback.json')
+        if (feedback.get('stage')=='evaluator_capacity'
+                and feedback.get('state')=='waiting_platform'
+                and feedback.get('feedback_source')=='selftest_handoff'
+                and same_binding(feedback,source)):
+            # Replaying a successful handoff must not release the dispatcher's
+            # capacity wait and expose this author to stale PR repair prompts.
+            return
         # A recovered handoff is released only if it still owns this pause.
         # The dispatcher will independently deliver the real review assignment.
         release_handoff(root, source)

@@ -200,6 +200,10 @@ def _publish_author_feedback_locked(pr,row,config,root):
                                   'do not rebuild or repeat self-tests to work around a platform failure.')
         payload['required_commit'] = row.get('commit')
         payload['required_task'] = row.get('task')
+        if row.get('stage') == 'evaluator_capacity':
+            payload['next_action'] = ('Self-test and immutable registration passed. Preserve this frozen version '
+                                      'while it waits for an available evaluator; dispatch resumes automatically. '
+                                      'Do not rebuild, repeat self-tests, or resubmit because of this queue wait.')
     elif row.get('state') == 'reviewing':
         payload['next_action'] = 'Pause this task and wait for the assigned evaluator result or concrete repair feedback.'
     if row.get('evaluation_id') and row.get('role') in config['roles']:

@@ -53,5 +53,51 @@ class DirectDispatchTests(unittest.TestCase):
             self.assertEqual(api.pages('/pulls?state=open'),list(range(12)))
             self.assertEqual(call.call_count,3)
 
+    def test_queued_current_version_survives_old_pr_and_handoff_replay_until_assigned(self):
+        from selftest_feedback import record_current_request,publish_handoff
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);directory=root/'.state/gewu-multiverse/review-requests';directory.mkdir(parents=True)
+            cfg={'roles':{}}
+            for role in ('author-01','evaluator-01'):
+                home=root/role/'home/role';home.mkdir(parents=True)
+                cfg['roles'][role]={'root':str(root/role),'uid':os.getuid(),'gid':os.getgid()}
+            author=root/'author-01';(author/'selftest').mkdir()
+            clock=author/'home/role/.state/author-iteration';clock.mkdir(parents=True)
+            (clock/'ledger.json').write_text(json.dumps({'ideas':{'current-idea':{'status':'active'}}}))
+            status=dict(role='author-01',idea_id='current-idea',received_at=100,job_id='c'*32,
+                        source_commit='a'*40,source_task_path='tasks/proof')
+            record_current_request(author,status)
+            request=dict(state='ready_for_independent_review',commit='a'*40,task='tasks/proof',
+                         author_role='author-01',evaluation_id='proof',snapshot_sha256='b'*64,
+                         job_id='c'*32,idea_id='current-idea',received_at=100)
+            (directory/'one.json').write_text(json.dumps(request))
+            ledger={'busy':{'role':'evaluator-01','state':'reviewing','commit':'d'*40,'task':'tasks/other'}}
+            with patch('author_submission_gate.approved',return_value=True),patch.object(
+                    review_dispatcher,'registered_execution',return_value={'evaluation_id':'proof','snapshot_sha256':'b'*64}):
+                pending=consume(cfg,ledger,root,root)
+                self.assertEqual(len(ledger),1)
+                feedback=json.loads((author/'review-feedback.json').read_text())
+                self.assertEqual(feedback['stage'],'evaluator_capacity');self.assertTrue(feedback['author_must_pause'])
+                self.assertIn('dispatch resumes automatically',feedback['next_action'])
+                # An obsolete PR is still scanned, but cannot ask this author
+                # to rerun a passed self-test while its version waits in queue.
+                review_dispatcher.publish_author_feedback({},dict(author_role='author-01',pr=36,
+                    commit='e'*40,task='tasks/proof',state='waiting_author',stage='author_container_preflight'),cfg)
+                self.assertEqual(json.loads((author/'review-feedback.json').read_text()),feedback)
+                state=root/'selftests';work=state/status['job_id'];work.mkdir(parents=True)
+                publish_handoff(work,state,cfg['roles']['author-01'],status,{'state':'ready_for_independent_review'})
+                self.assertEqual(json.loads((author/'review-feedback.json').read_text()),feedback)
+                ledger['busy']['state']='completed'
+                consume(cfg,ledger,root,root)
+                new=json.loads((author/'review-feedback.json').read_text())
+                self.assertEqual(new['state'],'reviewing');self.assertEqual(new['job_id'],status['job_id'])
+                self.assertEqual(new['evaluator'],'evaluator-01')
+                # A newer accepted job supersedes the wait; an old queued
+                # request cannot pause that different author selection.
+                record_current_request(author,dict(status,job_id='f'*32,received_at=101,source_commit='f'*40))
+                review_dispatcher.publish_author_feedback({},dict(next(iter(pending.values())),
+                    state='waiting_platform',feedback_source='selftest_handoff'),cfg)
+                self.assertNotEqual(json.loads((author/'review-feedback.json').read_text()).get('stage'),'evaluator_capacity')
+
 
 if __name__=='__main__':unittest.main()

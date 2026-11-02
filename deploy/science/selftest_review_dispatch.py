@@ -41,7 +41,15 @@ def consume(config, ledger, universe, state):
                 busy={row.get('role') for row in ledger.values() if row.get('state')=='reviewing'}
                 available=sorted(role for role in config['roles'] if role.startswith('evaluator-') and role not in busy)
                 if not available:
-                    pending[key]={'state':'queued','stage':'evaluator_capacity','commit':commit,'task':task}
+                    pending[key]=dict(key=key,state='queued',stage='evaluator_capacity',commit=commit,task=task,
+                        author_role=author,**execution,job_id=request['job_id'],
+                        **{field:request[field] for field in ('idea_id','received_at') if field in request})
+                    # The gate already passed; this is a platform-owned queue
+                    # wait, not a request to rebuild the task. Publish the exact
+                    # current binding so old PRs cannot overwrite it.
+                    dispatcher.publish_author_feedback({},dict(pending[key],state='waiting_platform',
+                        feedback_source='selftest_handoff',evaluator_assigned=False,
+                        reason='Self-test and immutable registration passed; waiting for an available evaluator.'),config)
                     continue
                 now=time.time()
                 row=dict(key=key,pr=None,role=available[0],author_role=author,
