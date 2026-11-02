@@ -80,6 +80,8 @@ def main():
             scan(config)
             from iteration_lifecycle import scan_clocks
             scan_clocks(config,state_root=a.session_state,observation_root=STATE/'iteration-observations')
+            from dead_end_watchdog import scan as scan_dead_ends
+            scan_dead_ends(config, a.session_state, STATE/'dead-end-observations')
             if a.once:return
             time.sleep(30)
 if __name__=='__main__':main()

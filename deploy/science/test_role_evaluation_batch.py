@@ -34,17 +34,17 @@ class BatchTests(unittest.TestCase):
             root=Path(raw);a=self.assignment();jobs=requests(a)
             self.assertIsNone(summary(a,root)['pass_rate'])
             for i,request in enumerate(jobs):
-                (root/(request['job_id']+'.json')).write_text(json.dumps(dict(request,status='solver_complete',cleanup_confirmed=True,n_errors=0,reward=int(i<3))))
+                (root/(request['job_id']+'.json')).write_text(json.dumps(dict(request,status='solver_complete',cleanup_confirmed=True,evidence_complete=True,source_version_bound=True,n_errors=0,reward=int(i<3))))
             result=summary(a,root)
             self.assertTrue(result['complete']);self.assertEqual(result['pass_rate'],.6)
             self.assertTrue(result['difficulty_threshold_met']);self.assertFalse(result['quality_acceptance'])
             self.assertFalse(result['difficulty_strict_reject'])
             fourth=root/(jobs[3]['job_id']+'.json')
-            fourth.write_text(json.dumps(dict(jobs[3],status='solver_complete',cleanup_confirmed=True,n_errors=0,reward=1)))
+            fourth.write_text(json.dumps(dict(jobs[3],status='solver_complete',cleanup_confirmed=True,evidence_complete=True,source_version_bound=True,n_errors=0,reward=1)))
             self.assertTrue(summary(a,root)['difficulty_strict_reject'])
             self.assertFalse(summary(a,root)['difficulty_threshold_met'])
             path=root/(jobs[0]['job_id']+'.json');value=json.loads(path.read_text())
-            for bad in (dict(value,status='failed'),dict(value,cleanup_confirmed=False),dict(value,reward=True),dict(value,n_errors=1)):
+            for bad in (dict(value,status='failed'),dict(value,cleanup_confirmed=False),dict(value,reward=True),dict(value,n_errors=1),dict(value,evidence_complete=False),dict(value,source_version_bound=False)):
                 path.write_text(json.dumps(bad));result=summary(a,root)
                 self.assertFalse(result['complete']);self.assertIsNone(result['pass_rate'])
             path.write_text(json.dumps(dict(value,snapshot_sha256='c'*64)))

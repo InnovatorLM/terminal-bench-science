@@ -11,13 +11,13 @@ is never an ACS acceptance receipt.
 
 ## Required task contract
 
-Before execution, verify and record the task snapshot: `instruction.md`,
-`task.toml`, Dockerfile/build context, `tests/test.sh` (or the declared
-verifier), solution/solve script where required, dataset/task name, and harness.
+This contract applies to implemented tasks before execution, not to an initial
+research proposal. Before execution, verify and record the task snapshot: `instruction.md`,
+`task.toml`, Dockerfile/build context, `tests/test.sh`, `solution/solve.sh`, dataset/task name, and harness.
 Run a schema/path check and an author self-test in a real ACS sandbox. Confirm
 the test produces an explicit verifier result and reward. Missing verifier
 output, `rewards=null`, a bare `ValueError`, or an infrastructure exception is
-an infrastructure failure, never a solver score.
+an unscored failure requiring diagnosis (task/verifier or platform), never a solver score.
 
 ## Immutable registration
 
@@ -43,9 +43,8 @@ temporary ACS resources.
 
 Run five independent DeepSeek `deepseek-v4.1-flash-1017` trials in parallel
 when capacity allows. Preserve each trajectory and verifier evidence. Separate
-model failures from ACS/Harbor/image/network/resource failures. A timeout over
-four hours is first classified as incomplete environment/task infrastructure;
-if the task is complete and genuinely difficult, count it as a model failure
+model failures from ACS/Harbor/image/network/resource failures. At the four-hour deadline, first check for incomplete task/environment or
+model/tool infrastructure; if those are excluded and the task is genuinely difficult, count it as a model failure
 and treat the difficulty as positive evidence. A pass rate at or below 60% is
 acceptable under the current policy; at or above 80% is a strict rejection.
 
@@ -63,3 +62,5 @@ Classify failures as: task/package defect; image build or pull/auth defect;
 verifier defect; ACS scheduling/resource/storage defect; network-policy defect;
 model/agent failure; or timeout. Include the observed evidence and the next
 action. Never mark a task accepted solely because a process exited zero.
+
+For concrete errors and waiting states, use `/skills/acs-task-troubleshooting/SKILL.md`.

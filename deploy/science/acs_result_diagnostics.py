@@ -8,14 +8,29 @@ state until the verifier evidence proves otherwise.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 
 def classify_trial(result: dict[str, Any]) -> dict[str, Any]:
     """Return a stable, non-scoring diagnostic for one Harbor result."""
+    if not isinstance(result, dict):
+        return {'status':'infrastructure_error','diagnostic':'trial_result_parse_error','scored':False,'reward':None}
     verifier = result.get("verifier_result")
     exception = result.get("exception_info") or {}
+    if not isinstance(exception, dict):
+        return {'status':'infrastructure_error','diagnostic':'trial_exception_parse_error','scored':False,'reward':None}
     exception_type = exception.get("exception_type")
     exception_message = str(exception.get("exception_message") or "").lower()
+
+    if result.get('cleanup_exception_info'):
+        return {'status':'infrastructure_error','diagnostic':'cleanup_failed','scored':False,'reward':None}
+    if exception_type in ('AgentTimeoutError','AgentExecutionTimeoutError'):
+        return {'status':'incomplete','diagnostic':'agent_timeout_requires_cause_review','scored':False,'reward':None}
+    if exception_type and verifier is not None:
+        # A stale/partial reward cannot hide a failed agent or verifier. A
+        # confirmed difficulty timeout is adjudicated separately, never guessed
+        # from the mere presence of an exception or a zero reward.
+        return {'status':'infrastructure_error','diagnostic':'trial_exception_with_reward','scored':False,'reward':None}
 
     if verifier is None:
         if exception_type == "ValueError" and "network policy" in exception_message:
@@ -36,6 +51,9 @@ def classify_trial(result: dict[str, Any]) -> dict[str, Any]:
         return {"status": "infrastructure_error",
                 "diagnostic": "verifier_reward_parse_error", "scored": False,
                 "reward": None}
+    reward=rewards.get('reward')
+    if type(reward) not in (int,float) or not math.isfinite(reward) or reward not in (0,1):
+        return {'status':'infrastructure_error','diagnostic':'verifier_reward_invalid','scored':False,'reward':None}
     return {"status": "scored", "diagnostic": "ok", "scored": True,
             "reward": rewards}
 

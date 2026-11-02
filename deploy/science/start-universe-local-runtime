@@ -7,13 +7,21 @@ export PYTHONPATH="$W/gewu-multiverse/deploy/science${PYTHONPATH:+:$PYTHONPATH}"
 export GEWU_FORGEJO_PORT
 SOURCE=${GEWU_UNIVERSE_SOURCE:-$W/universes/my-terminal-bench-science-v2}
 DONOR=${GEWU_EXTERNAL_ROLE_ROOTS:-$W/universes/my-terminal-bench-science}
-# Runtime state lives on the node-local ext4 volume.  CPFS is used only for
-# the source universe and periodic recovery archives; keeping the default
-# below /tmp avoids FUSE latency for git, sockets, and many small trajectory
-# files.  Operators can still override this explicitly for a dedicated local
-# path (the deployment path validator accepts the gewu runtime prefix).
-RUNTIME=${GEWU_LOCAL_RUNTIME_ROOT:-/tmp/gewu-terminal-bench-science-runtime-live-$(date -u +%Y%m%d)}
+# The current workspace policy requires every newly created development file
+# below W. Operators may mount a local volume there; a directory named .tmp is
+# not itself proof of local storage. Historical /tmp runtimes are read-only
+# recovery sources, never the implicit destination of a new launch.
+RUNTIME=${GEWU_LOCAL_RUNTIME_ROOT:-$W/.tmp/gewu-terminal-bench-science-runtime-live}
 BACKUP_DIR=${GEWU_BACKUP_DIR:-$W/.state/backups/live}
+python3 - "$W" "$RUNTIME" "$BACKUP_DIR" <<'PY_STORAGE'
+from pathlib import Path
+import sys
+workspace=Path(sys.argv[1]).resolve()
+for value in sys.argv[2:]:
+    path=Path(value)
+    if not path.is_absolute() or not path.resolve().is_relative_to(workspace) or path.resolve()==workspace:
+        raise SystemExit('New runtime and backup paths must be below the active workspace')
+PY_STORAGE
 mkdir -p "$RUNTIME" "$BACKUP_DIR"
 # Keep only failure location and status, never terminal output or command text.
 # The controlling PTY intentionally discards screens which may contain secrets.
@@ -261,6 +269,11 @@ for name, entry in config['roles'].items():
         continue
     link = agents / name / 'workspace'
     link.parent.mkdir(parents=True, exist_ok=True)
+    # Local role roots already use the controller's canonical workspace path.
+    # Renaming this directory would replace it with a self-referential link
+    # and force the next startup to create an empty workspace.
+    if link.absolute() == target.absolute() and not link.is_symlink():
+        continue
     # A previous runtime may have created a real directory here.  It is not a
     # valid broker alias: the controller would see mixed canonical roots and
     # refuse confinement. Preserve it for recovery before creating the alias.
@@ -397,33 +410,13 @@ for role_root in "$RUNTIME/.config/gewu-multiverse/agents"/*; do
   chmod 666 "$role_root/dev/null"
 done
 backup() {
-  # Private trajectories and service databases require private archives even
-  # when separately provisioned credentials are excluded below.
+  # The same incremental writer handles periodic and exit requests. Its lock
+  # prevents overlap; every bounded cycle publishes coverage and freshness.
   umask 077
-  chmod 700 "$BACKUP_DIR"
-  (
-    # First, periodic and exit requests share one writer. A slow CPFS backup
-    # must not overlap another archive or block controller startup.
-    flock -n 8 || exit 0
-    local stamp archive pending code
-    stamp=$(date -u +%Y%m%dT%H%M%S%N)-${BASHPID}
-    archive="$BACKUP_DIR/runtime-$stamp.tar.gz"
-    pending="$archive.partial"
-    code=0
-    tar --exclude='*.sock' --exclude='*.pid' --exclude='*.lock' \
-      --exclude='.cache' --exclude='.tmp' --exclude='*credential*' \
-      --exclude='.env' --exclude='*.env' --exclude='*secret*' --exclude='*token*' \
-      --exclude='app.ini' --exclude='kubeconfig*' --exclude='*.key' \
-      -czf "$pending" -C "$(dirname "$RUNTIME")" "$(basename "$RUNTIME")" || code=$?
-    # tar 1 means files changed during a live read. Retain it with an explicit
-    # receipt, never advertise this as a transactional SQLite snapshot.
-    if [[ "$code" -le 1 ]]; then
-      mv -- "$pending" "$archive"
-      printf 'archive=%s\ntar_exit_code=%s\nconsistency=live-best-effort-not-transactional\n' "$(basename "$archive")" "$code" > "$archive.status"
-    else
-      printf 'tar_exit_code=%s\nstatus=failed-partial-not-published\n' "$code" > "$pending.status"
-    fi
-  ) 8>>"$BACKUP_DIR/archive.lock"
+  "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
+    --source "$RUNTIME" --target "$BACKUP_DIR/recovery" --once --budget 300 \
+    --receipt "$RUNTIME/.state/gewu-multiverse/runtime-backup.json" \
+    >> "$BACKUP_DIR/backup-worker.log" 2>&1 || true
 }
 backup_pid=''
 monitor_pid=''

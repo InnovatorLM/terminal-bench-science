@@ -19,11 +19,6 @@ description: Prepare a Harbor task for real ACS container execution, request pla
 
 任何角色都不得读取宿主 kubeconfig、ACR/模型密钥，或把密钥写进题包、镜像、issue、日志。保留工作区原始证据；清理只针对本次 run 的资源。
 
-## 当前已部署作者入口
-作者可直接运行 role-acs-selftest submit --task /workspace/<repo>/<task-path> --commit <完整40位commit>，返回 job_id。随后运行 role-acs-selftest status <job_id> 查询。控制面冻结上传题包、检查schema、构建ACR镜像，在ACS分别运行oracle参考解和nop负对照。无需在作者环境安装Docker或读取凭证。
-该入口替代上文“没有作者命令”的历史说明。只有selftest_passed证明本次正负对照通过；failed/selftest_failed必须修复。它不自动授予独立审核通过，也不伪造迭代证据。上传字节有独立哈希；平台构建前会核对source_commit、仓库相对路径、文件内容和执行权限；返回source_git_tree_verified才表示这一检查通过。
-
-
 ## 稳定思路计时与自动交接
 
 开始一个新出题思路时，先执行 `author-iteration-clock start <idea-id>`，保持这个 ID 跨分支、会话和迭代不变。每次自测都显式加 `--idea <idea-id>`；旧作业未绑定思路时，不得事后伪造绑定或重开思路来清零预算，记录 waiting_platform。
@@ -43,3 +38,5 @@ role-acs-selftest submit --idea <相同idea-id> --task /workspace/<repo>/tasks/<
 平台记录实际 ACS 执行起止，合并重叠区间后扣时；不会采用作者自报 active_seconds，也不会因填写了等待理由就任意退款。暂不能验证的暂停可能使保守时间上界超额，此时应补充平台证据，不等同直接宣判实际工作超时。角色仍须遵守五小时主动迭代预算与放弃规则。
 
 `selftest_passed` 只代表自测完成。继续查看返回的 `review_handoff`：`ready_for_independent_review` 才表示该提交的迭代证据、计时核验和不可变执行登记已接通；`waiting_author` 或 `waiting_platform` 时按返回 stage/reason 处理。即使 ready，也不代表科学质量或难度已被接收。作者须提交对应版本 PR，在 PR 正文明确写出准确 `tasks/<task>` 路径，并主动请求独立 evaluator。不要手填资格回执、借用旧登记或将自测当作五次盲测。
+
+故障处理与等待去重见 `/skills/acs-task-troubleshooting/SKILL.md`。本入口的 oracle/nop 不调用 LLM、不衡量 DeepSeek 正确率；作者必须亲自完成解题与结果驱动迭代，不能用首次自测通过替代。

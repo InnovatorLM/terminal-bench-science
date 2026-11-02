@@ -69,12 +69,15 @@ def summary(assignment, results):
         if any(result.get(k)!=v for k,v in request.items()):raise ValueError('Result belongs to another version')
         reward=result.get('reward')
         eligible=(result.get('status')=='solver_complete' and result.get('cleanup_confirmed') is True
+                  and result.get('evidence_complete') is True and result.get('source_version_bound') is True
                   and result.get('n_errors')==0 and type(reward) in (float,int)
                   and math.isfinite(reward) and reward in (0,1))
         if eligible:valid.append(reward)
         else:failures.append(request['job_id'])
         rows.append(dict(job_id=request['job_id'],status=result.get('status'),valid=eligible,
-                         reward=reward if eligible else None,cleanup_confirmed=result.get('cleanup_confirmed') is True))
+                         reward=reward if eligible else None,cleanup_confirmed=result.get('cleanup_confirmed') is True,
+                         evidence_status=result.get('evidence_status','incomplete_evidence'),
+                         missing_evidence=result.get('missing_evidence',[])))
     complete=len(valid)==5
     return dict(jobs=rows,valid_trials=len(valid),invalid_jobs=failures,complete=complete,
                 pass_rate=sum(valid)/5 if complete else None,

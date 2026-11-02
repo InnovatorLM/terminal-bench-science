@@ -65,6 +65,7 @@ def atomic_json(path, value, mode=0o600):
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         with os.fdopen(descriptor, 'w') as stream:
+            os.fchmod(stream.fileno(), mode)
             json.dump(value, stream, indent=2)
             stream.write('\n')
             stream.flush()
@@ -159,7 +160,7 @@ def validated_template(entry, request):
     return config
 
 
-def aggregate(report, result_path):
+def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_unchanged=False):
     from acs_result_diagnostics import classify_trial
     stats = report.get('stats') or {}
     complete = stats.get('n_completed_trials') == 1 and stats.get('n_errored_trials') == 0 and report.get('harbor_exit_code') == 0
@@ -178,14 +179,23 @@ def aggregate(report, result_path):
             data = ((trial.get('agent_result') or {}).get('metadata') or {}).get('aggregate_metrics')
             if isinstance(data, dict):
                 metadata.append({key: value for key, value in data.items() if key in {'input_tokens', 'output_tokens', 'model_messages', 'tool_result_messages', 'native_tool_calls'} and (value is None or type(value) is int and value >= 0)})
-    infrastructure = any(not item['scored'] for item in diagnostics)
-    status = 'infrastructure_failed' if infrastructure else ('solver_complete' if complete and cleanup and errors == 0 else 'failed')
-    return {'status': status,
-            'reward': rewards[0] if len(rewards) == 1 and complete else None,
+    unscored = [item for item in diagnostics if not item['scored']]
+    timeout_review = any(item['diagnostic'] == 'agent_timeout_requires_cause_review' for item in unscored)
+    infrastructure = any(item['diagnostic'] != 'agent_timeout_requires_cause_review' for item in unscored)
+    status = ('infrastructure_failed' if infrastructure else
+              'agent_timeout_requires_cause_review' if timeout_review else
+              'solver_complete' if complete and cleanup and errors == 0 else 'failed')
+    from execution_evidence import inspect, public_status
+    evidence = inspect(report, result_path, config, snapshot_sha256, snapshot_unchanged)
+    if status == 'solver_complete' and not evidence['complete']:
+        status = 'incomplete_evidence'
+    return {'status': status, **public_status(evidence),
+            'reward': rewards[0] if len(rewards) == 1 and complete and not unscored else None,
             'cleanup_confirmed': cleanup, 'n_errors': errors if stats.get('evals') else None,
             'input_tokens': stats.get('n_input_tokens'), 'output_tokens': stats.get('n_output_tokens'),
             'aggregate_metrics': metadata, 'diagnostics': diagnostics,
-            'quality_acceptance': False, 'raw_trajectory_exported': False}
+            'quality_acceptance': False, 'raw_trajectory_exported': evidence['checks']['trajectory_retained'],
+            'raw_trajectory_exported_to_roles': False}
 
 
 def process(config, request_path, mock=False):
@@ -277,8 +287,13 @@ def process(config, request_path, mock=False):
                     relabel(item)
         relabel(template)
         options = {} if standalone_acs else template['agents'][0].setdefault('kwargs', {})
-        retain_private = options.pop('retain_private_trajectory', False)
-        if dispatch == 'solver' and retain_private:
+        # Codex already retains native logs and ATIF in the root-private job directory.
+        # The mini-swe adapter needs an explicit extra retention destination.
+        retain_private = options.pop('retain_private_trajectory', True)
+        if dispatch == 'solver' and retain_private is not True:
+            raise ValueError('Solver trajectory retention is required')
+        legacy_retention = not standalone_acs and template['agents'][0].get('import_path') == 'universe_metrics:MetadataOnlyMiniSwe'
+        if dispatch == 'solver' and retain_private and legacy_retention:
             private_root = W / '.state/science-private-trajectories'
             private_root.mkdir(mode=0o700, exist_ok=True)
             info = private_root.lstat()
@@ -345,7 +360,40 @@ def process(config, request_path, mock=False):
         elif not (job / 'report.json').exists():
             answer.update(status='failed', cleanup_confirmed=False, quality_acceptance=False)
         else:
-            answer.update(aggregate(json.loads((job / 'report.json').read_text()), job / 'runs' / template['job_name'] / 'result.json'))
+            report = json.loads((job / 'report.json').read_text())
+            result_path = job / 'runs' / template['job_name'] / 'result.json'
+            unchanged = digest_tree(Path(entry['snapshot'])) == entry['snapshot_sha256']
+            from execution_evidence import inspect, materialize_private_trajectory
+            if private is not None and (private/'retention.json').exists():
+                try:materialize_private_trajectory(private,result_path,entry,template)
+                except (OSError,ValueError,KeyError,TypeError) as error:
+                    answer['private_trajectory_bridge_error']=type(error).__name__
+            evidence = inspect(report, result_path, template, entry['snapshot_sha256'], unchanged)
+            atomic_json(job / 'evidence-manifest.json', evidence)
+            answer.update(aggregate(report, result_path, template, entry['snapshot_sha256'], unchanged))
+            # Failed runs also need a diagnostic packet when the verifier never starts.
+            if evidence['checks']['trajectory_retained'] or evidence['checks']['verifier_retained']:
+                from publish_evidence import publish
+                from selftest_logs import credential_values
+                packet_root = Path(config['results']).parent / 'evidence'
+                packet_root.mkdir(mode=0o750, exist_ok=True)
+                os.chown(packet_root, 0, config['evaluator_uid'])
+                if packet_root.is_symlink() or packet_root.stat().st_mode & 0o022:
+                    raise ValueError('Unsafe evaluator evidence directory')
+                packet = packet_root / request['job_id']
+                trial = next(result_path.parent.glob('*/result.json')).parent
+                receipt = publish(trial, packet, credential_values(Path(config['results']).parents[1]), config['evaluator_uid'])
+                # Only the role-visible relative reference is returned; raw paths stay private.
+                answer['evidence_packet'] = '/evaluation/evidence/' + request['job_id']
+                answer['sanitized_trajectory_exported'] = receipt['trajectory_available']
+                binding = {'run_id': report['run_id'], 'snapshot_sha256': entry['snapshot_sha256'],
+                           'evidence_manifest_sha256': answer['evidence_manifest_sha256'],
+                           'pod_evidence': report.get('pod_observations', {}),
+                           'execution_identity': report.get('execution_identity', {}),
+                           'cleanup_confirmed': answer.get('cleanup_confirmed') is True}
+                atomic_json(packet / 'execution-binding.json', binding, 0o640)
+                os.chown(packet / 'execution-binding.json', 0, config['evaluator_uid'])
+
         if private is not None:
             # A retained trace is not reviewable until execution identity and
             # cleanup are checked again after the guard exits.

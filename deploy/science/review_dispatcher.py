@@ -73,6 +73,9 @@ def publish_author_feedback(pr, row, config):
             existing_key=str(existing.get('key',''))
             same_version=(existing.get('task')==row.get('task') and
                           existing.get('commit',existing.get('required_commit'))==row.get('commit'))
+            if (same_version and existing_key == key
+                    and int(existing.get('generation',0)) > int(row.get('generation',0))):
+                return
             if existing.get('state')=='reviewing' and existing_key and existing_key != key and not same_version:
                 return
         except (OSError,ValueError,TypeError):
@@ -110,6 +113,12 @@ def publish_author_feedback(pr, row, config):
                 payload['evidence_note']='Use the matching platform self-test receipt above; older repository logs do not invalidate it. Fix scientific contract findings, but do not repeat an unchanged passing self-test solely because a review could not see the platform receipt.'
         except (OSError,ValueError,TypeError):pass
     atomic(root/'review-feedback.json',payload); (root/'review-feedback.json').chmod(0o644)
+    # Public exact-current marker consumed by the controller.  It is separate
+    # from the evaluator's private assignment and is replaced atomically so an
+    # old author feedback file cannot pause a newer session.
+    current = {k: payload.get(k) for k in ('key','generation','commit','task','state')}
+    atomic(root/'review-current-assignment.json', current)
+    (root/'review-current-assignment.json').chmod(0o644)
 
 def matching_review_status(root, entry, key, generation):
     """Only a matching pair written by the assigned role is activity evidence."""
@@ -207,11 +216,14 @@ class Api:
             out+=batch
             # Forgejo may spend a long time answering pages beyond the end of
             # a large repository. A short page is authoritative termination.
-            if len(batch) < 50:
+            if len(batch) < FORGEJO_PAGE_SIZE:
                 return out
         raise ValueError('Pagination did not terminate')
 
 def reconcile(api,config,ledger):
+    from deployment_paths import universe_root
+    from selftest_review_dispatch import consume
+    consume(config,ledger,universe_root(W),STATE)
     sync_direct_assignments(config,ledger)
     pulls=api.pages('/pulls?state=open')
     pending={}

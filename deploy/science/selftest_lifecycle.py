@@ -11,6 +11,9 @@ TERMINAL = {'selftest_passed', 'selftest_failed', 'failed', 'interrupted'}
 
 def owned_run(command, **kwargs):
     timeout = kwargs.pop('timeout', None)
+    # The ACS guard needs time to terminate Harbor and confirm deletion of its
+    # own resources.  Build commands retain a short termination grace.
+    cleanup_grace = kwargs.pop('cleanup_grace', 3)
     with subprocess.Popen(command, start_new_session=True, **kwargs) as child:
         try:
             child.wait(timeout=timeout)
@@ -32,7 +35,7 @@ def owned_run(command, **kwargs):
             except ProcessLookupError:
                 pass
             try:
-                child.wait(timeout=3)
+                child.wait(timeout=cleanup_grace)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)

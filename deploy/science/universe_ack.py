@@ -1,3 +1,5 @@
+import asyncio
+import os
 from copy import deepcopy
 from pathlib import Path
 import base64
@@ -13,12 +15,47 @@ class UniverseACK(ACKEnvironment):
         overrides['spec'] = enforce(overrides.get('spec', {}))
         role = 'verifier' if Path(environment_dir).name == 'tests' else 'runtime'
         image = verifier_image if role == 'verifier' else runtime_image
-        if '@sha256:' not in image:
+        import re
+        if not re.fullmatch(r'.+@sha256:[a-f0-9]{64}',image):
             raise ValueError('Explicit immutable image digest required')
         overrides.setdefault('spec', {}).setdefault('containers', [{'name': 'main'}])[0]['image'] = image
         overrides.setdefault('metadata', {}).setdefault('labels', {})['universe-role'] = role
-        super().__init__(environment_dir=environment_dir, pod_overrides=overrides, **kwargs)
         self._universe_image = image
+        super().__init__(environment_dir=environment_dir, pod_overrides=overrides, **kwargs)
+
+    def _validate_definition(self):
+        # This adapter only executes an operator-published immutable image.
+        # Requiring a local Dockerfile (especially tests/Dockerfile) would
+        # prevent a separate verifier from starting despite its bound image.
+        if not self.environment_dir.is_dir():
+            raise FileNotFoundError('Task environment directory is missing')
+        if not getattr(self,'_universe_image',None):
+            raise ValueError('Published image identity is required')
+
+    async def _capture_pod_evidence(self, stage):
+        directory=os.environ.get('GEWU_POD_EVIDENCE_DIR')
+        if not directory or self._core_api is None:
+            return
+        try:
+            pod=await asyncio.to_thread(self._core_api.read_namespaced_pod,
+                name=self.pod_name,namespace=self.namespace,_request_timeout=(2,5))
+            from kubernetes.client import ApiClient
+            from acs_helpers.pod_evidence import capture
+            capture(ApiClient().sanitize_for_serialization(pod),directory,stage)
+        except Exception as error:
+            # Cleanup must proceed even if Kubernetes cannot return evidence.
+            # The guard marks missing observations incomplete, never fabricated.
+            self.logger.warning('Pod evidence capture failed (%s)',type(error).__name__) if hasattr(self,'logger') else None
+
+    async def start(self, force_build=False):
+        await super().start(force_build=force_build)
+        await self._capture_pod_evidence('started')
+
+    async def stop(self, delete=True):
+        try:
+            await self._capture_pod_evidence('before_stop')
+        finally:
+            await super().stop(delete=delete)
 
     def _get_image_url(self):
         return self._universe_image

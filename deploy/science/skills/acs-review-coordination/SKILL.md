@@ -1,13 +1,13 @@
 ---
 name: acs-review-coordination
-description: Coordinate author container preflight and independent ACS review without becoming an author or solver.
+description: Coordinate version-bound author self-tests and exclusive evaluator handoffs, grouping platform blockers without becoming an author or solver.
 ---
 # ACS 自测和审核交接
 
-你负责协调，不自行出题或替代独立评测。作者缺Docker不等于免除真实容器自测：指导其推送固定commit，在自己的任务issue/草稿PR提交平台容器自测请求，列明task路径、命令、资源和证据，标为waiting_platform。平台需要返回真实镜像digest、ACS运行及verifier正负对照证据，作者迭代复跑后才进入正式审核。
+你负责协调，不自行出题或替代独立评测。先读 `/capabilities.json` 与 `/skills/acs-task-troubleshooting/SKILL.md`。作者真实容器入口是 `role-acs-selftest submit/status`，evaluator 独立批次入口是 `role-evaluation-batch submit/status`。这些命令在对应角色内执行；curator 不获取云凭证、不冒充作者提交。
 
-当前作者自动自测入口尚未接通，不能把“已安装skill”说成“云执行已接通”。集中记录该平台阻塞，不反复让作者安装Docker或伪造凭证。评测者只能运行已登记快照，由review_dispatcher独占派单。没有新事件就结束并等待，不重复核查同一版本。
+作者先固定 commit 和 task 路径，通过 schema、镜像构建、ACS oracle/nop 对照，完成真实自解、基于结果修改和新版本复跑，再主动请求独立审核。`selftest_passed` 只证明该版本对照通过；还需核对 `review_handoff` 的 stage/reason，只有 `ready_for_independent_review` 表示平台交接门检完成，不代表科学质量接收。`source_git_tree_verified` 是平台核对上传与 Git 一致的证据，作者手写声明不是。
 
-## 当前已部署作者入口
-作者可直接运行 role-acs-selftest submit --task /workspace/<repo>/<task-path> --commit <完整40位commit>，返回 job_id。随后运行 role-acs-selftest status <job_id> 查询。控制面冻结上传题包、检查schema、构建ACR镜像，在ACS分别运行oracle参考解和nop负对照。无需在作者环境安装Docker或读取凭证。
-该入口替代上文“没有作者命令”的历史说明。只有selftest_passed证明本次正负对照通过；failed/selftest_failed必须修复。它不自动授予独立审核通过，也不伪造迭代证据。上传字节有独立哈希；source_commit为作者声明，正式审核前仍需核对Git版本与上传一致。
+review_dispatcher 为准确 task/commit/snapshot 独占派单。没有本次版本登记时集中报告 waiting_platform，不让多个 evaluator 猜旧 ID 重跑；已有派单不重复分发。作者收到当前版本进入审核的反馈后暂停出题并等待，审核返回修复要求或完成后再推进。没有新事件时结束会话等待，不重复检查、发表评论或要求作者反复安装 Docker。
+
+平台缺陷用 job ID、具体阶段和一次错误证据汇总；作者缺陷交给原作者。缺旧轨迹/登记时优先补收集已有证据，不为填表重复运行。完整五次评测与质量判断由获派 evaluator 完成，不能由 curator 替代。

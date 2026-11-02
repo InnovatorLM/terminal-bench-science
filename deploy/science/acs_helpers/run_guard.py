@@ -13,6 +13,10 @@ from pathlib import Path
 
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
+try:
+    from .pod_evidence import execution_identity, observe, merge_captured, validate as validate_pod_evidence
+except ImportError:
+    from pod_evidence import execution_identity, observe, merge_captured, validate as validate_pod_evidence
 
 
 KINDS = ('sandboxsets', 'sandboxclaims', 'sandboxes', 'pods', 'jobs', 'configmaps')
@@ -124,8 +128,10 @@ def remember(snapshot, known):
             known[(kind, meta['name'])] = meta['uid']
 
 
-def release(cluster, run_id, known):
-    remember(cluster.snapshot(run_id), known)
+def release(cluster, run_id, known, report=None):
+    snapshot = cluster.snapshot(run_id)
+    remember(snapshot, known)
+    if report is not None: observe(snapshot, report)
     deleted = []
     # Delete controlling resources first; never remove finalizers or touch other jobs.
     for kind in KINDS:
@@ -184,7 +190,10 @@ def main():
     out = Path(args.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     report = {'run_id': run_id, 'mode': execution_mode(c),
-              'cleanup': {'confirmed': False}, 'harbor_exit_code': None}
+              'cleanup': {'confirmed': False}, 'harbor_exit_code': None,
+              'execution_identity': execution_identity(c), 'pod_observations': {}}
+    journal=out.with_name(out.stem+'.pod-evidence')
+    journal.mkdir(mode=0o700,exist_ok=True)
     known = {}
     # Recover names seen before a previous interruption; never infer arbitrary names.
     if out.exists():
@@ -192,6 +201,8 @@ def main():
         if previous.get('run_id') != run_id:
             raise ValueError('Output report belongs to another run')
         known = {(x['kind'], x['name']): x['uid'] for x in previous.get('known_resources', [])}
+        if previous.get('execution_identity') == report['execution_identity']:
+            report['pod_observations'] = previous.get('pod_observations', {})
 
     if not args.cleanup_only:
         # Reject collisions before entering a cleanup scope. A concurrent run
@@ -200,8 +211,17 @@ def main():
             raise ValueError('Use a fresh unique run-id; existing run left untouched')
 
     def save():
+        try:
+            merge_captured(report,journal,known)
+        except (OSError,ValueError,TypeError,KeyError) as error:
+            report['pod_capture_error_type']=type(error).__name__
         report['known_resources'] = [{'kind': k, 'name': n, 'uid': u} for (k, n), u in known.items()]
-        out.write_text(json.dumps(report, indent=2))
+        report['pod_evidence'] = validate_pod_evidence(report, c)
+        temporary = out.with_suffix(out.suffix + '.writing')
+        with temporary.open('w') as stream:
+            temporary.chmod(0o600)
+            json.dump(report, stream, indent=2)
+        temporary.replace(out)
 
     proc = None
 
@@ -227,14 +247,17 @@ def main():
                     raise ValueError('Loaded provider/model settings do not match job configuration')
             with out.with_suffix('.harbor.log').open('w') as log:
                 proc = subprocess.Popen([str(Path(args.harbor).resolve()), 'run', '--config', str(path), '--yes'],
-                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                        env=dict(os.environ,GEWU_POD_EVIDENCE_DIR=str(journal)))
                 deadline = time.monotonic() + 14700
                 while proc.poll() is None:
-                    remember(cluster.snapshot(run_id), known)
+                    snapshot = cluster.snapshot(run_id)
+                    remember(snapshot, known)
+                    observe(snapshot, report)
                     save()
                     if time.monotonic() > deadline:
                         raise TimeoutError('Harbor controller exceeded 14700 seconds')
-                    time.sleep(3)
+                    time.sleep(1)
                 report['harbor_exit_code'] = proc.returncode
             result_path = job_dir / 'result.json'
             if result_path.exists():
@@ -257,7 +280,8 @@ def main():
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
         try:
-            report['cleanup'] = release(cluster, run_id, known)
+            save()
+            report['cleanup'] = release(cluster, run_id, known, report)
         except Exception as exc:
             report['cleanup'] = {'confirmed': False, 'error_type': type(exc).__name__}
         watchdog_snapshot(kw['kubeconfig'], kw['namespace'], out.with_name(out.stem + '.watchdog-end.json'), kill=False)

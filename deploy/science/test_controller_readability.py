@@ -16,6 +16,7 @@ class ControllerReadabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root = Path(raw); root.chmod(0o755)
             run = root/'author-01/run-example';run.mkdir(parents=True)
+            run.parent.chmod(0o755);run.chmod(0o755)
             plan = run/'plan.json';plan.write_text('private test value');plan.chmod(0o600)
             command = ['setpriv', '--reuid=65534', '--regid=65534', '--clear-groups',
                        os.sys.executable, str(Path(__file__).with_name('controller_readability.py')), str(root)]

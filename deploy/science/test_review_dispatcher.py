@@ -27,6 +27,22 @@ class FakeApi:
         return issue
 
 class DispatchTests(unittest.TestCase):
+    def test_old_generation_cannot_overwrite_current_author_pause(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);cfg={'roles':{'author-01':{'root':str(root),'uid':os.getuid(),'gid':os.getgid()}}}
+            row=dict(key='exact:task',author_role='author-01',commit='a'*40,task='tasks/example',
+                     generation=2,state='reviewing',evaluator_activity_confirmed=True)
+            m.publish_author_feedback({},row,cfg)
+            before=(root/'review-feedback.json').read_bytes()
+            m.publish_author_feedback({},dict(row,generation=1,state='completed'),cfg)
+            self.assertEqual((root/'review-feedback.json').read_bytes(),before)
+            self.assertEqual(json.loads((root/'review-current-assignment.json').read_text())['generation'],2)
+            m.publish_author_feedback({},dict(row,state='waiting_author'),cfg)
+            self.assertFalse(json.loads((root/'review-feedback.json').read_text())['author_must_pause'])
+
     def test_restored_direct_handoff_consumes_activity_and_preserves_identity(self):
         import tempfile,json,os
         from pathlib import Path

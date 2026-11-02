@@ -47,6 +47,17 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             owned_run(['sleep', '20'], timeout=0.05)
 
+    def test_timeout_allows_guard_to_finish_cleanup_before_force_kill(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);ready=root/'ready';cleaned=root/'cleaned'
+            script=('import signal,time;from pathlib import Path;'
+                    'signal.signal(signal.SIGTERM,lambda *_:(time.sleep(.15),Path('+repr(str(cleaned))+').touch(),exit(0)));'
+                    'Path('+repr(str(ready))+').touch();time.sleep(60)')
+            with self.assertRaises(subprocess.TimeoutExpired):
+                owned_run([sys.executable,'-c',script],timeout=1,cleanup_grace=2)
+            self.assertTrue(ready.exists())
+            self.assertTrue(cleaned.exists())
+
     def test_successful_wrapper_cannot_leave_late_writing_child(self):
         with tempfile.TemporaryDirectory(dir=W / '.tmp') as raw:
             target = Path(raw) / 'late'

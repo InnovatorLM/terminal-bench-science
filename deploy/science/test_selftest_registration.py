@@ -39,11 +39,12 @@ class SelftestRegistrationTests(unittest.TestCase):
             self.assertEqual(result['source_commit'],original)
             self.assertFalse(result['iteration_qualified'])
             self.assertEqual((work/'build/receipt.json').read_bytes(),before)
-            for mutation in ('stale','cleanup','reward','image','verification','snapshot','execution'):
+            for mutation in ('stale','cleanup','reward','boolean_reward','image','verification','snapshot','execution'):
                 bad=copy.deepcopy(status)
                 if mutation=='stale':bad['source_commit']='0'*40
                 elif mutation=='cleanup':bad['trials'][0]['cleanup_confirmed']=False
                 elif mutation=='reward':bad['trials'][1]['results'][0]['rewards']['reward']=1
+                elif mutation=='boolean_reward':bad['trials'][0]['results'][0]['rewards']['reward']=True
                 elif mutation=='image':bad['images']['official']='other@sha256:'+'0'*64
                 elif mutation=='verification':bad['source_git_tree_verified']=False
                 elif mutation=='snapshot':bad['snapshot_sha256']='0'*64

@@ -10,57 +10,70 @@ from author_submission_gate import read_operator_file, validate_receipt, REQUIRE
 from evaluation_queue import W, atomic_json, root_file, validated_template
 
 
+class AuthorEvidenceRequired(ValueError):
+    """An author can fix this without requesting another platform intervention."""
+
+
 def qualify(work, state, observation, template):
     from selftest_registration import prepare
     from selftest_iteration import validate
     from selftest_budget import verify
     status=json.loads(read_operator_file(work/'status.json'))
-    qualified=work/'handoff-qualified.json'
-    if qualified.exists():
-        receipt=json.loads(read_operator_file(qualified))
-        validate_receipt(receipt,status['source_commit'],status['source_task_path'])
-        prepare(work,status['source_commit'],status['source_task_path'],template)
-        validate(json.loads(read_operator_file(work/'request.json')).get('iteration'),status,state,status['role'])
-        return receipt
     request=json.loads(read_operator_file(work/'request.json'))
     idea=status.get('idea_id');role=status.get('role')
     if not request.get('request_review') or not idea or request.get('idea_id')!=idea:
-        raise ValueError('Explicit idea-bound review request required')
+        raise AuthorEvidenceRequired('Explicit idea-bound review request required')
+    if request.get('initial_review') or not request.get('iteration'):
+        raise AuthorEvidenceRequired('Prior selftest, changed committed task and iteration explanation required')
+    try:
+        linkage=validate(request['iteration'],status,state,role)
+    except (ValueError,FileNotFoundError) as error:
+        raise AuthorEvidenceRequired('Fix prior selftest linkage, same-task commit and iteration explanation') from error
+    qualified=work/'handoff-qualified.json'
+    if qualified.exists():
+        receipt=json.loads(read_operator_file(qualified))
+        if receipt.get('schema_version')==3:
+            validate_receipt(receipt,status['source_commit'],status['source_task_path'])
+            prepare(work,status['source_commit'],status['source_task_path'],template)
+            return receipt
+        legacy=work/'handoff-qualified-legacy.json'
+        if not legacy.exists():atomic_json(legacy,receipt)
     bridge=prepare(work,status['source_commit'],status['source_task_path'],template)
     # Recheck previous frozen bytes and completed execution; do not trust an
     # earlier derived Boolean or the author's explanation alone.
-    if request.get('initial_review') is True:
-        linkage={'initial_review':True,'changed_committed_task':False,
-                 'linked_execution_verified':False,'scientific_acceptance':False}
-    else:
-        linkage=validate(request.get('iteration'),status,state,role)
     from check_harbor_task import validate_mechanical_check
     mechanical=work/'mechanical.json'
     validate_mechanical_check(mechanical,Path(bridge['snapshot']),hashlib.sha256(read_operator_file(mechanical)).hexdigest())
     clock=work/'handoff-clock.json'
     atomic_json(clock,json.loads(read_operator_file(observation)))
-    if request.get('initial_review') is True:
-        budget={'within_budget':True,'active_iteration_seconds_upper_bound':0,
-                'active_time_kind':'initial_review_no_prior_iteration'}
-    else:
-        budget=verify(state,role,idea,clock,time.time())
-        if not budget['within_budget']:
-            raise ValueError('Conservative active-time bound needs additional pause evidence')
+    budget=verify(state,role,idea,clock,time.time())
+    if not budget['within_budget']:
+        raise ValueError('Conservative active-time bound needs additional pause evidence')
+    # The author-owned solution is part of the verified frozen Git tree and was
+    # executed by the passing oracle control. Bind its actual bytes explicitly;
+    # this proves execution, not scientific quality or independent model solving.
+    solution=Path(bridge['snapshot'])/'solution/solve.sh'
+    if not read_operator_file(solution).strip():
+        raise AuthorEvidenceRequired('Missing executed author solution')
     proof=dict(bridge=bridge,iteration=linkage,budget=budget,
                author_difficulty_viability_claim='Explicit request for review after iteration; independently assessed by evaluator',
                scientific_acceptance=False)
     evidence=work/'handoff-evidence.json';atomic_json(evidence,proof)
-    previous = state/linkage['previous_job']/'status.json' if 'previous_job' in linkage else None
-    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,clock,evidence]
-    if previous is not None:
-        files.insert(4, previous)
-    receipt=dict(schema_version=2,commit=status['source_commit'],task=status['source_task_path'],
+    previous = state/linkage['previous_job']/'status.json'
+    files=[work/'status.json',work/'request.json',work/'build/receipt.json',mechanical,previous,clock,evidence,solution]
+    check_files={'schema':[mechanical], 'container_build':[work/'build/receipt.json'],
+                 'container_start':[work/'status.json'], 'author_solve':[solution,work/'status.json'],
+                 'verifier_positive':[work/'status.json'], 'verifier_negative':[work/'status.json'],
+                 'post_iteration_rerun':[previous,work/'request.json',work/'status.json',evidence]}
+    receipt=dict(schema_version=3,origin='automatic_selftest_handoff',commit=status['source_commit'],task=status['source_task_path'],
                  snapshot_sha256=bridge['snapshot_sha256'],runtime_image=template['environment']['kwargs']['runtime_image'],
                  checks={key:True for key in REQUIRED_ORDER},pre_submission_order=list(REQUIRED_ORDER),
                  iteration_applied=True,active_iteration_seconds=budget['active_iteration_seconds_upper_bound'],
                  active_time_kind='conservative_bound_from_observed_idea_start_minus_operator_ACS_intervals',
                  difficulty_viable=True,difficulty_viability_origin='author_explicit_review_request_not_scientific_attestation',
                  scientific_acceptance=False,
+                 handoff_evidence=str(evidence),
+                 check_evidence={key:[str(p) for p in paths] for key,paths in check_files.items()},
                  evidence_files=[dict(path=str(p),sha256=hashlib.sha256(read_operator_file(p)).hexdigest()) for p in files])
     validate_receipt(receipt,status['source_commit'],status['source_task_path'])
     atomic_json(qualified,receipt)
@@ -145,7 +158,13 @@ def reconcile(work, state, entry, universe):
             atomic_json(destination,status,0o640); os.chown(destination,0,entry['gid'])
         return
     output=work/'handoff.json'
-    if output.exists() and json.loads(read_operator_file(output)).get('state')=='ready_for_independent_review':return
+    if output.exists() and json.loads(read_operator_file(output)).get('state')=='ready_for_independent_review':
+        # A cached success from the legacy first-review bypass is not evidence.
+        try:
+            current=json.loads(read_operator_file(work/'status.json'))
+            validate_receipt(json.loads(read_operator_file(work/'handoff-qualified.json')),current['source_commit'],current['source_task_path'])
+        except (OSError,ValueError,KeyError,TypeError):pass
+        else:return
     status=json.loads(read_operator_file(work/'status.json'))
     if status.get('status') not in ('selftest_passed','selftest_failed','failed','interrupted'):return
     try:result=handoff(work,Path(state),entry,universe)
@@ -158,7 +177,7 @@ def reconcile(work, state, entry, universe):
                   'publish_review_eligibility':'Platform must publish the verified eligibility receipt.'}
         stage=stage if stage in guidance else 'verify_iteration_and_budget'
         status=json.loads(read_operator_file(work/'status.json'))
-        result=dict(state='waiting_author' if status.get('status') in ('selftest_failed','failed') else 'waiting_platform',
+        result=dict(state='waiting_author' if isinstance(error,AuthorEvidenceRequired) or status.get('status') in ('selftest_failed','failed') else 'waiting_platform',
                     stage=stage,reason=guidance[stage],error_type=type(error).__name__,scientific_acceptance=False)
     atomic_json(output,result)
     status=json.loads(read_operator_file(work/'status.json'));status['review_handoff']=result

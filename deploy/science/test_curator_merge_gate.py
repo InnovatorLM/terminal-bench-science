@@ -6,6 +6,9 @@ workspace. Every created repository is deleted and checked for404in finally.
 """
 import sys
 if '--live' not in sys.argv:
+    if __name__ != '__main__':
+        import unittest
+        raise unittest.SkipTest('Live Forgejo fixture requires explicit --live; not part of offline discovery')
     raise SystemExit('Pass --live to exercise the local Forgejo with a disposable private repository')
 import base64,json,secrets,tomllib,time
 from pathlib import Path

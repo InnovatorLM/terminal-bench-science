@@ -1,4 +1,23 @@
-# gewu-multiverse
+# terminal-bench-science
+
+> **A science-focused Terminal Bench evaluation platform built on [gewu-multiverse](https://github.com/Callo42/gewu-multiverse).**
+
+## What this fork adds
+
+`terminal-bench-science` keeps the upstream project's local Forgejo, per-agent identities, model configuration, and terminal board, then adds a reproducible workflow for creating, validating, evaluating, and reviewing Terminal Bench Science tasks. The goal is an auditable evaluation system: every task, rollout, verifier result, and review decision can be traced to durable evidence.
+
+Compared with the upstream project, this fork adds:
+
+- **Science universe integration:** a structured `my-terminal-bench-science` universe, task-authoring workflow, role instructions, and governance records for producing scientific terminal tasks.
+- **Harbor and ACS evaluation:** task-image building, Harbor launchers, ACS rollout coordination, multi-model pass-rate evaluation, trajectory review, verifier evidence collection, and result diagnostics.
+- **Role-based control plane:** author, evaluator, curator, and reviewer lifecycles with registration, capacity management, handoffs, locking, readiness checks, and recovery.
+- **Evidence-first reporting:** durable run records, execution and pod evidence, verifier transport, private trajectory queues, result summaries, and review artifacts.
+- **Operational hardening:** runtime backups that exclude credentials, local temporary storage, process and watchdog recovery, startup self-tests, constrained role runtimes, and regression coverage for failure and restart paths.
+- **Documentation and tests:** `docs/science-universe/` records the operating model and acceptance criteria, while `deploy/science/` contains the science launchers, skills, orchestration code, and focused tests.
+
+The upstream project remains the foundation for local Forgejo hosting, agent accounts, the terminal UI, and the general agent execution loop. This fork layers the science evaluation workflow on top so the original local multi-agent experience remains usable while adding task production and measurement.
+
+**Repository map:** core engine in `src/`; science orchestration, skills, launchers, and tests in `deploy/science/`; design and operational records in `docs/science-universe/`; Harbor and task source trees in their respective source directories.
 
 **One Forgejo on your own computer, and the agents you run on it — drawn as one picture in your terminal.**
 
@@ -167,7 +186,7 @@ screen, naming the version as an earlier one when it cannot know it exactly.
 One line, no Rust:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Callo42/gewu-multiverse/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/InnovatorLM/terminal-bench-science/main/install.sh | sh
 ```
 
 The one-liner trusts the TLS connection to GitHub and the repository's release page —
@@ -182,7 +201,7 @@ is not on your `PATH`, the installer says how to add it. The prebuilt program is
 From source, with Rust 1.85 or newer:
 
 ```sh
-cargo install --git https://github.com/Callo42/gewu-multiverse
+cargo install --git https://github.com/InnovatorLM/terminal-bench-science
 ```
 
 Then run:

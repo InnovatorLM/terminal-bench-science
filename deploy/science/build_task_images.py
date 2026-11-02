@@ -5,6 +5,7 @@ This is build provenance, never a scientific acceptance or an oracle-leak audit.
 Dockerfile code runs only in the configured Docker build service, not host shell.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import shutil
+import stat
 from dockerfile_bases import pin_bases, official_library_transport
 
 from evaluation_queue import W, atomic_json, digest_tree
@@ -21,6 +23,27 @@ from deployment_paths import allowed_development_path, universe_root
 REGISTRY='dptech-sh-pai-acr-registry.cn-shanghai.cr.aliyuncs.com/terminal-bench-universe'
 PINNED=re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$')
 HARNESS={'mini-swe-agent':'2.2.8','litellm':'1.106.2','openai':'2.54.0','mcp':'2.3.0'}
+
+
+@contextlib.contextmanager
+def builder_slot(inherited_fd=None):
+    """Serialize builds; an inherited descriptor keeps the same locked slot."""
+    state=W/'.state/science-image-builds';state.mkdir(mode=0o700,parents=True,exist_ok=True)
+    path=state/'builder.lock'
+    if inherited_fd is not None:
+        info=os.fstat(inherited_fd);expected=path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev,info.st_ino)!=(expected.st_dev,expected.st_ino):
+            raise ValueError('Inherited builder descriptor does not match lock file')
+        # A descriptor inherited via pass_fds shares the parent's open file
+        # description and lock. A caller with an unlocked descriptor must obtain
+        # the lock here; a conflicting owner is never bypassed.
+        fcntl.flock(inherited_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        yield inherited_fd
+        return
+    fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        yield lock.fileno()
 
 
 def validate_dockerfile(path,python_base):
@@ -132,14 +155,13 @@ def main():
     parser.add_argument('--harness',choices=['codex','mini-swe-agent'],default='codex')
     parser.add_argument('--codex-binary')
     parser.add_argument('--rg-binary')
+    parser.add_argument('--lock-fd',type=int,help=argparse.SUPPRESS)
     parser.add_argument('--publish',action='store_true',help='Push project Shanghai ACR images and verify manifest/config linkage')
     args=parser.parse_args();output=Path(args.output)
     if os.geteuid()!=0 or not allowed_development_path(output) or output.exists() or not PINNED.fullmatch(args.python_base):raise ValueError('Require operator, fresh workspace output and pinned base image')
     task_name=Path(args.task_path).name
     if not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}',task_name):raise ValueError('Task directory must already have a lowercase registry-compatible ID')
-    state=W/'.state/science-image-builds';state.mkdir(mode=0o700,exist_ok=True)
-    with (state/'builder.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    with builder_slot(args.lock_fd):
         output.mkdir(mode=0o700)
         snapshot=output/'task';task_hash=freeze(args.repo,args.commit,args.task_path,snapshot)
         env_hash=validate_context(snapshot/'environment');tests_hash=validate_context(snapshot/'tests')

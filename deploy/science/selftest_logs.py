@@ -66,7 +66,11 @@ def publish(work,root,job,gid,secrets=()):
     pending=directory/(job+'.diagnostics.pending')
     fd=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o640)
     try:
-        with os.fdopen(fd,'w') as f:f.write(text);f.flush();os.fsync(f.fileno())
+        with os.fdopen(fd, 'w') as f:
+            os.fchmod(f.fileno(), 0o640)
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         os.chown(pending,0,gid);pending.replace(output)
     finally:pending.unlink(missing_ok=True)
     return '/selftest/results/'+output.name

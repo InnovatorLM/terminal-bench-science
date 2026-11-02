@@ -15,45 +15,60 @@ LAUNCHER = (Path(__file__).parent / 'start-universe').read_text()
 
 
 class ReadyFileTests(unittest.TestCase):
-    def test_runtime_archives_are_private_even_with_permissive_parent_umask(self):
-        from evaluation_queue import W
+    def backup_script(self):
         launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
-        backup=launcher.split('backup() {',1)[1].split('\n}\nbackup_pid=',1)[0]
+        block=launcher.split('backup() {',1)[1].split('\n}\nbackup_pid=',1)[0]
+        return 'umask 022\nRUNTIME="$1"\nBACKUP_DIR="$2"\nW="$3"\nPY="$4"\nbackup() {'+block+'\n}\nbackup\n'
+
+    def test_incremental_backup_is_private_and_excludes_credentials(self):
+        import json
+        from evaluation_queue import W
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);runtime=root/'runtime';runtime.mkdir()
-            (runtime/'credentials-fixture').write_text('non-secret fixture')
+            (runtime/'work.txt').write_text('recoverable work')
+            (runtime/'credentials-fixture').write_text('fixture excluded from backup')
             directory=root/'backups';directory.mkdir(mode=0o755)
-            script='umask 022\nRUNTIME="$1"\nBACKUP_DIR="$2"\nbackup() {'+backup+'\n}\nbackup\n'
-            subprocess.run(['bash','-ec',script,'test',str(runtime),str(directory)],check=True)
-            archives=list(directory.glob('runtime-*.tar.gz'))
-            self.assertEqual(len(archives),1)
-            self.assertEqual(stat.S_IMODE(archives[0].stat().st_mode),0o600)
-            self.assertEqual(stat.S_IMODE(directory.stat().st_mode),0o700)
-
-    def test_backup_does_not_overlap_or_publish_failed_archive(self):
-        from evaluation_queue import W
-        import fcntl,os
-        launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
-        backup=launcher.split('backup() {',1)[1].split('\n}\nbackup_pid=',1)[0]
-        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
-            root=Path(raw);runtime=root/'runtime';runtime.mkdir();directory=root/'backups';directory.mkdir()
-            script='RUNTIME="$1"\nBACKUP_DIR="$2"\nbackup() {'+backup+'\n}\nbackup\n'
-            with (directory/'archive.lock').open('a') as lock:
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                subprocess.run(['bash','-ec',script,'test',str(runtime),str(directory)],check=True)
-                self.assertEqual(list(directory.glob('*.tar.gz')),[])
-            tools=root/'bin';tools.mkdir();tar=tools/'tar'
-            tar.write_text('#!/bin/bash\nprintf incomplete > "$4"\nexit 2\n');tar.chmod(0o755)
-            env=dict(os.environ,PATH=str(tools)+':'+os.environ['PATH'])
-            subprocess.run(['bash','-ec',script,'test',str(runtime),str(directory)],check=True,env=env)
+            subprocess.run(['bash','-ec',self.backup_script(),'test',str(runtime),str(directory),str(W),sys.executable],check=True)
+            recovery=directory/'recovery'
+            manifest=json.loads((recovery/'manifest.json').read_text())
+            self.assertIn('work.txt',manifest['files'])
+            self.assertNotIn('credentials-fixture',manifest['files'])
+            self.assertEqual(stat.S_IMODE((recovery/'data/work.txt').stat().st_mode),0o600)
+            self.assertEqual(stat.S_IMODE(recovery.stat().st_mode),0o700)
+            receipt=json.loads((runtime/'.state/gewu-multiverse/runtime-backup.json').read_text())
+            self.assertEqual(receipt['status'],'ok')
+            self.assertIsNotNone(receipt['last_success_at'])
             self.assertEqual(list(directory.glob('*.tar.gz')),[])
-            partial=list(directory.glob('*.partial'));self.assertEqual(len(partial),1)
-            self.assertIn('failed-partial-not-published',Path(str(partial[0])+'.status').read_text())
-            tar.write_text('#!/bin/bash\nprintf live-archive > "$4"\nexit 1\n')
-            subprocess.run(['bash','-ec',script,'test',str(runtime),str(directory)],check=True,env=env)
-            archives=list(directory.glob('*.tar.gz'));self.assertEqual(len(archives),1)
-            self.assertIn('tar_exit_code=1',Path(str(archives[0])+'.status').read_text())
-            self.assertIn('not-transactional',Path(str(archives[0])+'.status').read_text())
+
+    def test_backup_lock_prevents_overlapping_inventory_and_copy(self):
+        import fcntl
+        from evaluation_queue import W
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);runtime=root/'runtime';runtime.mkdir()
+            (runtime/'work.txt').write_text('recoverable work')
+            directory=root/'backups';recovery=directory/'recovery';recovery.mkdir(parents=True)
+            with (recovery/'backup.lock').open('a') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                subprocess.run(['bash','-ec',self.backup_script(),'test',str(runtime),str(directory),str(W),sys.executable],check=True)
+                self.assertFalse((recovery/'manifest.json').exists())
+                self.assertFalse((recovery/'data/work.txt').exists())
+            subprocess.run(['bash','-ec',self.backup_script(),'test',str(runtime),str(directory),str(W),sys.executable],check=True)
+            self.assertEqual((recovery/'data/work.txt').read_text(),'recoverable work')
+
+    def test_local_workspace_is_not_renamed_or_replaced_by_self_link(self):
+        import json
+        from evaluation_queue import W
+        launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
+        block=launcher.split('# Keep the controller\'s local layout connected',1)[1].split("<<'PY'\n",1)[1].split('\nPY',1)[0]
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);agents=root/'agents';work=agents/'author-01/workspace'
+            work.mkdir(parents=True);(work/'current-task.txt').write_text('unsaved work')
+            config=root/'broker.json';config.write_text(json.dumps({'roles':{'author-01':{'root':str(work.parent)}}}))
+            for _ in range(2):
+                subprocess.run([sys.executable,'-B','-c',block,str(agents),str(config)],check=True)
+                self.assertFalse(work.is_symlink())
+                self.assertEqual((work/'current-task.txt').read_text(),'unsaved work')
+            self.assertEqual(list(work.parent.glob('workspace.preserved-*')),[])
 
     def test_start_refreshes_both_skill_views_from_tracked_source(self):
         import json
@@ -73,7 +88,7 @@ class ReadyFileTests(unittest.TestCase):
                         (skill/'SKILL.md').write_text('STALE DONOR SKILL')
                 roles[role]={'root':str(isolated)}
             config=root/'config.json';config.write_text(json.dumps({'roles':roles}))
-            subprocess.run([sys.executable,'-B','-c',block,str(config),str(root/'universe')],check=True)
+            subprocess.run([sys.executable,'-B','-c',block,str(config),str(root/'universe')],check=True,cwd=Path(__file__).parent)
             for role,entry in roles.items():
                 for view in [Path(entry['root']),root/'universe/.config/gewu-multiverse/agents'/role]:
                     self.assertIn('Detailed existing '+role,(view/'instruction.md').read_text())
@@ -86,10 +101,10 @@ class ReadyFileTests(unittest.TestCase):
             self.skipTest('Actual ownership regression requires root')
         from evaluation_queue import W
         launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
-        block=launcher.split('# The runtime is owned by the controller UID;',1)[1].split('\n',1)[1].split('# Keep directories searchable',1)[0]
+        block=launcher.split("# The runtime's mutable top-level state is owned by the controller UID.",1)[1].split('\n',1)[1].split('# Keep directories searchable',1)[0]
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);root.chmod(0o755)
-            for folder in ('.config/science-evaluation','workspaces','.local','.cache','.tmp'):
+            for folder in ('.config/gewu-multiverse','.config/science-evaluation','workspaces','.local','.cache','.tmp'):
                 (root/folder).mkdir(parents=True,exist_ok=True)
             for name in ('queue.json','registry.json'):
                 (root/'.config/science-evaluation'/name).write_text('{}')
@@ -100,6 +115,7 @@ class ReadyFileTests(unittest.TestCase):
             private=state/'author-selftest/receipt.json';private.write_text('{}');private.chmod(0o600)
             plan=state/'author-01/run-example/plan.json';plan.parent.mkdir(parents=True)
             plan.write_text('{}');plan.chmod(0o600)
+            for directory in [p for p in root.rglob('*') if p.is_dir()]:directory.chmod(0o755)
             subprocess.run(['bash','-ec','RUNTIME="$1"\n'+block,'ownership',str(root)],check=True)
             self.assertEqual(plan.stat().st_uid,65534)
             self.assertEqual(private.stat().st_uid,0)
@@ -142,7 +158,7 @@ class ReadyFileTests(unittest.TestCase):
                     skill=source.parent/'skills'/name
                     skill.mkdir(parents=True)
                     (skill/'SKILL.md').write_text('Complete '+name+'\n')
-            subprocess.run([sys.executable,'-c',seed,str(root/'source'),str(runtime),str(donor)],check=True)
+            subprocess.run([sys.executable,'-c',seed,str(root/'source'),str(runtime),str(donor)],check=True,cwd=Path(__file__).parent)
             for role in roles:
                 path=Path('.config/gewu-multiverse/agents')/role/'instruction.md'
                 self.assertEqual((runtime/path).read_bytes(),(donor/path).read_bytes())

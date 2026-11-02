@@ -22,13 +22,11 @@ for role_dir in "$U/.config/gewu-multiverse/agents"/*; do
     role=$(basename "$role_dir")
     workspace="$role_dir/workspace"
     if [[ -L "$workspace" ]]; then
-        source_workspace=$(readlink -f "$workspace" || true)
-        staging="$role_dir/.workspace-local.$$"
-        mkdir -p "$staging"
-        # Do not block startup on CPFS; durable contents are restored by backup.
-        # The evaluator workspace is created empty and populated by its session.
-        rm "$workspace"
-        mv "$staging" "$workspace"
+        # Recovery must materialize and verify work before startup. Silently
+        # replacing an alias with an empty directory loses the current work
+        # entry point and makes agents repeat initialization.
+        echo "Restore the linked workspace before starting role: $role" >&2
+        exit 1
     fi
     mkdir -p "$workspace"
     # Role processes must be able to clone and write inside their local workspace.
@@ -309,6 +307,7 @@ PY_QUEUE_CHECK
 review_dispatch_pid=$!
 "$PY" "$W/gewu-multiverse/deploy/science/author_selftest_worker.py" \
     --broker-config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/author-selftest" \
+    --workers "${GEWU_SELFTEST_WORKERS:-10}" \
     > "$SERVICE_STATE/author-selftest/production-worker.log" 2>&1 &
 selftest_pid=$!
 mkdir -p "$SERVICE_STATE/command-watchdog"

@@ -43,7 +43,9 @@ def prepare(work, commit, task, template):
             raise ValueError('Incomplete selftest execution or cleanup')
         result = trial['results'][0]
         if (not isinstance(result, dict) or result.get('exception_type')
-                or not isinstance(result.get('rewards'), dict) or result['rewards'].get('reward') != reward):
+                or not isinstance(result.get('rewards'), dict)
+                or type(result['rewards'].get('reward')) not in (int,float)
+                or result['rewards'].get('reward') != reward):
             raise ValueError('Selftest controls did not pass')
     snapshot = work/'source'/execution_task
     if digest_tree(snapshot) != status.get('snapshot_sha256'):

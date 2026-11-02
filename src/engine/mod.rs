@@ -1266,6 +1266,20 @@ impl Inner {
         self.refresh_instructions();
         self.poll_forgejo(now);
         for index in 0..self.agents.len() {
+            // A dispatcher review handoff can arrive while an author session
+            // is still running. Treat the exact feedback marker as a durable
+            // cancellation request, so the author cannot continue mutating
+            // the submitted version until evaluator feedback is available.
+            if self.agents[index].name.starts_with("author-")
+                && author_review_paused(&self.options.layout.agents_dir().join(&self.agents[index].name))
+            {
+                if self.agents[index].running.as_ref().is_some_and(|run| !run.stopping) {
+                    stop_agent(&mut self.agents[index], self.options.stop_grace);
+                }
+                if let Some(pid) = self.agents[index].starting_pid {
+                    signal_group(pid, nix::sys::signal::Signal::SIGTERM);
+                }
+            }
             if operator_role_held(self.options.layout.state_root(), &self.agents[index].name) {
                 // Keep an in-flight prepare marked as starting until its worker
                 // reaches its cancellation boundary. Do not pretend it has settled.
@@ -1491,6 +1505,11 @@ impl Inner {
         let agent = &self.agents[index];
         if operator_role_held(self.options.layout.state_root(), &agent.name) {
             return Some("operator reset holds this role; awaiting explicit release".into());
+        }
+        if agent.name.starts_with("author-")
+            && author_review_paused(&self.options.layout.agents_dir().join(&agent.name))
+        {
+            return Some("waiting for the assigned evaluator review".into());
         }
         if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some() {
             if self.options.confinement != crate::confinement::Method::RoleBroker {
@@ -3344,8 +3363,19 @@ fn review_assignment_ready(root: &Path) -> bool {
 /// concrete correction, preventing silent drift to another idea.
 fn author_review_paused(root: &Path) -> bool {
     let Ok(bytes) = fs::read(root.join("review-feedback.json")) else { return false; };
-    let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return true; };
-    feedback["author_must_pause"] == true
+    let Ok(feedback) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+    if feedback["author_must_pause"] != true || feedback["state"] != "reviewing"
+        || feedback["key"].as_str().is_none_or(str::is_empty)
+        || feedback["commit"].as_str().is_none_or(str::is_empty)
+        || feedback["task"].as_str().is_none_or(str::is_empty)
+        || !feedback["generation"].is_u64() { return false; }
+    let Ok(current_bytes) = fs::read(root.join("review-current-assignment.json")) else { return false; };
+    let Ok(current) = serde_json::from_slice::<serde_json::Value>(&current_bytes) else { return false; };
+    current["state"] == "reviewing"
+        && current["key"] == feedback["key"]
+        && current["generation"] == feedback["generation"]
+        && current["commit"] == feedback["commit"]
+        && current["task"] == feedback["task"]
 }
 
 #[cfg(test)]
@@ -3405,8 +3435,18 @@ mod review_assignment_tests {
         let root = crate::test_support::scratch_root("author-review-pause");
         fs::create_dir_all(&root).unwrap();
         assert!(!author_review_paused(&root));
-        fs::write(root.join("review-feedback.json"), r#"{"author_must_pause":true}"#).unwrap();
+        fs::write(root.join("review-feedback.json"), serde_json::json!({"author_must_pause":true,"state":"reviewing","key":"k","generation":0,"commit":"c","task":"tasks/example"}).to_string()).unwrap();
+        assert!(!author_review_paused(&root));
+        fs::write(root.join("review-current-assignment.json"), serde_json::json!({"state":"reviewing","key":"k","generation":0,"commit":"c","task":"tasks/example"}).to_string()).unwrap();
         assert!(author_review_paused(&root));
+        let current=serde_json::json!({"state":"reviewing","key":"k","generation":0,"commit":"c","task":"tasks/example"});
+        for (field,value) in [("key",serde_json::json!("another")),("generation",serde_json::json!(1)),
+                              ("commit",serde_json::json!("newer")),("task",serde_json::json!("tasks/other"))] {
+            let mut newer=current.clone();newer[field]=value;
+            fs::write(root.join("review-current-assignment.json"),newer.to_string()).unwrap();
+            assert!(!author_review_paused(&root),"stale {field} paused another assignment");
+        }
+        fs::write(root.join("review-current-assignment.json"),current.to_string()).unwrap();
         fs::write(root.join("review-feedback.json"), r#"{"author_must_pause":false,"state":"waiting_author"}"#).unwrap();
         assert!(!author_review_paused(&root));
         let _ = fs::remove_dir_all(root);
@@ -3443,6 +3483,8 @@ fn session_job(
             || guard.generation != generation
             || guard.agents[index].desired != Desired::Started
             || operator_role_held(guard.options.layout.state_root(), &request.agent)
+            || (request.agent.starts_with("author-")
+                && author_review_paused(&guard.options.layout.agents_dir().join(&request.agent)))
             || !guard.agents[index].starting
         {
             guard.agents[index].starting = false;
@@ -3469,6 +3511,8 @@ fn session_job(
                 || guard.generation != generation
                 || guard.agents[index].desired != Desired::Started
                 || operator_role_held(guard.options.layout.state_root(), &request.agent)
+                || (request.agent.starts_with("author-")
+                    && author_review_paused(&guard.options.layout.agents_dir().join(&request.agent)))
             {
                 guard.agents[index].starting = false;
                 guard.agents[index].starting_pid = None;
@@ -3528,6 +3572,8 @@ fn session_job(
         || guard.generation != generation
         || guard.agents[index].desired != Desired::Started
         || operator_role_held(guard.options.layout.state_root(), &request.agent)
+        || (request.agent.starts_with("author-")
+            && author_review_paused(&guard.options.layout.agents_dir().join(&request.agent)))
         || !guard.agents[index].starting;
     if called_off {
         // Keep the in-flight worker visible until child settlement finishes;
@@ -5232,6 +5278,137 @@ mod tests {
         tick(&mut engine, &clock, Duration::from_secs(600));
         assert_eq!(fake.counts().1, 1);
         assert_eq!(engine.board().agents[0].desired, Desired::Started);
+    }
+
+    fn publish_author_review(root: &Path, generation: u64, state: &str) {
+        let role = root.join("agents/author-01");
+        let value = serde_json::json!({"key":"commit:tasks/example", "generation":generation,
+            "commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "task":"tasks/example",
+            "state":state, "author_must_pause":state=="reviewing"});
+        fs::write(role.join("review-current-assignment.json"),value.to_string()).unwrap();
+        fs::write(role.join("review-feedback.json"),value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn author_review_stops_real_running_process_and_feedback_resumes() {
+        let root=scratch_root("author-review-real-running");
+        let settings=write_ready(&root,&[("author-01",Desired::Started)]);
+        let clock=Arc::new(FakeClock::new());
+        let (spawner,report,release)=real_child_spawner();
+        let mut engine=open_for_test(test_options(&root),Arc::clone(&clock) as SharedClock,spawner,settings).unwrap();
+        tick(&mut engine,&clock,Duration::ZERO);
+        let pid=report.recv_timeout(Duration::from_secs(5)).unwrap();
+        let run=newest_run_for_test(&root,"author-01");
+        release.send(()).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while lock_inner(&engine.inner).agents[0].running.is_none() && Instant::now()<deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(lock_inner(&engine.inner).agents[0].running.is_some());
+        let source=root.join("agents/author-01/workspace/retained-task.txt");
+        fs::write(&source,"keep original work").unwrap();
+        publish_author_review(&root,3,"reviewing");
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while !real_child_completion_visible(&run,pid) && Instant::now()<deadline {
+            tick(&mut engine,&clock,Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_real_child_settled(&run,pid);
+        assert!(!process_group_has_members(pid));
+        tick(&mut engine,&clock,Duration::from_secs(600));
+        assert!(matches!(engine.board().agents[0].session,SessionState::Blocked{..}));
+        assert_eq!(engine.board().agents[0].desired,Desired::Started);
+        assert_eq!(newest_run_for_test(&root,"author-01"),run);
+        assert_eq!(fs::read_to_string(&source).unwrap(),"keep original work");
+        publish_author_review(&root,3,"waiting_author");
+        tick(&mut engine,&clock,Duration::ZERO);
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while lock_inner(&engine.inner).agents[0].running.is_none() && Instant::now()<deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(lock_inner(&engine.inner).agents[0].running.is_some());
+        assert_ne!(newest_run_for_test(&root,"author-01"),run);
+        engine.shutdown(Duration::from_secs(2));
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn author_review_cancels_real_child_at_spawn_boundary() {
+        let root=scratch_root("author-review-real-spawning");
+        let settings=write_ready(&root,&[("author-01",Desired::Started)]);
+        let clock=Arc::new(FakeClock::new());
+        let (spawner,report,release)=real_child_spawner();
+        let mut engine=open_for_test(test_options(&root),Arc::clone(&clock) as SharedClock,spawner,settings).unwrap();
+        tick(&mut engine,&clock,Duration::ZERO);
+        let pid=report.recv_timeout(Duration::from_secs(5)).unwrap();
+        let run=newest_run_for_test(&root,"author-01");
+        publish_author_review(&root,1,"reviewing");
+        tick(&mut engine,&clock,Duration::ZERO);
+        release.send(()).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while !real_child_completion_visible(&run,pid) && Instant::now()<deadline {
+            tick(&mut engine,&clock,Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_real_child_settled(&run,pid);
+        assert!(!process_group_has_members(pid));
+        tick(&mut engine,&clock,Duration::from_secs(600));
+        assert_eq!(newest_run_for_test(&root,"author-01"),run);
+        engine.shutdown(Duration::from_secs(2));
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn author_review_old_generation_never_pauses_new_assignment() {
+        let root=scratch_root("author-review-stale-generation");
+        let settings=write_ready(&root,&[("author-01",Desired::Started)]);
+        let clock=Arc::new(FakeClock::new());let fake=Arc::new(FakeSpawner::new());
+        let mut engine=open_test_engine(&root,settings,Arc::clone(&clock),Arc::clone(&fake));
+        publish_author_review(&root,2,"reviewing");
+        let path=root.join("agents/author-01/review-feedback.json");
+        let mut stale:serde_json::Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stale["generation"]=serde_json::json!(1);
+        fs::write(&path,stale.to_string()).unwrap();
+        tick(&mut engine,&clock,Duration::ZERO);wait_started(&fake,1);
+        assert_eq!(fake.live().len(),1);
+        publish_author_review(&root,2,"reviewing");
+        tick(&mut engine,&clock,Duration::from_secs(60));
+        assert!(fake.live().is_empty());
+        tick(&mut engine,&clock,Duration::from_secs(600));
+        assert_eq!(fake.counts().1,1);
+        publish_author_review(&root,2,"completed");
+        tick(&mut engine,&clock,Duration::ZERO);wait_started(&fake,2);
+        engine.shutdown(Duration::from_secs(1));
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn operator_hold_ack_then_release_uses_updated_instruction() {
+        let root=scratch_root("operator-reset-instruction-resume");
+        let settings=write_ready(&root,&[("author-01",Desired::Started)]);
+        let clock=Arc::new(FakeClock::new());let fake=Arc::new(FakeSpawner::new());
+        let mut engine=open_test_engine(&root,settings,Arc::clone(&clock),Arc::clone(&fake));
+        tick(&mut engine,&clock,Duration::ZERO);wait_started(&fake,1);
+        let layout=Layout::rooted_at(root.clone()).unwrap();
+        let holds=layout.state_root().join("operator-role-holds");fs::create_dir_all(&holds).unwrap();
+        let nonce="0123456789abcdef0123456789abcdef";
+        let marker=holds.join("author-01");fs::write(&marker,nonce).unwrap();
+        let ack=layout.state_root().join("author-01/operator-hold-ack.json");
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while !ack.exists() && Instant::now()<deadline {
+            tick(&mut engine,&clock,Duration::ZERO);std::thread::sleep(Duration::from_millis(10));
+        }
+        let value:serde_json::Value=serde_json::from_slice(&fs::read(&ack).unwrap()).unwrap();
+        assert_eq!(value["nonce"],nonce);assert_eq!(value["quiescent"],true);
+        assert_eq!(value["controller_pid"],std::process::id());assert!(fake.live().is_empty());
+        let instruction=root.join("agents/author-01/instruction.md");
+        fs::write(&instruction,"Retain policy. Operator reset: stop repeating and use preserved evidence.\n").unwrap();
+        fs::remove_file(&marker).unwrap();
+        tick(&mut engine,&clock,Duration::ZERO);wait_started(&fake,2);
+        let plan:serde_json::Value=serde_json::from_slice(&fs::read(fake.last_run_dir().unwrap().join("plan.json")).unwrap()).unwrap();
+        let path=PathBuf::from(plan["instruction"].as_str().unwrap());
+        assert!(fs::read_to_string(path).unwrap().contains("Operator reset:"));
+        engine.shutdown(Duration::from_secs(1));let _=fs::remove_dir_all(root);
     }
 
     #[test]

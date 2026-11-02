@@ -19,6 +19,7 @@ class HandoffTests(unittest.TestCase):
         state=root/'state';work=state/('b'*32);task=work/'source/proof'
         for name in ['environment','tests']:
             (task/name).mkdir(parents=True);(task/name/'data').write_text(name)
+        (task/'solution').mkdir();(task/'solution/solve.sh').write_text('#!/bin/sh\nexit 0\n')
         prior=state/('a'*32);before=prior/'source/proof';before.mkdir(parents=True);(before/'data').write_text('old task')
         old=dict(schema_version=2,role='author-01',idea_id='idea',job_id=prior.name,status='selftest_failed',source_git_tree_verified=True,source_repository='repo',source_task_path='tasks/proof',received_at=20,completed_at=50,execution_task_path='proof',source_commit='d'*40,snapshot_sha256=digest_tree(before),trials=[dict(cleanup_confirmed=True,acs_started_at=30,acs_finished_at=40),dict(cleanup_confirmed=True,acs_started_at=40,acs_finished_at=50)])
         (prior/'status.json').write_text(json.dumps(old))
@@ -56,6 +57,40 @@ class HandoffTests(unittest.TestCase):
             status['idea_id']='another';(work/'status.json').write_text(json.dumps(status))
             with self.assertRaisesRegex(ValueError,'idea-bound'):qualify(work,state,obs,template)
 
+    def test_initial_review_cannot_invent_iteration_or_zero_budget(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,work,obs,template,status=self.fixture(root)
+            request=json.loads((work/'request.json').read_text())
+            request.pop('iteration');request['initial_review']=True
+            (work/'request.json').write_text(json.dumps(request))
+            with self.assertRaisesRegex(ValueError,'Prior selftest'):qualify(work,state,obs,template)
+            self.assertFalse((work/'handoff-qualified.json').exists())
+            role=root/'role';(role/'selftest/results').mkdir(parents=True)
+            from selftest_handoff import AuthorEvidenceRequired
+            with patch('selftest_handoff.handoff',side_effect=AuthorEvidenceRequired('missing linkage')):
+                reconcile(work,state,dict(root=str(role),gid=0),root/'universe')
+            self.assertEqual(json.loads((work/'handoff.json').read_text())['state'],'waiting_author')
+
+    def test_automatic_checks_carry_solution_and_iteration_evidence(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            state,work,obs,template,status=self.fixture(Path(raw))
+            with patch('selftest_handoff.time.time',return_value=100):receipt=qualify(work,state,obs,template)
+            self.assertIn(str(work/'source/proof/solution/solve.sh'),receipt['check_evidence']['author_solve'])
+            self.assertIn(str(state/('a'*32)/'status.json'),receipt['check_evidence']['post_iteration_rerun'])
+            receipt['check_evidence']['post_iteration_rerun']=[]
+            with self.assertRaisesRegex(ValueError,'Each automatic check'):validate_receipt(receipt,status['source_commit'],status['source_task_path'])
+
+    def test_legacy_automatic_receipt_must_be_requalified(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            state,work,obs,template,status=self.fixture(Path(raw))
+            with patch('selftest_handoff.time.time',return_value=100):receipt=qualify(work,state,obs,template)
+            receipt['schema_version']=2
+            with self.assertRaisesRegex(ValueError,'Legacy automatic'):validate_receipt(receipt,status['source_commit'],status['source_task_path'])
+            (work/'handoff-qualified.json').write_text(json.dumps(receipt))
+            with patch('selftest_handoff.time.time',return_value=100):updated=qualify(work,state,obs,template)
+            self.assertEqual(updated['schema_version'],3)
+            self.assertEqual(json.loads((work/'handoff-qualified-legacy.json').read_text())['schema_version'],2)
+
     def test_reconcile_reports_retry_without_rewriting_source_status(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);state,work,obs,template,status=self.fixture(root)
@@ -63,6 +98,7 @@ class HandoffTests(unittest.TestCase):
             original=(work/'status.json').read_bytes()
             with patch('selftest_handoff.handoff',side_effect=ValueError('no clock yet')):reconcile(work,state,entry,root/'universe')
             self.assertEqual(json.loads((work/'handoff.json').read_text())['state'],'waiting_platform')
+            with patch('selftest_handoff.time.time',return_value=100):qualify(work,state,obs,template)
             with patch('selftest_handoff.handoff',return_value=dict(state='ready_for_independent_review',scientific_acceptance=False)) as run:
                 reconcile(work,state,entry,root/'universe');reconcile(work,state,entry,root/'universe');self.assertEqual(run.call_count,1)
             self.assertEqual((work/'status.json').read_bytes(),original)
@@ -88,6 +124,7 @@ class HandoffTests(unittest.TestCase):
             snapshot=work/'source/proof'
             # Existing upstream simple fixture; no new scientific question.
             shutil.copytree(W/'acs-harbor-test/tasks/openssl-selfsigned-cert',snapshot,dirs_exist_ok=True)
+            (snapshot/'solution/solve.sh').chmod(0o700)
             role=root/'role';repo=role/'workspace/repo';destination=repo/'tasks/proof'
             shutil.copytree(snapshot,destination)
             env=dict(os.environ,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null')
@@ -118,6 +155,18 @@ class HandoffTests(unittest.TestCase):
                 self.assertTrue(approved(commit,'tasks/proof'))
                 self.assertEqual(registered_execution(commit,'tasks/proof')['evaluation_id'],result['evaluation_id'])
                 self.assertEqual(handoff(work,state,entry,universe),result)
+                from selftest_review_dispatch import consume
+                evaluator=root/'evaluator';(evaluator/'home/role').mkdir(parents=True)
+                config={'roles':{'author-01':dict(entry,uid=os.getuid()),
+                                 'evaluator-01':dict(root=str(evaluator),uid=os.getuid(),gid=os.getgid())}}
+                dispatcher_state=universe/'.state/gewu-multiverse/review-dispatcher';dispatcher_state.mkdir()
+                ledger={};consume(config,ledger,universe,dispatcher_state)
+                self.assertEqual(len(ledger),1)
+                assignment=json.loads((evaluator/'home/role/review-assignment.json').read_text())
+                self.assertEqual(assignment['evaluation_id'],result['evaluation_id'])
+                self.assertEqual(assignment['commit'],commit)
+                consume(config,ledger,universe,dispatcher_state)
+                self.assertEqual(len(ledger),1)
             self.assertEqual(len(json.loads(registry.read_text())),1)
             self.assertFalse(result['scientific_acceptance'])
 

@@ -11,7 +11,7 @@ import time
 import errno
 
 from evaluation_queue import W, atomic_json
-from install_role_skills import selected
+from install_role_skills import selected, bundle, SOURCE
 
 
 def read_text_retry(path, attempts=8):
@@ -36,7 +36,7 @@ def read_text_retry(path, attempts=8):
 MODULES = ('numpy','scipy','pytest','pydantic','yaml')
 TOOLS = ('bash','git','tar','gzip','seq','nohup','curl','role-install','role-forgejo')
 
-PROBE = '''import importlib,json,os,shutil,sys
+PROBE = '''import importlib,json,os,shutil,sys,subprocess
 os.chdir('/')
 modules={}
 for name in ['numpy','scipy','pytest','pydantic','yaml']:
@@ -44,7 +44,14 @@ for name in ['numpy','scipy','pytest','pydantic','yaml']:
   m=importlib.import_module(name);modules[name]={'ok':True,'version':getattr(m,'__version__','unknown')}
  except Exception as e:modules[name]={'ok':False,'error_type':type(e).__name__}
 tools={name:shutil.which(name) for name in ['bash','git','tar','gzip','seq','nohup','curl','role-install','role-forgejo']}
-print(json.dumps({'python':sys.executable,'uid':os.getuid(),'modules':modules,'tools':tools}))
+commands={}
+for name in sys.argv[1:]:
+ executable=shutil.which(name)
+ try:
+  completed=subprocess.run([executable,'--help'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10) if executable else None
+  commands[name]={'executable':executable,'help_ok':completed is not None and completed.returncode==0}
+ except (OSError,subprocess.TimeoutExpired):commands[name]={'executable':executable,'help_ok':False}
+print(json.dumps({'python':sys.executable,'uid':os.getuid(),'modules':modules,'tools':tools,'commands':commands}))
 '''
 
 
@@ -62,27 +69,29 @@ def inspect(role, entry, runner=subprocess.run):
     root = Path(entry['root']).resolve(strict=True)
     if not root.is_relative_to(W) and not str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-'):
         raise ValueError('Role root outside workspace')
-    skills = {}
+    skills = {}; resources = {}; skills_current = {}
     for name in selected(role):
         path = root/'skills'/name/'SKILL.md'
         if not path.is_file() or path.is_symlink(): raise ValueError('Missing required skill: '+name)
         skills[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        resources[name] = bundle(path.parent)
+        skills_current[name] = resources[name] == bundle(SOURCE/name)
     instruction = root/'instruction.md'
     python = '/home/role/.local/env/bin/python'
     local_runtime = str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-')
     if local_runtime and not (root/python.lstrip('/')).is_file():
         python = '/usr/local/bin/python3'
     if not (root/python.lstrip('/')).is_file(): raise ValueError('Default scientific environment missing')
+    required = ['role-acs-selftest'] if role.startswith('author-') else (['role-evaluation-batch'] if role.startswith('evaluator-') else [])
     command = ['/usr/bin/setpriv','--no-new-privs','/usr/sbin/chroot',
                '--userspec='+str(entry['uid'])+':'+str(entry['gid']),
                '--groups='+str(entry['gid']),str(root),'/usr/bin/env','-i',
                'HOME=/home/role','PATH=/home/role/.local/bin:/home/role/.local/env/bin:/usr/local/bin:/usr/bin:/bin',
-               'LD_LIBRARY_PATH=/home/role/.local/env/lib','PYTHONDONTWRITEBYTECODE=1',python,'-c',PROBE]
+               'LD_LIBRARY_PATH=/home/role/.local/env/lib','PYTHONDONTWRITEBYTECODE=1',python,'-c',PROBE,*required]
     result = runner(command, capture_output=True, text=True, timeout=120)
     if result.returncode: raise ValueError('Isolated capability probe failed; no raw output published')
     observed = json.loads(result.stdout)
     if observed.get('uid') != entry['uid']: raise ValueError('Probe ran under unexpected identity')
-    required = ['role-acs-selftest'] if role.startswith('author-') else []
     entrypoints = {name:(root/'usr/local/bin'/name).is_file() for name in required}
     if role.startswith('author-'):
         deployed=root/'usr/local/bin/role-acs-selftest'
@@ -95,9 +104,14 @@ def inspect(role, entry, runner=subprocess.run):
         entrypoints['evaluation_batch_client_current']=entrypoints['role-evaluation-batch'] and hashlib.sha256(deployed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest()
     if set(observed.get('modules',{}))!=set(MODULES) or set(observed.get('tools',{}))!=set(TOOLS):
         raise ValueError('Incomplete capability probe response')
-    healthy = all(v.get('ok') is True for v in observed['modules'].values()) and all(observed['tools'].values()) and all(entrypoints.values())
+    command_checks=observed.get('commands',{})
+    if set(command_checks)!=set(required):raise ValueError('Incomplete command capability probe response')
+    healthy = (all(v.get('ok') is True for v in observed['modules'].values()) and all(observed['tools'].values())
+               and all(entrypoints.values()) and all(skills_current.values())
+               and all(v.get('help_ok') is True and v.get('executable') for v in command_checks.values()))
     return dict(role=role,observed_at=time.time(),ready=healthy,skills=skills,
                 instruction_sha256=hashlib.sha256(instruction.read_bytes()).hexdigest(),
+                skill_resources=resources,skills_current=skills_current,
                 environment=observed,entrypoints=entrypoints,
                 scope='Executable local capability check; cloud queue liveness and model skill use require separate verification')
 

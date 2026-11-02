@@ -1,7 +1,7 @@
 import json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from role_capabilities import W,inspect,MODULES,TOOLS,enabled_roles
-from install_role_skills import selected
+from install_role_skills import selected,install
 
 class CapabilityTests(unittest.TestCase):
     def test_stopped_configured_roles_still_require_registered_boundaries(self):
@@ -13,9 +13,8 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(enabled_roles(config,settings),{'evaluator-02'})
 
     def fixture(self,root):
-        for name in selected('author-01'):
-            path=root/'skills'/name/'SKILL.md';path.parent.mkdir(parents=True);path.write_text('skill')
         (root/'instruction.md').write_text('policy')
+        install(root,'author-01',owner=None)
         for name in ['home/role/.local/env/bin/python','usr/local/bin/role-acs-selftest']:
             path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
         (root/'usr/local/bin/role-acs-selftest').write_bytes(Path(__file__).with_name('role_acs_selftest.py').read_bytes())
@@ -24,11 +23,19 @@ class CapabilityTests(unittest.TestCase):
     def test_checks_identity_and_reports_missing_dependencies(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             entry=self.fixture(Path(raw))
-            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS})
+            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS},commands={'role-acs-selftest':{'executable':'/usr/local/bin/role-acs-selftest','help_ok':True}})
             def run(args,**kwargs):
                 self.assertIn('--userspec=21001:21001',args)
                 return subprocess.CompletedProcess(args,0,json.dumps(payload),'')
             receipt=inspect('author-01',entry,run);self.assertTrue(receipt['ready'])
+            payload['commands']['role-acs-selftest']['help_ok']=False
+            self.assertFalse(inspect('author-01',entry,run)['ready'])
+            payload['commands']['role-acs-selftest']['help_ok']=True
+            reference=Path(raw)/'skills/acs-task-pipeline/references/receipt.md'
+            before=reference.read_bytes();reference.write_text('stale reference')
+            stale=inspect('author-01',entry,run);self.assertFalse(stale['ready'])
+            self.assertFalse(stale['skills_current']['acs-task-pipeline'])
+            reference.write_bytes(before)
             payload['modules']['numpy']['ok']=False
             self.assertFalse(inspect('author-01',entry,run)['ready'])
             payload['modules'].pop('numpy')
@@ -45,9 +52,9 @@ class CapabilityTests(unittest.TestCase):
     def test_evaluator_requires_current_executable_batch_client(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);entry=self.fixture(root)
-            extra=root/'skills/acs-quality-rollout-review/SKILL.md'
-            extra.parent.mkdir(parents=True);extra.write_text('skill')
-            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS})
+            install(root,'evaluator-01',owner=None)
+            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS},commands={'role-acs-selftest':{'executable':'/usr/local/bin/role-acs-selftest','help_ok':True}})
+            payload['commands']={'role-evaluation-batch':{'executable':'/usr/local/bin/role-evaluation-batch','help_ok':True}}
             runner=lambda *a,**k:subprocess.CompletedProcess([],0,json.dumps(payload),'')
             self.assertFalse(inspect('evaluator-01',entry,runner)['ready'])
             client=root/'usr/local/bin/role-evaluation-batch'
@@ -63,7 +70,7 @@ class CapabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);entry=self.fixture(root)
             (root/'usr/local/bin/role-acs-selftest').write_text('old client')
-            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS})
+            payload=dict(uid=21001,modules={k:{'ok':True} for k in MODULES},tools={k:'/usr/bin/'+k for k in TOOLS},commands={'role-acs-selftest':{'executable':'/usr/local/bin/role-acs-selftest','help_ok':True}})
             result=inspect('author-01',entry,lambda *a,**k:subprocess.CompletedProcess([],0,json.dumps(payload),''))
             self.assertFalse(result['ready'])
             self.assertFalse(result['entrypoints']['selftest_client_current'])

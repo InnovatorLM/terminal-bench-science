@@ -29,6 +29,21 @@ class EvidenceTests(unittest.TestCase):
                 with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
                     with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',raw))
 
+    def test_digest_execution_does_not_require_unused_tests_dockerfile(self):
+        obj=object.__new__(UniverseACK)
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            obj.environment_dir=Path(raw)
+            obj._universe_image='registry/task@sha256:'+'a'*64
+            obj._validate_definition()
+            obj.environment_dir=Path(raw)/'absent'
+            with self.assertRaises(FileNotFoundError):obj._validate_definition()
+
+    def test_capture_failure_does_not_block_cleanup(self):
+        obj=object.__new__(UniverseACK)
+        with patch.object(UniverseACK,'_capture_pod_evidence',AsyncMock(side_effect=ValueError('fixture'))),patch('universe_ack.ACKEnvironment.stop',AsyncMock()) as stop:
+            with self.assertRaises(ValueError):asyncio.run(obj.stop(delete=True))
+            stop.assert_awaited_once_with(delete=True)
+
     def test_source_adapters_identical_and_wrapper_prefers_source(self):
         directory=Path(__file__).parent
         self.assertEqual((directory/'universe_ack.py').read_bytes(),(directory/'harbor-extensions/universe_ack.py').read_bytes())

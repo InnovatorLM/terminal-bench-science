@@ -39,7 +39,7 @@ class RetentionQueueTests(unittest.TestCase):
                 def poll(self):return 0
             try:
                 with patch('evaluation_queue.subprocess.Popen',Child):answer=process(cfg,req,mock=False)
-                self.assertEqual(answer['status'],'solver_complete')
+                self.assertEqual(answer['status'],'incomplete_evidence')
                 public=(root/'results'/(job_id+'.json')).read_text()
                 self.assertNotIn(str(private),public);self.assertNotIn('identity.json',public)
                 binding=json.loads((private/'execution-binding.json').read_text())

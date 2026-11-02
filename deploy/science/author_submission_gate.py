@@ -45,6 +45,30 @@ def validate_receipt(receipt,commit,task):
         if not isinstance(entry,dict) or not isinstance(entry.get('path'),str) or not isinstance(entry.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',entry['sha256']):
             raise ValueError('Invalid execution evidence entry')
         if hashlib.sha256(read_operator_file(entry['path'])).hexdigest()!=entry['sha256']:raise ValueError('Invalid operator evidence digest')
+    # Auto-generated v2 receipts could claim every check passed while explicitly
+    # recording no previous execution/iteration. They must be requalified.
+    if receipt.get('schema_version')==2:
+        raise ValueError('Legacy automatic preflight requires evidence requalification')
+    if receipt.get('schema_version')==3 or receipt.get('origin')=='automatic_selftest_handoff':
+        paths={entry['path'] for entry in receipt['evidence_files']}
+        checks_evidence=receipt.get('check_evidence')
+        if not isinstance(checks_evidence,dict) or any(
+                not isinstance(checks_evidence.get(k),list) or not checks_evidence[k]
+                or any(not isinstance(p,str) or p not in paths for p in checks_evidence[k]) for k in CHECKS):
+            raise ValueError('Each automatic check requires bound execution evidence')
+        proof_path=receipt.get('handoff_evidence')
+        if not isinstance(proof_path,str) or proof_path not in paths:raise ValueError('Missing bound handoff evidence')
+        proof=json.loads(read_operator_file(proof_path))
+        bridge=proof.get('bridge',{});iteration=proof.get('iteration',{});budget=proof.get('budget',{})
+        if (bridge.get('source_commit')!=commit or bridge.get('source_task_path')!=task
+                or bridge.get('snapshot_sha256')!=receipt['snapshot_sha256']):
+            raise ValueError('Handoff proof version mismatch')
+        if (iteration.get('initial_review') or iteration.get('linked_execution_verified') is not True
+                or iteration.get('changed_committed_task') is not True
+                or not re.fullmatch('[a-f0-9]{32}',str(iteration.get('previous_job','')))):
+            raise ValueError('Handoff lacks verified result-driven iteration')
+        if budget.get('within_budget') is not True or budget.get('active_iteration_seconds_upper_bound')!=active:
+            raise ValueError('Handoff budget evidence mismatch')
     return receipt
 
 def approved(commit,task):
