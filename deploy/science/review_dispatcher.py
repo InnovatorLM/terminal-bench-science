@@ -127,6 +127,9 @@ def _publish_author_feedback_locked(pr,row,config,root):
                                  or (row.get('state')=='waiting_platform'
                                      and row.get('feedback_source')=='selftest_handoff'),
              'updated_at':time.time()}
+    if row.get('state')=='completed':
+        payload['review_recommendation']=row.get('review_recommendation','unrecorded')
+        payload['formal_decision']='accepted' if row.get('scientific_acceptance') is True else 'not_recorded'
     for field in (*BINDING_FIELDS,'feedback_source','error_type','evidence_gap',
                   'retry_requires_task_change','selftest_rerun_required'):
         if field in row:payload[field]=row[field]
@@ -203,6 +206,11 @@ def advance_review(key,row,config,now=None):
         row.update(state=status['state'],stage=str(status.get('stage',''))[:100],
                    reason=str(status.get('reason',''))[:2000],updated_at=status['updated_at'],
                    last_activity_at=status['updated_at'])
+        if status['state']=='completed':
+            recommendation=status.get('review_recommendation','unrecorded')
+            row['review_recommendation']=(recommendation if recommendation in
+                                          ('accept','reject','revise') else 'unrecorded')
+        else:row.pop('review_recommendation',None)
     elif row['state']=='reviewing' and now-float(row['assigned_at'])>REVIEW_ACTIVITY_TIMEOUT:
         row['evaluator_activity_confirmed'] = False
         row.update(state='waiting_platform',stage='evaluator_runner_startup',
@@ -269,7 +277,9 @@ def completed_versions(ledger, author, task, current_commit):
     """Historical review is evidence for its version, never approval of HEAD."""
     return [dict(key=key, **{field:row.get(field) for field in (
                 'commit','task','snapshot_sha256','evaluation_id','role',
-                'generation','state','stage','reason','scientific_acceptance')})
+                'generation','state','stage','reason')},
+                review_recommendation=row.get('review_recommendation','unrecorded'),
+                formal_decision='accepted' if row.get('scientific_acceptance') is True else 'not_recorded')
             for key,row in sorted(ledger.items())
             if row.get('state')=='completed' and row.get('task')==task
             and row.get('commit')!=current_commit

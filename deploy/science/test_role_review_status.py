@@ -21,4 +21,21 @@ class ReviewStatusTests(unittest.TestCase):
             assignment.write_text(json.dumps({'key':'commit:task','generation':1}))
             self.assertEqual(report(home,workspace,'reviewing','reading','new evidence')['state'],'reviewing')
 
+    def test_completed_recommendation_is_versioned_and_not_formal_acceptance(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);home=root/'home';workspace=root/'workspace';home.mkdir();workspace.mkdir()
+            assignment=home/'review-assignment.json'
+            assignment.write_text(json.dumps({'key':'old:task','generation':5}))
+            completed=report(home,workspace,'completed','final_review','3/5 valid runs',
+                             recommendation='accept')
+            self.assertEqual(completed['review_recommendation'],'accept')
+            self.assertEqual(report(home,workspace,'completed','final_review','retry',
+                                    recommendation='reject'),completed)
+            assignment.write_text(json.dumps({'key':'new:task','generation':0}))
+            self.assertNotIn('review_recommendation',report(home,workspace,'reviewing','start',''))
+            self.assertEqual(report(home,workspace,'completed','final_review','legacy')['review_recommendation'],
+                             'unrecorded')
+            with self.assertRaises(ValueError):
+                report(home,workspace,'reviewing','start','',recommendation='accept')
+
 if __name__=='__main__':unittest.main()

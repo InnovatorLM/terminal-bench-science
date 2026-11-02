@@ -51,7 +51,8 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(current['stage'],'version_reconciliation')
                 self.assertEqual(current['prior_reviews'][0]['commit'],old)
                 self.assertFalse(current['author_must_pause'])
-                self.assertFalse(current['prior_reviews'][0]['scientific_acceptance'])
+                self.assertEqual(current['prior_reviews'][0]['review_recommendation'],'unrecorded')
+                self.assertEqual(current['prior_reviews'][0]['formal_decision'],'not_recorded')
                 before=(root/'author-10/review-feedback.json').read_bytes()
                 m.sync_direct_assignments(cfg,ledger)
                 self.assertEqual((root/'author-10/review-feedback.json').read_bytes(),before)
@@ -74,6 +75,35 @@ class DispatchTests(unittest.TestCase):
                 'in-progress':dict(base,state='reviewing')}
         self.assertEqual([v['key'] for v in m.completed_versions(ledger,'author-10','tasks/one','new')],['valid'])
         self.assertEqual(m.completed_versions(ledger,None,'tasks/one','new'),[])
+
+    def test_matching_completed_receipt_exposes_recommendation_without_accepting(self):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);home=root/'evaluator-01/home/role';home.mkdir(parents=True)
+            (root/'author-10').mkdir()
+            cfg={'roles':{'evaluator-01':{'root':str(root/'evaluator-01'),
+                                         'uid':os.getuid(),'gid':os.getgid()},
+                          'author-10':{'root':str(root/'author-10'),
+                                       'uid':os.getuid(),'gid':os.getgid()}}}
+            key='old:tasks/one'
+            row=dict(key=key,role='evaluator-01',author_role='author-10',
+                     commit='old',task='tasks/one',generation=5,state='reviewing',
+                     scientific_acceptance=False)
+            status=dict(key=key,generation=5,state='completed',stage='final_review',
+                        reason='3/5 valid runs',updated_at=100,review_recommendation='accept')
+            (home/'review-status.json').write_text(json.dumps(status))
+            (home/'activity-receipt.json').write_text(json.dumps(dict(status,receipt_type='evaluator-activity-v1')))
+            m.advance_review(key,row,cfg,now=101)
+            self.assertEqual(row['review_recommendation'],'accept')
+            self.assertFalse(row['scientific_acceptance'])
+            m.publish_author_feedback({},row,cfg)
+            feedback=json.loads((root/'author-10/review-feedback.json').read_text())
+            self.assertEqual(feedback['review_recommendation'],'accept')
+            self.assertEqual(feedback['formal_decision'],'not_recorded')
+            self.assertEqual(m.completed_versions({key:row},'author-10','tasks/one','new')[0]
+                             ['review_recommendation'],'accept')
 
     def test_old_generation_cannot_overwrite_current_author_pause(self):
         import tempfile,json,os

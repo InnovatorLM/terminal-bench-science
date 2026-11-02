@@ -28,4 +28,4 @@ role-acs-selftest request-review "$JOB" --previous-job "$PRIOR_JOB" \
 
 它只补充审核意图及迭代关联，不构建镜像、不调用 ACS 或模型、不修改原 request/status/build、commit 和快照。查询返回的 `review-...` 请求 ID 或原 job 的 `review_handoff`，等待派单；不要再调用 `submit` 追赶交接状态。旧 job 必须本来就绑定 idea，前次 job 必须是同一作者、同一题目的已完成容器自测。原记录缺 idea 时不能追溯补造，构建失败也不能冒充已完成容器测试。
 
-交接成功不等于科学接收。预算未知、历史轨迹或实际 Pod 信息缺失等限制应保留；补交审核不能替代真实迭代、oracle/nop 和固定版本证据。
+交接成功不等于科学接收。`completed` 是流程状态，`review_recommendation` 是 evaluator 建议，`formal_decision` 是正式接收记录；缺失建议的旧回执显示 `unrecorded`，不能根据默认的 `scientific_acceptance=false` 推断拒绝。预算未知、历史轨迹或实际 Pod 信息缺失等限制应保留；补交审核不能替代真实迭代、oracle/nop 和固定版本证据。
