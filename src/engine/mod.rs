@@ -5411,6 +5411,35 @@ mod tests {
         engine.shutdown(Duration::from_secs(1));let _=fs::remove_dir_all(root);
     }
 
+    /// Driven by deploy/science/test_author_lifecycle_integration.py. The engine,
+    /// spawner, plans, hold acknowledgements and process cleanup are production
+    /// code; only the child model executable is an offline fixture.
+    #[test]
+    #[ignore = "requires the isolated Python operator integration harness"]
+    fn operator_lifecycle_process_fixture() {
+        let root = PathBuf::from(std::env::var_os("GEWU_LIFECYCLE_FIXTURE_ROOT")
+            .expect("the integration harness supplies an isolated root"));
+        assert!(root.is_absolute());
+        assert!(root.file_name().unwrap().to_string_lossy().starts_with("gewu-lifecycle-fixture-"));
+        let config = root.join(".config/gewu-multiverse");
+        let state = root.join(".state/gewu-multiverse");
+        let settings = write_ready(&config, &[("author-01", Desired::Started)]);
+        let mut options = test_options(&config);
+        options.layout = Layout::rooted_at(config).unwrap().with_state_root(state.clone()).unwrap();
+        options.product_binary = root.join("mock-model-runner.py");
+        options.stop_grace = Duration::from_millis(100);
+        let spawner = Arc::new(RealSpawner::new(options.product_binary.clone()));
+        let mut engine = open_for_test(options, Arc::new(RealClock), spawner, settings).unwrap();
+        fs::write(state.join("controller.pid"), std::process::id().to_string()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !root.join("fixture-stop").exists() && Instant::now() < deadline {
+            engine.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        engine.shutdown(Duration::from_secs(3));
+        assert!(root.join("fixture-stop").exists(), "integration harness exceeded its deadline");
+    }
+
     #[test]
     fn blocked_names_the_missing_thing_and_starts_when_it_is_gone() {
         let root = scratch_root("engine-blocked");
