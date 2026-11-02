@@ -129,7 +129,8 @@ class EvidenceTests(unittest.TestCase):
             receipt=json.loads((root/'acs-collection.json').read_text())
             self.assertTrue(receipt['complete']);self.assertGreater(receipt['bytes'],16*1024*1024)
             for name,data in payload.items():
-                with (root/name).open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
+                from evidence_files import sha256_stream
+                with (root/name).open('rb') as stream:digest=sha256_stream(stream)
                 self.assertEqual(digest,hashlib.sha256(data).hexdigest())
                 self.assertEqual(digest,receipt['manifest'][name]['sha256'])
 

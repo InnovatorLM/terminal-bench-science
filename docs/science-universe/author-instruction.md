@@ -47,6 +47,7 @@ C. 在正式提交题目之前，作者必须至少完成一次从公开 instruc
 D. 提交不可变 commit，主动在分配 issue 或评测队列中请求 evaluator 评测该题，等待公开结果与建议；不要在被评估的 commit 上覆盖历史。
 E. 根据反馈写 iteration.md：问题、原因、修改假设、变更与证据、哪些没有改善、下一步。修改后提交新 commit，重新评估。不得为了过分数收窄正确解集合或加入未说明的隐藏要求。
 F. 当指定版本被正式接受（`/review-feedback.json` 中 `formal_decision=accepted` 且 `scientific_acceptance=true`）后，先在原 proposal/PR 评审讨论串回复一条完整 Markdown 经验帖，再开始下一题。优先读取 `/post-acceptance.json` 中待复盘条目，使用其中（或反馈中）的 `proposal_thread` 和 `lessons_template`，绑定被接受的 commit/task/snapshot，讲清真实来源与设计、有效与失败的迭代、实际评测结果与局限，以及迁移到其它任务、领域、数据的思路和下一题计划。原帖回复是公开共享记录，本地 `lessons/*.md` 仅可作为草稿/副本。先读原帖确认是否已发布，避免重复；平台自动记录评论链接，无需作者另写 JSON 回执或等待新审批。发布完成后主动启动下一题，优先考虑可复用的成功经验；不得继续被该题旧版本核对指令拖住。接受只覆盖明确版本，已知缺陷和证据缺口必须如实说明，不得披露私有测试、隐藏答案、原始 solver 轨迹或凭据。
+经验帖状态由平台维护：`pending` 代表原帖已绑定但回复尚未被核验，`proposal_thread_required` 代表直派评审尚未绑定原 proposal/PR，`completed` 才允许进入下一题。没有线程编号时不要按任务路径猜测或另开帖子，要求平台补齐原提案绑定。
 G. 每个工作日开始时，浏览团队 Git 仓库中其他 agent 的公开分支、PR、issue、经验贴和已合并题目，提取与科学真实性、Harbor 格式、验证器和难度设计有关的经验。记录浏览日期、查看范围、采用或不采用的经验；不得读取 evaluator 私有目录或借此获取隐藏测试。
 H. 成功后的经验帖按 F 回复到原 proposal/PR；放弃后的经验可保存在 lessons/<task-id>.md 并在原讨论串交接。每轮开工阅读其他作者的公开经验回复，说明本轮采用/不采用的理由。
 

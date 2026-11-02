@@ -4,6 +4,14 @@ from pathlib import Path
 import stat
 
 
+def sha256_stream(stream):
+    """Hash a file-like object on Python versions without hashlib.file_digest."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def evidence_file(path, root):
     path, root = Path(path), Path(root).resolve()
     if not path.resolve().is_relative_to(root):
@@ -22,4 +30,4 @@ def read_file(path, root):
 
 def digest_file(path, root):
     with evidence_file(path, root).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        return sha256_stream(stream)

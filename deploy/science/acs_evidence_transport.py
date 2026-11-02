@@ -13,6 +13,8 @@ import shlex
 import shutil
 import stat
 
+from evidence_files import sha256_stream
+
 CHUNK_BYTES = 1024 * 1024
 MAX_FILES = 10000
 
@@ -38,7 +40,7 @@ def safe_destination(target):
 
 def file_hash(path):
     with safe_destination(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        return sha256_stream(stream)
 
 
 async def describe(environment, source, size, prefix):

@@ -10,6 +10,11 @@ from urllib.parse import urlparse
 MARKER = '<!-- gewu-post-acceptance-lessons-v1 -->'
 FIELDS = {'Accepted key': 'key', 'Accepted commit': 'commit',
           'Task': 'task', 'Snapshot': 'snapshot_sha256'}
+# These fields are emitted for new posts, but remain optional when reading
+# historical comments. This lets the public record evolve without making an
+# already verified retrospective disappear after a dispatcher upgrade.
+OPTIONAL_FIELDS = {'Proposal thread': 'proposal_thread',
+                   'Evaluation ID': 'evaluation_id'}
 SECTIONS = ('来源与设计', '有效与失败的迭代', '评测结果与局限', '迁移思路与下一题')
 
 
@@ -22,6 +27,8 @@ def accepted(row):
 def template(row):
     lines = [MARKER, '# 出题经验复盘', '']
     lines += [f'{label}: `{row.get(field, "")}`' for label, field in FIELDS.items()]
+    lines += [f'{label}: `{row[field]}`' for label, field in OPTIONAL_FIELDS.items()
+              if row.get(field) not in (None, '')]
     for heading in SECTIONS:
         lines += ['', '## ' + heading, '', '<填写已核实的具体经验；未知或缺失证据如实说明>']
     return '\n'.join(lines) + '\n'
@@ -43,8 +50,15 @@ def public_lessons_comment(comments, row, author, thread):
                 r'(?:/api/v1/repos)?/team/terminal-bench-science/(?:issues|pulls)/' + str(thread),
                 urlparse(url).path):
             continue
-        if any(not value or re.findall(r'^' + re.escape(label) + r':\s*`([^`]+)`\s*$', body, re.M) != [value]
+        if any(not value or re.findall(r'^' + re.escape(label) + r':\s*`([^`]+)`\s*$', body, re.M) != [str(value)]
                for label, field in FIELDS.items() for value in [row.get(field)]):
+            continue
+        # Optional metadata is checked when present, but old accepted comments
+        # without it remain valid. A newly emitted comment cannot claim a
+        # different proposal or evaluation identity.
+        if any((label + ':' in body and
+                re.findall(r'^' + re.escape(label) + r':\s*`([^`]+)`\s*$', body, re.M) != [str(row.get(field))])
+               for label, field in OPTIONAL_FIELDS.items() if row.get(field) not in (None, '')):
             continue
         sections = dict(re.findall(r'^## ([^\n]+)\n(.*?)(?=^## |\Z)', body, re.M | re.S))
         if any(not sections.get(name, '').strip()
@@ -57,9 +71,11 @@ def public_lessons_comment(comments, row, author, thread):
 
 
 def comment_summary(comment, thread):
-    return dict(id=comment['id'], thread=thread,
+    body = comment['body']
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    return dict(schema_version=1, id=comment['id'], thread=thread,
                 url=comment.get('html_url') or comment.get('url'),
-                sha256=hashlib.sha256(comment['body'].encode()).hexdigest(),
+                sha256=digest, body_sha256=digest,
                 created_at=comment.get('created_at'))
 
 

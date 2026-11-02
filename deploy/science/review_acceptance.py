@@ -11,6 +11,7 @@ import stat
 from acs_helpers.pod_evidence import validate as validate_pods
 from formal_review_decision import apply, record
 from role_evaluation_batch import requests, summary
+from evidence_files import sha256_stream
 
 
 class EvidenceGap(ValueError):
@@ -41,7 +42,7 @@ def read(path):
 
 def digest(path):
     with trusted(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        return sha256_stream(stream)
 
 
 def relative(root, name):

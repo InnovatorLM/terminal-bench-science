@@ -51,6 +51,8 @@ class PostAcceptanceTests(unittest.TestCase):
 
     def test_only_public_exact_author_version_thread_comment_counts(self):
         row=dict(self.row,proposal_thread=42);comment=self.comment()
+        self.assertIn('Proposal thread: `42`', comment['body'])
+        self.assertIn('Evaluation ID: `accepted`', comment['body'])
         self.assertIsNotNone(p.public_lessons_comment([comment],row,'author-10',42))
         for changed in [dict(comment,user={'login':'gewu-evaluator-01'}),
                         dict(comment,body=comment['body'].replace('a'*40,'f'*40)),
@@ -63,6 +65,29 @@ class PostAcceptanceTests(unittest.TestCase):
         self.assertIsNone(p.public_lessons_comment([comment],dict(row,scientific_acceptance=False),'author-10',42))
         (self.author/'lessons.md').write_text(comment['body'])
         self.assertIsNone(p.public_lessons_comment([],row,'author-10',42))
+
+    def test_historical_comment_without_optional_metadata_remains_valid(self):
+        row=dict(self.row,proposal_thread=42)
+        comment=self.comment()
+        body='\n'.join(line for line in comment['body'].splitlines()
+                        if not line.startswith(('Proposal thread:', 'Evaluation ID:')))
+        legacy=dict(comment,body=body)
+        self.assertIsNotNone(p.public_lessons_comment([legacy],row,'author-10',42))
+
+    def test_direct_acceptance_without_thread_is_explicitly_blocked(self):
+        class EmptyApi:
+            base_url='http://localhost:3000'
+            def pages(self, path):
+                return []
+        row=dict(self.row)
+        key=row.pop('key')
+        d.sync_post_acceptance(EmptyApi(),self.config,{key:row},[])
+        feedback=self.feedback()
+        self.assertEqual(feedback['post_acceptance_state'],'proposal_thread_required')
+        self.assertEqual(feedback['post_acceptance_blocker'],
+                         'accepted version has no bound proposal thread')
+        self.assertIn('no bound proposal thread',feedback['next_action'])
+        self.assertTrue(p.blocks_new_idea(feedback))
 
     def test_comments_support_paginated_and_legacy_unpaginated_servers(self):
         api=d.Api('test-token')

@@ -167,7 +167,8 @@ def _publish_author_feedback_locked(pr,row,config,root):
         if payload['scientific_acceptance']:
             payload['post_acceptance_required']=True
             prior=existing if existing.get('key')==key and accepted(existing) else {}
-            for field in ('proposal_thread','proposal_url','lessons_comment','post_acceptance_state'):
+            for field in ('proposal_thread','proposal_url','lessons_comment',
+                          'post_acceptance_state','post_acceptance_blocker'):
                 if field in row:payload[field]=row[field]
                 elif field in prior:payload[field]=prior[field]
             if prior.get('post_acceptance_state')=='completed' and prior.get('lessons_comment'):
@@ -175,6 +176,10 @@ def _publish_author_feedback_locked(pr,row,config,root):
             payload.setdefault('post_acceptance_state','pending')
             payload['lessons_template']=template(dict(row,key=key))
             payload['next_action']=(
+                'The accepted version has no bound proposal thread. The platform must attach the original '
+                'proposal/PR number before the author can publish lessons; do not create a new issue or guess '
+                'from a task path.'
+                if payload.get('post_acceptance_state')=='proposal_thread_required' else
                 'The frozen version is accepted. Reply on the same proposal/PR thread with a Markdown '
                 'experience post using lessons_template and proposal_thread. Describe real results, '
                 'known limitations and transferable patterns. Do not resume obsolete version reconciliation. '
@@ -310,20 +315,34 @@ def sync_post_acceptance(api,config,ledger,pulls):
                 row['proposal_url']=candidates[0].get('html_url')
         if thread:
             row['proposal_thread']=thread
-            row['proposal_url']=row.get('proposal_url') or (
-                (getattr(api,'base_url',None) or 'http://127.0.0.1:3000').rstrip('/')
-                +'/team/terminal-bench-science/issues/'+str(thread))
+            # Keep the actual pull URL when it is available. Falling back to
+            # an issue URL for a PR loses the original proposal context.
+            pull = next((item for item in (pulls or all_pulls or [])
+                         if str(item.get('number')) == str(thread)), None)
+            if not row.get('proposal_url') and pull and pull.get('html_url'):
+                row['proposal_url'] = pull['html_url']
+            if not row.get('proposal_url'):
+                base=(getattr(api,'base_url',None) or 'http://127.0.0.1:3000').rstrip('/')
+                suffix='pulls' if row.get('pr') is not None else 'issues'
+                row['proposal_url']=base+'/team/terminal-bench-science/'+suffix+'/'+str(thread)
             if row.get('post_acceptance_state')!='completed':
                 if thread not in comments_by_thread:
                     comments_by_thread[thread]=api.pages('/issues/'+str(thread)+'/comments')
                 comment=public_lessons_comment(comments_by_thread[thread],dict(row,key=key),author,thread)
                 if comment:
                     row.update(post_acceptance_state='completed',lessons_comment=comment_summary(comment,thread))
+        elif row.get('post_acceptance_state')!='completed':
+            # A direct evaluator assignment may have no PR number. Do not
+            # guess from a task path: one author can have multiple proposals
+            # for the same task. The operator must bind this accepted version
+            # to its original proposal before lessons can be published.
+            row.update(post_acceptance_state='proposal_thread_required',
+                       post_acceptance_blocker='accepted version has no bound proposal thread')
         row.setdefault('post_acceptance_state','pending')
         public={field:row.get(field) for field in (
             'commit','task','snapshot_sha256','evaluation_id','state','formal_decision',
             'scientific_acceptance','reason','proposal_thread','proposal_url',
-            'post_acceptance_state','lessons_comment')}
+            'post_acceptance_state','post_acceptance_blocker','lessons_comment')}
         public.update(key=key,post_acceptance_required=True,lessons_template=template(dict(row,key=key)))
         followups.setdefault(author,[]).append(public)
         publish_author_feedback({},dict(row,key=key),config)
