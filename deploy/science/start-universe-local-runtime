@@ -12,7 +12,16 @@ DONOR=${GEWU_EXTERNAL_ROLE_ROOTS:-$W/universes/my-terminal-bench-science}
 # not itself proof of local storage. Historical /tmp runtimes are read-only
 # recovery sources, never the implicit destination of a new launch.
 RUNTIME=${GEWU_LOCAL_RUNTIME_ROOT:-$W/.tmp/gewu-terminal-bench-science-runtime-live}
-BACKUP_DIR=${GEWU_BACKUP_DIR:-$W/.state/backups/live}
+GEWU_RUNTIME_BACKUP_TARGET=$("$PY" - "$RUNTIME" "${GEWU_RUNTIME_BACKUP_TARGET:-}" "${GEWU_BACKUP_DIR:-}" <<'PY_BACKUP_TARGET'
+import sys
+from pathlib import Path
+from runtime_backup import backup_target
+configured = sys.argv[2] or (str(Path(sys.argv[3])/'recovery') if sys.argv[3] else None)
+print(backup_target(sys.argv[1], configured))
+PY_BACKUP_TARGET
+)
+export GEWU_RUNTIME_BACKUP_TARGET
+BACKUP_DIR=$(dirname "$GEWU_RUNTIME_BACKUP_TARGET")
 python3 - "$W" "$RUNTIME" "$BACKUP_DIR" <<'PY_STORAGE'
 from pathlib import Path
 import sys
@@ -432,11 +441,10 @@ backup() {
   # prevents overlap; every bounded cycle publishes coverage and freshness.
   umask 077
   "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
-    --source "$RUNTIME" --target "$BACKUP_DIR/recovery" --once --budget 300 \
+    --source "$RUNTIME" --target "$GEWU_RUNTIME_BACKUP_TARGET" --once --budget 300 \
     --receipt "$RUNTIME/.state/gewu-multiverse/runtime-backup.json" \
     >> "$BACKUP_DIR/backup-worker.log" 2>&1 || true
 }
-backup_pid=''
 monitor_pid=''
 universe_pid=''
 cleanup() {
@@ -448,7 +456,8 @@ cleanup() {
     kill -TERM "$monitor_pid" 2>/dev/null || true
     wait "$monitor_pid" 2>/dev/null || true
   fi
-  if [ -n "$backup_pid" ]; then kill "$backup_pid" 2>/dev/null || true; fi
+  # The inner launcher stops its owned periodic backup worker before returning.
+  # Capture a final bounded cycle after the runtime has stopped.
   backup &
 }
 trap cleanup EXIT
@@ -479,10 +488,8 @@ while True:
         raise SystemExit('Universe monitor did not become ready')
     time.sleep(0.1)
 PY_MONITOR_CHECK
-# Never delay controller startup on a CPFS archive. The local runtime is the
-# authoritative live copy; an archive is best-effort and independently timed.
-backup &
-( while sleep 600; do backup; done ) & backup_pid=$!
+# The inner launcher owns the periodic incremental worker, including direct
+# runtime/start invocations; do not spawn a duplicate timer here.
 if [ -t 0 ] && [ -t 1 ]; then
   "$RUNTIME/start" "$@" </dev/tty >/dev/tty &
 else

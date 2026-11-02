@@ -17,8 +17,54 @@ LAUNCHER = (Path(__file__).parent / 'start-universe').read_text()
 class ReadyFileTests(unittest.TestCase):
     def backup_script(self):
         launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
-        block=launcher.split('backup() {',1)[1].split('\n}\nbackup_pid=',1)[0]
-        return 'umask 022\nRUNTIME="$1"\nBACKUP_DIR="$2"\nW="$3"\nPY="$4"\nbackup() {'+block+'\n}\nbackup\n'
+        block=launcher.split('backup() {',1)[1].split('\n}\nmonitor_pid=',1)[0]
+        return 'umask 022\nRUNTIME="$1"\nBACKUP_DIR="$2"\nGEWU_RUNTIME_BACKUP_TARGET="$BACKUP_DIR/recovery"\nW="$3"\nPY="$4"\nbackup() {'+block+'\n}\nbackup\n'
+
+    def test_direct_workspace_runtime_starts_one_owned_backup_worker(self):
+        import json
+        from evaluation_queue import W
+        # Execute the actual launch block with a real fixture backup, without
+        # credentials, models, Forgejo, the broker or the universe controller.
+        block=LAUNCHER.split('trap finish EXIT\n',1)[1].split("trap 'exit 130' INT",1)[0]
+        script='''set -eu
+W="$1"
+U="$2"
+GEWU_RUNTIME_BACKUP_TARGET="$3"
+PY="$4"
+SERVICE_STATE="$U/.state/gewu-multiverse"
+mkdir -p "$SERVICE_STATE"
+trap 'kill -TERM "${backup_pid:-}" 2>/dev/null || true; wait "${backup_pid:-}" 2>/dev/null || true' EXIT
+'''+block+'''
+"$PY" - "$SERVICE_STATE/runtime-backup.json" "$GEWU_RUNTIME_BACKUP_TARGET" "$backup_pid" "$$" <<'PY_CHECK'
+import json,sys,time
+from pathlib import Path
+receipt,target,worker,owner=sys.argv[1:]
+deadline=time.monotonic()+20
+while time.monotonic()<deadline:
+    path=Path(receipt)
+    if path.is_file():
+        row=json.loads(path.read_text())
+        if row.get('status')=='ok':break
+    time.sleep(.05)
+else:raise SystemExit('Owned workspace backup did not complete')
+args=Path('/proc/'+worker+'/cmdline').read_bytes().split(b'\\0')
+assert b'--owner-pid' in args and owner.encode() in args
+assert (Path(target)/'data/work.txt').read_text()=='fixture work'
+print(json.dumps({'worker':int(worker),'source':row['source'],'target':target,'status':row['status']}))
+PY_CHECK
+'''
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);runtime=root/'runtime';runtime.mkdir()
+            (runtime/'work.txt').write_text('fixture work')
+            result=subprocess.run(['bash','-ec',script,'test',str(W),str(runtime),str(root/'backup'),sys.executable],text=True,capture_output=True,timeout=30)
+            log=runtime/'.state/gewu-multiverse/runtime-backup.log'
+            self.assertEqual(result.returncode,0,result.stderr+'\n'+(log.read_text() if log.exists() else 'No backup log'))
+            receipt=json.loads(result.stdout)
+            self.assertEqual(receipt['source'],str(runtime))
+            self.assertEqual(receipt['status'],'ok')
+            self.assertFalse(Path('/proc/'+str(receipt['worker'])).exists())
+        outer=Path(__file__).with_name('start-universe-local-runtime').read_text()
+        self.assertNotIn('while sleep 600; do backup',outer)
 
     def test_incremental_backup_is_private_and_excludes_credentials(self):
         import json

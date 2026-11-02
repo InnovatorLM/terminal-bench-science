@@ -8,11 +8,17 @@ PY="$W/acs-harbor-test/.venv/bin/python"
 U=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
     "$PY" -c 'from deployment_paths import universe_root,require_isolated_service_config; u=universe_root(); require_isolated_service_config(u); print(u)')
 export GEWU_UNIVERSE_ROOT="$U"
+# Validate the independent backup target before mutating or launching services.
+# The live workspace runtime resumes its existing inventory; other universes
+# get distinct targets, and neither a recursive nor a foreign target is valid.
+GEWU_RUNTIME_BACKUP_TARGET=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$W/gewu-multiverse/deploy/science" \
+    "$PY" -c 'import sys; from runtime_backup import backup_target; print(backup_target(sys.argv[1], sys.argv[2] or None))' \
+    "$U" "${GEWU_RUNTIME_BACKUP_TARGET:-}")
+export GEWU_RUNTIME_BACKUP_TARGET
 SERVICE_STATE="$U/.state/gewu-multiverse"
 mkdir -p "$SERVICE_STATE"
 exec 8>>"$SERVICE_STATE/launcher.lock"
 flock -x -n 8 || { echo 'This universe already has a launcher; startup refused.' >&2; exit 1; }
-export GEWU_RUNTIME_BACKUP_TARGET="${GEWU_RUNTIME_BACKUP_TARGET:-/mnt/data/zhanglinfeng/workspace/universes/my-terminal-bench-science-runtime-backup}"
 # Materialize only active role workspaces locally. Stopped roles get empty
 # local roots; their durable CPFS content remains available through backups.
 chmod 0755 "$U/.config/gewu-multiverse/agents"
@@ -244,12 +250,13 @@ finish() {
     rm -f "$SERVICE_STATE/controller.pid"
 }
 trap finish EXIT
-if [[ "$U" == /tmp/gewu-terminal-bench-science-runtime-* ]]; then
-    "$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
-        --source "$U" --target "$GEWU_RUNTIME_BACKUP_TARGET" --interval 600 \
-        > "$SERVICE_STATE/runtime-backup.log" 2>&1 &
-    backup_pid=$!
-fi
+# One owned worker backs up every supported workspace deployment. The outer
+# local-runtime launcher does not start a second periodic scheduler.
+"$PY" "$W/gewu-multiverse/deploy/science/runtime_backup.py" \
+    --source "$U" --target "$GEWU_RUNTIME_BACKUP_TARGET" --interval 600 --budget 300 \
+    --owner-pid "$$" --receipt "$SERVICE_STATE/runtime-backup.json" \
+    >> "$SERVICE_STATE/runtime-backup.log" 2>&1 &
+backup_pid=$!
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Verify the process we own is live, then authenticate the real controller UID

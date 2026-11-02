@@ -33,6 +33,35 @@ class BudgetExpired(Exception):
     pass
 
 
+def backup_target(source, configured=None, workspace=WORKSPACE):
+    """Choose an independent target before any launcher writes or starts services."""
+    workspace = Path(workspace).resolve()
+    source_path = Path(source)
+    source = source_path.resolve()
+    if not source_path.is_absolute() or not source.is_relative_to(workspace) or source == workspace:
+        raise ValueError('Active backup source must be below the workspace')
+    if configured:
+        candidate = Path(configured)
+    elif source == workspace/'.tmp/gewu-terminal-bench-science-runtime-live':
+        # Resume the existing production inventory rather than seed a new copy.
+        candidate = workspace/'.state/backups/live/recovery'
+    else:
+        identity = hashlib.sha256(str(source).encode()).hexdigest()[:16]
+        candidate = workspace/'.state/backups'/('universe-' + identity)/'recovery'
+    target = candidate.resolve()
+    if (not candidate.is_absolute() or candidate.is_symlink()
+            or not target.is_relative_to(workspace) or target == workspace
+            or target.is_relative_to(source) or source.is_relative_to(target)):
+        raise ValueError('Backup target must be separate from source and below workspace')
+    manifest = target/'manifest.json'
+    if manifest.exists():
+        recorded = json.loads(manifest.read_text())
+        if (recorded.get('identity') != {'source': str(source), 'includes': []}
+                or recorded.get('recovery') not in (None, False)):
+            raise ValueError('Backup target belongs to another source, scope or purpose')
+    return target
+
+
 def atomic(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

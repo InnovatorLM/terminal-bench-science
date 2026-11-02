@@ -17,6 +17,26 @@ class BackupTests(unittest.TestCase):
         self.root=Path(self.temp.name);self.src=self.root/'source';self.src.mkdir();self.dst=self.root/'backup'
     def put(self,name,data='fixture'):
         p=self.src/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(data);return p
+    def test_launcher_targets_resume_live_and_isolate_other_universes(self):
+        live=self.root/'.tmp/gewu-terminal-bench-science-runtime-live'
+        self.assertEqual(b.backup_target(live,workspace=self.root),self.root/'.state/backups/live/recovery')
+        one=b.backup_target(self.root/'one/runtime',workspace=self.root)
+        two=b.backup_target(self.root/'two/runtime',workspace=self.root)
+        self.assertNotEqual(one,two)
+        self.assertTrue(one.is_relative_to(self.root/'.state/backups'))
+        self.assertFalse(one.exists())
+
+    def test_launcher_target_rejects_recursive_outside_or_foreign_backup(self):
+        for bad in (self.src,self.src/'nested',self.root,self.root.parent/'outside','relative'):
+            with self.subTest(target=bad),self.assertRaises(ValueError):
+                b.backup_target(self.src,bad,workspace=self.root)
+        self.put('work.txt');b.cycle(self.src,self.dst)
+        self.assertEqual(b.backup_target(self.src,self.dst,workspace=self.root),self.dst)
+        with self.assertRaisesRegex(ValueError,'another source'):
+            b.backup_target(self.root/'another',self.dst,workspace=self.root)
+        alias=self.root/'alias';alias.symlink_to(self.dst,target_is_directory=True)
+        with self.assertRaises(ValueError):b.backup_target(self.src,alias,workspace=self.root)
+        with self.assertRaises(ValueError):b.backup_target('/tmp/historical-runtime',workspace=self.root)
     def test_recovery_payload_excludes_secrets_rootfs_caches_and_links(self):
         role='.config/gewu-multiverse/agents/author-01/'
         excluded=['credentials.toml','git-credential.json','dawnfm.env','service.token','app.ini','kubeconfig','private.key','custom-secret-dir/key','secrets/key','.cache/data','.tmp/cache','worker.pid','state.lock',role+'usr/lib/lib.so',role+'tmp/pip/file',role+'workspace.preserved-1/old',role+'workspace/repo/.git/config',role+'workspace/repo/.git/objects/tmp_123']
