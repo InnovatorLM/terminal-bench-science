@@ -11,7 +11,7 @@ import time
 import errno
 
 from evaluation_queue import W, atomic_json
-from install_role_skills import selected, bundle, SOURCE
+from install_role_skills import selected, bundle, discovery, SOURCE
 
 
 def read_text_retry(path, attempts=8):
@@ -69,6 +69,7 @@ def inspect(role, entry, runner=subprocess.run):
     root = Path(entry['root']).resolve(strict=True)
     if not root.is_relative_to(W) and not str(root).startswith('/tmp/gewu-terminal-bench-science-runtime-'):
         raise ValueError('Role root outside workspace')
+    skill_discovery=discovery(root/'skills')
     skills = {}; resources = {}; skills_current = {}
     for name in selected(role):
         path = root/'skills'/name/'SKILL.md'
@@ -109,7 +110,7 @@ def inspect(role, entry, runner=subprocess.run):
     healthy = (all(v.get('ok') is True for v in observed['modules'].values()) and all(observed['tools'].values())
                and all(entrypoints.values()) and all(skills_current.values())
                and all(v.get('help_ok') is True and v.get('executable') for v in command_checks.values()))
-    return dict(role=role,observed_at=time.time(),ready=healthy,skills=skills,
+    return dict(role=role,observed_at=time.time(),ready=healthy,skills=skills,skill_discovery=skill_discovery,
                 instruction_sha256=hashlib.sha256(instruction.read_bytes()).hexdigest(),
                 skill_resources=resources,skills_current=skills_current,
                 environment=observed,entrypoints=entrypoints,

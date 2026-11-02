@@ -28,6 +28,8 @@ class CapabilityTests(unittest.TestCase):
                 self.assertIn('--userspec=21001:21001',args)
                 return subprocess.CompletedProcess(args,0,json.dumps(payload),'')
             receipt=inspect('author-01',entry,run);self.assertTrue(receipt['ready'])
+            self.assertTrue(receipt['skill_discovery']['ready'])
+            self.assertEqual(receipt['skill_discovery']['receipt_path'],'/skills/.manifest.json')
             payload['commands']['role-acs-selftest']['help_ok']=False
             self.assertFalse(inspect('author-01',entry,run)['ready'])
             payload['commands']['role-acs-selftest']['help_ok']=True
@@ -42,6 +44,16 @@ class CapabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Incomplete'):inspect('author-01',entry,run)
             payload['uid']=0
             with self.assertRaises(ValueError):inspect('author-01',entry,run)
+
+    def test_discovery_failure_is_caught_before_running_environment_probe(self):
+        for filename,as_directory in (('manifest.json',False),('incomplete-skill',True)):
+            with self.subTest(filename=filename),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                root=Path(raw);entry=self.fixture(root);invalid=root/'skills'/filename
+                if as_directory:invalid.mkdir()
+                else:invalid.write_text('{}')
+                def runner(*args,**kwargs):self.fail('Environment probe must not run after failed discovery')
+                with self.assertRaisesRegex(ValueError,'Visible skill entry'):
+                    inspect('author-01',entry,runner)
 
     def test_no_raw_probe_error_is_exposed(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

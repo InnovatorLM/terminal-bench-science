@@ -12,7 +12,9 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 WAIT_STATES = {'reviewing', 'waiting_platform', 'validating', 'waiting_builder',
                'building', 'running_oracle', 'running_nop', 'queued', 'running'}
@@ -34,16 +36,23 @@ def save(path, payload):
 
 
 def source_signature(workspace, *, details=None, max_seconds=30):
-    """Observe Git changes plus non-Git source, not every immutable baseline file.
+    """Observe Git identity and file metadata without rehashing baseline contents.
 
     No index refresh writes, hooks, filters, lazy fetch or cloud clients are
     permitted. An inaccessible repository or exceeded bound remains unknown.
     """
     root=Path(workspace).resolve(strict=True);deadline=time.monotonic()+max_seconds
-    entries=[];visited=set();counts={'files':0,'directories':0,'repositories':0,'git_commands':0}
+    entries=[];visited=set();directory_checks={}
+    counts={'files':0,'tracked_files':0,'directories':0,'tracked_directories':0,'repositories':0,'git_commands':0}
+    count_lock=threading.Lock();cancelled=threading.Event()
+    def bump(key):
+        with count_lock:counts[key]+=1
     def budget():
+        with count_lock:
+            if details is not None:details.update(counts)
         remaining=deadline-time.monotonic()
-        if remaining<=0 or counts['files']>6000 or counts['directories']>2000:
+        if (cancelled.is_set() or remaining<=0 or counts['files']>6000 or counts['tracked_files']>50000
+                or counts['directories']>2000 or counts['tracked_directories']>10000):
             raise ValueError('Workspace observation budget reached; manual inspection required')
         return remaining
     def relative(path):
@@ -52,7 +61,7 @@ def source_signature(workspace, *, details=None, max_seconds=30):
     def ignored(path):
         return any(part in IGNORED for part in path.relative_to(root).parts)
     def git(repo,gitdir,args,options=(),allow_empty=False):
-        budget();counts['git_commands']+=1
+        budget();bump('git_commands')
         env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
         env.update(GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_OPTIONAL_LOCKS='0',
                    GIT_NO_LAZY_FETCH='1',GIT_TERMINAL_PROMPT='0',LC_ALL='C')
@@ -69,8 +78,8 @@ def source_signature(workspace, *, details=None, max_seconds=30):
         if result.returncode and not (allow_empty and result.returncode==1):
             raise ValueError('Git source inspection failed; manual inspection required')
         return result.stdout
-    def repository(repo):
-        counts['repositories']+=1;marker=repo/'.git'
+    def repository(repo,children):
+        bump('repositories');marker=repo/'.git'
         if marker.is_symlink():raise ValueError('Linked Git metadata refused')
         if marker.is_dir():gitdir=marker
         else:
@@ -88,15 +97,11 @@ def source_signature(workspace, *, details=None, max_seconds=30):
             if common.is_symlink() or common.stat().st_size>4096:raise ValueError('Unsafe common Git directory')
             if not (gitdir/common.read_text().strip()).resolve(strict=True).is_relative_to(root):
                 raise ValueError('Common Git metadata escaped workspace')
-        # git status may invoke clean/process filters while refreshing its
-        # in-memory index. Override every configured driver before observation.
-        keys=git(repo,gitdir,['config','--null','--name-only','--get-regexp',r'^filter\..*\.(clean|process|required)$'],allow_empty=True)
+        # Never use git status/diff here: after filesystem migration their
+        # stale index stat cache can rehash every baseline file on every poll.
+        # These read-only plumbing commands neither refresh file contents nor
+        # invoke configured clean/process filters. No source index writes.
         options=[]
-        for raw in keys.split(b'\0'):
-            if not raw:continue
-            key=raw.decode()
-            if not re.fullmatch(r'filter\..+\.(clean|process|required)',key):raise ValueError('Invalid Git filter setting')
-            options.extend(['-c',key+('=false' if key.endswith('.required') else '=')])
         head=git(repo,gitdir,['rev-parse','--verify','--quiet','HEAD'],options,allow_empty=True).strip()
         index_path=gitdir/'index'
         def index_stamp():
@@ -104,43 +109,70 @@ def source_signature(workspace, *, details=None, max_seconds=30):
             s=index_path.stat();return (s.st_size,s.st_mtime_ns,s.st_ctime_ns)
         before=index_stamp()
         index=git(repo,gitdir,['ls-files','-v','--stage','-z'],options)
-        submodules=[]
+        tracked=[]
         for line in index.split(b'\0'):
             if not line:continue
             meta,name=line.split(b'\t',1);fields=meta.split()
             # Git deliberately omits worktree changes behind these index flags.
             # Do not call the author stalled when those bytes were unobserved.
             if fields[0].islower() or fields[0]==b'S':raise ValueError('Git index hides worktree changes; manual inspection required')
-            if fields[1]==b'160000':submodules.append(os.fsdecode(name))
-        status=git(repo,gitdir,['status','--porcelain=v1','-z','--untracked-files=all',
-                              '--ignored=matching','--ignore-submodules=all','--no-renames'],options)
-        entries.append(('git',relative(repo),head.decode(),hashlib.sha256(index).hexdigest(),hashlib.sha256(status).hexdigest()))
-        for line in status.split(b'\0'):
-            if not line:continue
-            if len(line)<4 or line[2:3]!=b' ':raise ValueError('Unrecognized Git status entry')
-            changed=repo/os.fsdecode(line[3:]).rstrip('/')
-            if not changed.is_relative_to(repo) or '..' in changed.relative_to(repo).parts:
-                raise ValueError('Unsafe Git status path')
-            walk(changed)
-        for name in submodules:walk(repo/name)
+            tracked.append(repo/os.fsdecode(name))
+        tracked_paths=set(tracked)
+        tracked_dirs={parent for path in tracked for parent in path.parents if parent.is_relative_to(repo)}
+        entries.append(('git',relative(repo),head.decode(),hashlib.sha256(index).hexdigest()))
+        # Enumerate the tree once, comparing names with the index inventory.
+        # git status/ls-files --others would walk the same CPFS directories
+        # again and re-read ignore files; custom ignored source is deliberately
+        # included here. Only the established cache exclusions are pruned.
+        for child in children:walk(child,tracked_paths=tracked_paths,tracked_dirs=tracked_dirs)
+        for path in tracked_paths:
+            if path not in visited:walk(path,tracked=True)
         if before!=index_stamp() or git(repo,gitdir,['rev-parse','--verify','--quiet','HEAD'],options,allow_empty=True).strip()!=head:
             raise ValueError('Repository changed during source observation')
-    def walk(path):
+    def check_directory(path):
+        if path in directory_checks:return
+        if path!=root:check_directory(path.parent)
+        before=path.lstat()
+        if not stat.S_ISDIR(before.st_mode):raise ValueError('Source parent is not an unlinked directory')
+        directory_checks[path]=(before.st_ino,before.st_mtime_ns,before.st_ctime_ns)
+    def walk(path,tracked=False,tracked_paths=None,tracked_dirs=None):
         budget();relative(path)
         if path in visited or ignored(path):return
         visited.add(path)
+        tracked=tracked or (tracked_paths is not None and path in tracked_paths)
+        if path!=root:
+            try:check_directory(path.parent)
+            except FileNotFoundError:
+                entries.append(('missing',relative(path)));return
         try:before=path.lstat()
         except FileNotFoundError:
             entries.append(('missing',relative(path)));return
         if stat.S_ISDIR(before.st_mode):
-            counts['directories']+=1;budget()
-            if (path/'.git').exists() or (path/'.git').is_symlink():
-                repository(path);return
-            for child in sorted(path.iterdir()):walk(child)
+            bump('tracked_directories' if tracked_dirs is not None and path in tracked_dirs else 'directories');budget()
+            directory_checks[path]=(before.st_ino,before.st_mtime_ns,before.st_ctime_ns)
+            children=sorted(path.iterdir())
+            # A directory listing already proves whether .git is present.
+            # Two negative metadata lookups per baseline directory dominate
+            # CPFS latency and add no evidence to this single tree walk.
+            if any(child.name=='.git' for child in children):
+                repository(path,children);return
+            if path==root:
+                # Independent top-level clones/worktrees can overlap their
+                # CPFS round trips. All workers share the original deadline,
+                # bounds and evidence; no subtree is skipped or trusted stale.
+                list(pool.map(walk,children));return
+            for child in children:walk(child,tracked_paths=tracked_paths,tracked_dirs=tracked_dirs)
             return
-        counts['files']+=1;budget()
+        bump('tracked_files' if tracked else 'files');budget()
         if stat.S_ISLNK(before.st_mode):value=('link',os.readlink(path))
         elif stat.S_ISREG(before.st_mode):
+            if tracked:
+                # ctime detects edits even if size and mtime are restored.
+                # A single lstat is an atomic metadata observation; reading
+                # all migrated baseline contents is unnecessary for stasis.
+                entries.append((relative(path),before.st_mode,before.st_size,
+                                before.st_mtime_ns,before.st_ctime_ns,('tracked',None)))
+                return
             # Stat/ctime covers large downloaded tools and data without reading
             # their gigabytes; small active sources also receive a content hash.
             value=('file',hashlib.sha256(path.read_bytes()).hexdigest() if before.st_size<=65536 else None)
@@ -149,9 +181,20 @@ def source_signature(workspace, *, details=None, max_seconds=30):
         stamp=lambda s:(s.st_mode,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
         if stamp(before)!=stamp(after):raise ValueError('Source changed during observation')
         entries.append((relative(path),*stamp(after),value))
-    walk(root);budget()
+    def verify_directory(item):
+        path,stamp=item
+        budget();s=path.lstat()
+        if not stat.S_ISDIR(s.st_mode) or (s.st_ino,s.st_mtime_ns,s.st_ctime_ns)!=stamp:
+            raise ValueError('Source directory changed during observation')
+    pool=ThreadPoolExecutor(max_workers=4,thread_name_prefix='source-observer')
+    try:
+        walk(root)
+        list(pool.map(verify_directory,list(directory_checks.items())))
+        budget()
+    finally:
+        cancelled.set();pool.shutdown(wait=True,cancel_futures=True)
     if details is not None:details.update(counts)
-    return hashlib.sha256(json.dumps(['git-aware-v1',sorted(entries,key=lambda x:json.dumps(x))]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(['git-metadata-v2',sorted(entries,key=lambda x:json.dumps(x))]).encode()).hexdigest()
 
 
 def failures(run, minimum=3):
@@ -308,5 +351,9 @@ def scan(config, session_state, state, now=None, reset_action=None):
             # Preserve attempt/cooldown metadata and avoid publishing role data.
             try:existing = read_json(path) if path.exists() else {}
             except (OSError,ValueError):existing={'last_attempt':now}
-            save(path, dict(existing, action='inspection_required', error_type=type(error).__name__,
+            message=str(error)
+            reason=('source_changed_during_observation' if 'changed during' in message else
+                    'observation_budget_exceeded' if 'budget' in message or 'bound reached' in message else
+                    'source_inspection_unavailable')
+            save(path, dict(existing, action='inspection_required', error_type=type(error).__name__,observation_reason=reason,
                             observed_at=now, stable_since=now, source_signature=None))

@@ -1,8 +1,22 @@
 # Science Universe 控制面问题清单
 
-核查时间：2026-11-02。本文记录当前实例的实际证据、修复目标和验收条件；不是修复完成报告。
+核查时间：2026-11-02。本文保留初始问题及后续修复证据，历史观察不代表最新运行状态。
 
-当前没有检测到宇宙控制器、评测队列或 self-test worker 进程。工作树中有尚未部署的控制面修改；self-test 十路并发已完成独立短测，其他修复的验收状态逐项说明如下。用户当前要求所有新开发产物位于工作区内，历史 `/tmp` 运行实例只作为审计来源。
+## 最新生产状态
+
+宇宙已恢复：Forgejo 和监控页面 HTTP 200，10 个作者及 curator 的新会话均有 `skills_discovered`、`model_reply` 和 `tool_result`。生产 self-test worker 显式运行 `--workers 10`。evaluator-01 的历史任务为 completed，其余 evaluator 没有新派单，未强行启动空审核。
+
+- 恢复后的 Forgejo 模板父目录权限和旧日志路径已修正；另修复技能回执 `manifest.json` 被原生运行器当成技能目录的问题，改为隐藏 `.manifest.json` 并加入启动门检。14 角色热更，17 项针对性测试通过，真实新会话已验证加载成功。
+- author-02 的 CPFS 源码观察已从超过 30 秒改为实测 22.249 秒，同一个 30 秒预算；21 项测试通过。仅替换 watchdog 加载新代码，保留作者会话。替换服务通过 pidfd 绑定原 launcher 生命周期，退出清理测试通过。尚未发生新的真实审核暂停或死循环 reset 事件，不能将规则测试表述为生产事件验收。
+- 十路 ACS 已有简单题并发探针通过；新 DawnFM/Codex 与独立 verifier 的真实运行及证据交接通过。原始 OpenSSL 题经真实 self-test worker 的构建、发布、oracle 已通过，但 nop verifier 超时，该记录仍为失败，未冒称完整自测成功。
+- iod-enso 五份历史轨迹已脱敏交付 evaluator，仍保留 3/5 和实际历史 Pod 信息缺失的标记。该版本正式审核已完成，PR #42 尚未合并；其旧 schema-2 自测回执不能伪装成新 v3 迭代证明，也不因此翻转历史评审结论或重跑五次。
+- 核心工作、角色环境和轨迹已恢复；独立历史归档 55.11 GB 已完成并抽样恢复验证，当前周期增量备份另行推进。新运行目录在工作区 `.tmp` 下，但实际挂载仍是 CPFS，不能称为本地盘。
+
+重启及热更证据位于工作区 `.state/deployment-recovery-20261102/`，其中 `restarted-role-observation.json` 保存实际会话观察，`skill-discovery-hotfix.json`、`watchdog-hot-reload.json` 保存本轮热更回执。
+
+## 初始停机审计
+
+初始核查时没有检测到宇宙控制器、评测队列或 self-test worker 进程。工作树中有尚未部署的控制面修改；self-test 十路并发已完成独立短测，其他修复的初始验收状态逐项说明如下。用户当前要求所有新开发产物位于工作区内，历史 `/tmp` 运行实例只作为审计来源。
 
 ## 现有评测证据
 

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +66,55 @@ class DeadEndTests(unittest.TestCase):
             m.source_signature(root)
             self.assertFalse(sentinel.exists());self.assertEqual(index.read_bytes(),before);self.assertEqual(index.stat().st_mtime_ns,stamp)
 
+    def test_metadata_inventory_avoids_status_untracked_enumeration_and_baseline_content_reads(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root)
+            original_read=Path.read_bytes;original_run=subprocess.run;operations=[]
+            def read(path):
+                if path.parent==repo and path.name.startswith('baseline-'):
+                    raise AssertionError('Do not rehash every migrated tracked baseline')
+                return original_read(path)
+            def run(command,**kwargs):
+                index=next(i for i,v in enumerate(command) if v.startswith('--work-tree='))
+                operation=command[index+1:];operations.append(operation)
+                self.assertNotIn('status',operation);self.assertNotIn('--others',operation)
+                return original_run(command,**kwargs)
+            with patch.object(Path,'read_bytes',read),patch.object(m.subprocess,'run',side_effect=run):
+                first=m.source_signature(root)
+            self.assertEqual([op[0] for op in operations],['rev-parse','ls-files','rev-parse'])
+            path=repo/'baseline-0.py';old=path.stat();before=path.read_bytes()
+            path.write_bytes(b'x'*len(before));os.utime(path,ns=(old.st_atime_ns,old.st_mtime_ns))
+            with patch.object(Path,'read_bytes',read):self.assertNotEqual(m.source_signature(root),first)
+
+    def test_tracked_directory_replaced_by_symlink_remains_unknown(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root);directory=repo/'src';directory.mkdir()
+            (directory/'active.py').write_text('source');self.git(repo,'add','.');self.git(repo,'commit','-qm','nested')
+            outside=root/'other';directory.rename(outside);directory.symlink_to(outside,target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'unlinked directory'):m.source_signature(root)
+
+    def test_four_independent_subtrees_overlap_without_omitting_source(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);files=[]
+            for i in range(4):
+                folder=root/str(i);folder.mkdir();path=folder/'active.py';path.write_text('original');files.append(path)
+            barrier=threading.Barrier(4);lock=threading.Lock();active=0;maximum=0;original=Path.lstat
+            def observed(path):
+                nonlocal active,maximum
+                if path.name!='active.py':return original(path)
+                with lock:active+=1;maximum=max(maximum,active)
+                try:
+                    barrier.wait(timeout=3)
+                    return original(path)
+                finally:
+                    with lock:active-=1
+            with patch.object(Path,'lstat',observed):first=m.source_signature(root)
+            self.assertEqual(maximum,4)
+            self.assertEqual(m.source_signature(root),first)
+            for path in files:
+                previous=m.source_signature(root);path.write_text('updated')
+                self.assertNotEqual(m.source_signature(root),previous)
+
     def test_unobservable_index_flags_or_git_errors_never_claim_stasis(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);repo=self.make_repo(root)
@@ -90,6 +140,22 @@ class DeadEndTests(unittest.TestCase):
                 reset.assert_not_called()
             resumed=json.loads((root/'monitor/author-01.json').read_text())
             self.assertEqual(resumed['action'],'observe');self.assertEqual(resumed['stable_since'],104301)
+
+    def test_active_source_changes_are_distinguished_from_observation_timeouts(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);config={'roles':{'author-01':{}},'controller_uid':0}
+            for i,(message,reason) in enumerate([
+                ('Repository changed during source observation','source_changed_during_observation'),
+                ('Source directory changed during observation','source_changed_during_observation'),
+                ('Git observation budget reached','observation_budget_exceeded'),
+                ('Git source inspection failed','source_inspection_unavailable'),
+            ]):
+                with patch.object(m,'observe',side_effect=ValueError(message)),patch('role_reset.online_reset') as reset:
+                    m.scan(config,root/'sessions',root/'monitor',now=100000+i*301)
+                    reset.assert_not_called()
+                result=json.loads((root/'monitor/author-01.json').read_text())
+                self.assertEqual(result['observation_reason'],reason)
+                self.assertEqual(result['action'],'inspection_required');self.assertIsNone(result['source_signature'])
 
     def test_git_child_uses_bounded_cpfs_budget_and_timeout_remains_unknown(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

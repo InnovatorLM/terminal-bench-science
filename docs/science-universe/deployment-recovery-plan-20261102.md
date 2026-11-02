@@ -47,3 +47,13 @@
 `prepare_repaired_runtime.py` 提供四阶段：`inventory`、`software`、`private`、`configuration`。`--output` 为当前阶段私有清单或检查点路径；后三阶段要求 `--runtime-root`。所有阶段均不启动生产。
 
 五个恢复测试通过：检查点不冒称可运行、拒绝链接控制文件、软件搬迁可恢复且保留 donor 工作、目标冲突不覆盖，以及服务路径重绑定不改历史证据。另六个维护计时测试通过。完整 capability、数据导入和生产行为验收分别记录，不能用单元测试代替。
+
+## 启动后 skills 发现阻塞与热修
+
+原安装器把资源摘要写在可见文件 `skills/manifest.json`，原生运行器将 `skills/` 下每个可见入口视为技能目录，因此在调用模型前报 `manifest.json is not a directory`。环境导入和技能资源摘要正确，仍不能证明技能目录可以被运行器发现。
+
+已热修全部 14 个角色：先确认旧回执的安装器 schema、角色和每个已安装资源摘要，再原子迁移到隐藏文件 `skills/.manifest.json`，同步指令引用及 instruction hash。保留各角色已有 capability `observed_at` 和整个 `environment` 原值，另附本次 `skill_discovery` 检查，不重复运行环境导入，不重启 controller。私有回执为 `.state/deployment-recovery-20261102/skill-discovery-hotfix.json`。
+
+安装器已改为原子写入隐藏回执，并只迁移能与已安装完整资源匹配的旧回执；未知文件、链接和冲突回执均保留并拒绝处理。capability 门检现在先检查每个可见入口是否为包含真实 `SKILL.md` 的目录，再执行环境探针，避免此类发现错误漏过启动检查。17 个针对性单测通过，覆盖迁移、拒绝未知文件/链接/残缺技能、幂等安装以及在发现错误时不运行环境探针。
+
+热修后只读确认 14/14 角色的发现检查、指令摘要和保留环境时间/摘要均正确。最新 10 个作者和 curator 的 11 个会话均已产生 `skills_discovered`、真实 `model_reply` 和 `tool_result`，没有再次出现该错误；三个 evaluator 的原等待状态未被强行改变。这证明模型会话已越过本次技能发现阻塞，不代表题目评测全部完成。
