@@ -18,7 +18,8 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 | `Require fresh workspace runtime context`，或平台拒绝自己的输出路径 | 平台存储路径/构建器问题。附 job、commit、具体错误，记录一次 `waiting_platform`；作者不应靠重命名题目或同版本重试规避。 |
 | `manifest unknown`、digest 不存在、基础镜像解析失败 | 核对哪个镜像及哪个阶段失败；作者修复自己写错的镜像引用，平台修复冻结/发布/镜像解析失败。成功回执绑定 digest，不能用可变 tag 猜测替换。 |
 | `unauthorized`、`ImagePullBackOff`、DNS/TLS/连接超时 | 平台核查 Pod events、pull secret、registry 和实际网络路径。公共 registry 地址本身不是失败证据；不能仅凭报错断言 ACS 或 ACR 故障。 |
-| `platform_dynamic_network_policy_mismatch` | 平台 Harbor/ACS 适配问题，需要固定启动网络策略和独立 verifier。作者不应通过删测试或改变科学题意绕过。 |
+| `task_acs_network_incompatible`，stage=`network_preflight` | 构建前已发现源 `task.toml` 与当前 ACK 适配器不兼容，尚未启动构建/ACS。读取 `network_preflight.issues` 的具体字段和 phase/baseline。默认公网 shared 可用；当前适配器不支持运行中切换，也不支持静态断网/白名单。题意允许公网时由作者修正源配置并重新提交；确需隔离时交平台实现支持，不能谎称已隔离。 |
+| `platform_dynamic_network_policy_mismatch` | 实际运行到了 Harbor 不支持的阶段策略切换。核对源任务的 `[environment]`、`[agent]`、`[verifier]` 及 step 配置；若新的预检未拦住，同步向平台提供 job/version 和失败阶段。独立 verifier 只能避免共享容器的阶段切换，不能提供适配器未支持的静态策略。 |
 | `rewards=null`、裸 `ValueError`、verifier 没输出 | 尚无有效分数。读异常类型和最后失败命令：可能是题包/verifier缺陷，也可能是平台；不能一律归 ACS，也不能算模型答错。 |
 | oracle=0 或 nop=1，且运行无基础设施异常 | 作者检查参考解、artifact传递、判题标准/容差和泄漏。nop通过意味着负对照异常；不是题目“太难”。 |
 | OOMKilled 或明确资源耗尽 | 由平台核实后从 4c/8Gi 升到最多 8c/16Gi；一般计算慢或错误答案不构成扩容证据。磁盘不足单独检查镜像/解包与临时存储，不能用加CPU冒充修复。 |
@@ -27,6 +28,8 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 | 五次 reward 已有但缺 trajectory/imageID/资源回显 | 是证据未闭环，先请求补收集/登记现存文件。配置请求不等于实际Pod回显，历史已删除Pod的信息不能编造。 |
 
 ## 等待与交接
+
+当前 Harbor 的 shared/separate 来自题包 **task.toml**。`[verifier] environment_mode="separate"` 或显式 `[verifier.environment]` 才能选择独立环境；job YAML/JSON 的 `verifier.environment_mode`、`verifier.environment` 会被忽略。默认 shared/public 不需要改。选择 separate 时，题目输出必须通过 `artifacts` 或 `/logs/artifacts` 传递，再用 oracle/nop 验证；不要假设两个容器共享整个文件系统。修改模式或网络声明必须在源任务中形成新 commit，不能静默篡改已冻结版本，也不能靠删测试改变题意来绕过。
 
 记录 task 路径、完整 commit、job/run ID、状态、首次失败步骤、已尝试的具体修复，以及下一步由谁处理。避免整段日志贴到公开 issue。curator 汇总同根因平台故障，不替代作者修题或 evaluator 独立评测。evaluator 可用 `role-review-status waiting_platform --stage <阶段> --reason '<具体证据缺项>'`，作者问题使用 `waiting_author`。终态回执受版本/代次约束，后续恢复由 dispatcher 派新代次，不能手改 generation。
 

@@ -140,6 +140,7 @@ class ReadyFileTests(unittest.TestCase):
 
     def test_runtime_keeps_full_instruction_and_skill_manifest_for_every_role(self):
         from evaluation_queue import W
+        from install_role_skills import SOURCE as skill_source
         launcher=Path(__file__).with_name('start-universe-local-runtime').read_text()
         seed=launcher.split('# Seed all configured role instructions,',1)[1].split("<<'PY'\n",1)[1].split('\nPY',1)[0]
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
@@ -164,8 +165,12 @@ class ReadyFileTests(unittest.TestCase):
                 self.assertEqual((runtime/path).read_bytes(),(donor/path).read_bytes())
                 for name in selected(role):
                     path=path.parent/'skills'/name/'SKILL.md'
-                    self.assertEqual((runtime/path).read_bytes(),(donor/path).read_bytes())
+                    self.assertEqual((runtime/path).read_bytes(),(skill_source/name/'SKILL.md').read_bytes())
                     path=Path('.config/gewu-multiverse/agents')/role/'instruction.md'
+            latest=runtime/'.config/gewu-multiverse/agents/author-01/instruction.md'
+            latest.write_text('Current reviewed instructions')
+            subprocess.run([sys.executable,'-c',seed,str(root/'source'),str(runtime),str(donor)],check=True,cwd=Path(__file__).parent)
+            self.assertEqual(latest.read_text(),'Current reviewed instructions')
         self.assertNotIn('default-instructions/',launcher)
 
     def test_runtime_restart_preserves_controller_role_choices(self):
@@ -180,12 +185,16 @@ class ReadyFileTests(unittest.TestCase):
             source=root/'source/.config/gewu-multiverse/multiverse.toml'
             target=root/'runtime/.config/gewu-multiverse/multiverse.toml'
             source.write_text('desired = "stopped"\n')
+            credentials=root/'runtime/.config/gewu-multiverse/credentials.toml'
+            credentials.write_text('latest database identity fixture')
+            (root/'donor/.config/gewu-multiverse/credentials.toml').write_text('stale donor fixture')
             script='set -eu\nSOURCE="$1/source"\nDONOR="$1/donor"\nRUNTIME="$1/runtime"\ncopy_control() { cp "$1" "$2"; }\nfor f in '+loop+'\ndone\n'
             subprocess.run(['bash','-c',script,'check',str(root)],check=True)
             self.assertEqual(target.read_text(),source.read_text())
             target.write_text('desired = "started"\n')
             subprocess.run(['bash','-c',script,'check',str(root)],check=True)
             self.assertEqual(target.read_text(),'desired = "started"\n')
+            self.assertEqual(credentials.read_text(),'latest database identity fixture')
 
     def test_watchdog_is_owned_and_stopped_with_launcher(self):
         self.assertIn('command_watchdog.py',LAUNCHER)

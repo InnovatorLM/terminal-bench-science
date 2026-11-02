@@ -34,8 +34,24 @@ Use the approved ACS Harbor environment and the versioned `universe_ack` runtime
 Pin the image by digest and use the configured pull secret. Default resources
 are 4 CPU/8 GiB; retry with at most 8 CPU/16 GiB only when evidence shows a
 resource failure. Keep the approved placement policy and do not schedule on
-`cn-beijing-f`. Network policy must be fixed when the verifier starts; ACS does
-not support switching policy inside one running sandbox. Collect job result,
+`cn-beijing-f`. The current ACK adapter supports the public network default,
+but does not advertise network isolation, allowlists, or policy changes inside
+a running sandbox. The worker checks Harbor's resolved task/step network plans
+before building; an incompatible source task receives
+`task_acs_network_incompatible` with the offending phase and baseline.
+
+Shared/separate verifier mode comes from **task.toml**: `[verifier]
+environment_mode="separate"`, or an explicit `[verifier.environment]`, selects
+a separate environment; without either, shared mode is valid. Job YAML/JSON
+`verifier.environment_mode` and `verifier.environment` are ignored by this
+Harbor version and do not fix network mismatches. For separate mode, declare
+the solver outputs that must cross environments in `artifacts` (or write them
+under `/logs/artifacts`) and verify the transfer with oracle/nop. Do not assume
+the verifier sees changes to the solver's whole filesystem. Its startup
+baseline and phase policy must match and both must be supported; separate mode
+does not provide unsupported static isolation. Update the source task and
+freeze a new commit if its contract needs changing; never rewrite a frozen
+snapshot silently. Collect job result,
 verifier stdout/reward, pod events, and the agent trajectory, then clean all
 temporary ACS resources.
 

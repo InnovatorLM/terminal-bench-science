@@ -57,15 +57,10 @@ for f in "$DONOR/.config/gewu-multiverse/credentials.toml" \
          "$SOURCE/.config/science-evaluation/queue.json" \
          "$SOURCE/.config/science-evaluation/registry.json"; do
   target="$RUNTIME/.config/${f#*/.config/}"
-  # The live controller owns its saved Start/Stop choices. Seed these once;
-  # restarting must not silently restore the stopped donor's old selection.
-  if [[ "$f" = */multiverse.toml && -f "$RUNTIME/.config/gewu-multiverse/multiverse.toml" ]]; then
-    continue
-  fi
-  # The registry is operator-owned mutable state. A local runtime may contain
-  # exact immutable task registrations that are newer than the donor source;
-  # never replace those entries with the donor's older catalog on restart.
-  if [[ "$f" = */science-evaluation/registry.json && -f "$target" ]]; then
+  # Restored runtime controls are authoritative, including the credentials
+  # paired with its Forgejo DB and its current registrations/role choices.
+  # Donors seed missing files only; restart must never roll back live state.
+  if [[ -f "$target" ]]; then
     continue
   fi
   [ -f "$f" ] && copy_control "$f" "$target" || true
@@ -91,7 +86,8 @@ src_state = source / '.state/gewu-multiverse'
 dst_state = runtime / '.state/gewu-multiverse'
 dst_state.mkdir(parents=True, exist_ok=True)
 
-broker = json.loads((src_state / 'role-broker/config.json').read_text())
+broker_file = dst_state / 'role-broker/config.json'
+broker = json.loads((broker_file if broker_file.is_file() else src_state / 'role-broker/config.json').read_text())
 broker['socket'] = broker_socket_name(runtime)
 broker['_lock_dir'] = str(runtime / '.state/gewu-multiverse/role-broker/locks')
 broker['_forgejo_url'] = forgejo_url
@@ -118,7 +114,8 @@ broker_path = dst_state / 'role-broker/config.json'
 broker_path.parent.mkdir(parents=True, exist_ok=True)
 broker_path.write_text(json.dumps(broker, indent=2) + '\n')
 
-queue = json.loads((source / '.config/science-evaluation/queue.json').read_text())
+queue_file = runtime / '.config/science-evaluation/queue.json'
+queue = json.loads((queue_file if queue_file.is_file() else source / '.config/science-evaluation/queue.json').read_text())
 queue['state'] = str(dst_state / 'evaluation-queue')
 queue['registry'] = str(runtime / '.config/science-evaluation/registry.json')
 for item in queue.get('role_queues', []):
@@ -158,7 +155,9 @@ queue_path = runtime / '.config/science-evaluation/queue.json'
 queue_path.write_text(json.dumps(queue, indent=2) + '\n')
 
 for name in ('review-dispatcher', 'author-selftest', 'command-watchdog'):
-    src = src_state / name / 'config.json'
+    src = dst_state / name / 'config.json'
+    if not src.is_file():
+        src = src_state / name / 'config.json'
     payload = json.loads(src.read_text())
     payload['broker_config'] = str(broker_path)
     payload['state'] = str(dst_state / name)
@@ -166,7 +165,8 @@ for name in ('review-dispatcher', 'author-selftest', 'command-watchdog'):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2) + '\n')
 
-marker = json.loads((src_state / 'deployment.json').read_text())
+marker_file = dst_state / 'deployment.json'
+marker = json.loads((marker_file if marker_file.is_file() else src_state / 'deployment.json').read_text())
 marker['universe_root'] = str(runtime)
 marker['role_root_donor'] = str(donor.resolve())
 (dst_state / 'deployment.json').write_text(json.dumps(marker, indent=2) + '\n')
@@ -184,15 +184,18 @@ from pathlib import Path
 source, runtime, donor = map(Path, sys.argv[1:])
 broker = json.loads((runtime / '.state/gewu-multiverse/role-broker/config.json').read_text())
 for role in broker['roles']:
-    src = donor / '.config/gewu-multiverse/agents' / role / 'instruction.md'
-    if not src.is_file():
-        raise SystemExit(f'missing role instruction: {role}')
     dst = runtime / '.config/gewu-multiverse/agents' / role / 'instruction.md'
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dst)
+    if not dst.is_file():
+        src = source / '.config/gewu-multiverse/agents' / role / 'instruction.md'
+        if not src.is_file():
+            src = donor / '.config/gewu-multiverse/agents' / role / 'instruction.md'
+        if not src.is_file():
+            raise SystemExit(f'missing role instruction: {role}')
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
     # Native sessions discover and inject skills from the controller layout,
     # while shell tools see the donor chroot. Both must hold the same files.
-    from install_role_skills import selected
+    from install_role_skills import selected, SOURCE as skill_source
     target_skills=dst.parent/'skills'
     if target_skills.is_symlink():
         raise SystemExit(f'linked controller skill directory: {role}')
@@ -200,7 +203,7 @@ for role in broker['roles']:
         shutil.rmtree(target_skills)
     target_skills.mkdir()
     for name in selected(role):
-        origin=src.parent/'skills'/name
+        origin=skill_source/name
         if not (origin/'SKILL.md').is_file() or any(p.is_symlink() for p in [origin,*origin.rglob('*')]):
             raise SystemExit(f'missing or linked skill: {role}/{name}')
         shutil.copytree(origin,target_skills/name)
@@ -288,7 +291,16 @@ for name, entry in config['roles'].items():
     link.symlink_to(target)
 PY
 cp "$SOURCE/README.md" "$RUNTIME/README.md" 2>/dev/null || true
-ln -sfn "$SOURCE/import" "$RUNTIME/import"
+IMPORT_SOURCE=$(python3 - "$W" "$SOURCE/import" <<'PY_IMPORT'
+from pathlib import Path
+import sys
+source=Path(sys.argv[2]).resolve(strict=True)
+if not source.is_relative_to(Path(sys.argv[1]).resolve()):
+    raise SystemExit('Imported benchmark source must remain inside workspace')
+print(source)
+PY_IMPORT
+)
+ln -sfn "$IMPORT_SOURCE" "$RUNTIME/import"
 cp "$SOURCE/start" "$RUNTIME/start"
 # The copied launcher must point its universe root at the local runtime, not at
 # the source path (and not at a guessed basename under the CPFS universe tree).

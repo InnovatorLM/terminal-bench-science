@@ -25,7 +25,7 @@ def validate_mechanical_check(path, snapshot, expected_hash):
     return report
 
 
-def inspect_task(snapshot):
+def inspect_task(snapshot, *, acs_environment=None):
     from harbor.models.task.config import TaskConfig
     from harbor.models.task.paths import TaskPaths
     snapshot = Path(snapshot)
@@ -38,6 +38,10 @@ def inspect_task(snapshot):
         if not path.is_file() or not path.read_bytes().strip():
             raise ValueError('Standard Harbor file missing or empty: ' + name)
     config = TaskConfig.model_validate_toml(paths.config_path.read_text())
+    network = None
+    if acs_environment is not None:
+        from acs_network_preflight import require_compatible
+        network = require_compatible(config, environment=acs_environment)
     timeouts = {'agent': config.agent.timeout_sec, 'verifier': config.verifier.timeout_sec, 'build': config.environment.build_timeout_sec}
     for value in timeouts.values():
         if value is not None and (not math.isfinite(value) or value <= 0):
@@ -53,22 +57,26 @@ def inspect_task(snapshot):
     if digest_tree(snapshot) != before:
         raise ValueError('Task changed during mechanical check')
     schema = Path(inspect.getfile(TaskConfig))
-    return {'snapshot_sha256': before, 'harbor_version': importlib.metadata.version('harbor'),
+    report = {'snapshot_sha256': before, 'harbor_version': importlib.metadata.version('harbor'),
             'task_config_source_sha256': hashlib.sha256(schema.read_bytes()).hexdigest(),
             'checker_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'schema_parsed': True, 'required_files_nonempty': True, 'shell_syntax_valid': True,
             'schema_resolved_resources': resources, 'schema_resolved_timeouts': timeouts, 'task_code_executed': False,
             'scientific_acceptance': False, 'license_verified': False, 'runtime_verified': False}
+    if network is not None:
+        report['acs_network_preflight'] = network
+    return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--task', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--acs', action='store_true', help='Check the actual ACK/ACS network capabilities without cloud access')
     args = parser.parse_args()
     if args.output.exists() or not allowed_development_path(args.output):
         raise ValueError('Require a fresh workspace output')
-    atomic_json(args.output, inspect_task(args.task))
+    atomic_json(args.output, inspect_task(args.task, acs_environment={} if args.acs else None))
 
 
 if __name__ == '__main__':

@@ -45,4 +45,6 @@
 
 一个需要主线注意的接口事实：当前 Harbor 解析 verifier 的 shared/separate 来自 task.toml；单纯设置 job 配置 `verifier.environment_mode` 不会改变任务模式。之前十路探针原 task 没有 separate，因此只观测到执行 Pod，不代表 separate verifier 已被验证。本次运维副本显式在 task.toml 声明 separate 后才覆盖到该路径。
 
-进一步核对发现，job 的 `verifier.environment` 同样不属于当前 Harbor 运行配置 schema，会被忽略。self-test worker 不能据此声称已隔离 verifier 或对齐网络策略；应在冻结前校验实际任务解析后的模式与 phase/baseline 网络计划。已有冻结任务不能被静默修改。此项已通知主线负责 self-test/build 的修复。
+进一步核对发现，job 的 `verifier.environment` 同样不属于当前 Harbor 运行配置 schema，会被忽略。self-test worker 已移除这两项无效覆盖，并在构建前使用真实 Harbor schema/resolver 与实际 UniverseACK capabilities 检查任务/step 的模式及 phase/baseline 网络计划；不修改冻结任务。默认 public/shared 和源任务声明的合法 separate 均可通过。当前适配器未支持的静态断网/白名单或动态切换会返回 `task_acs_network_incompatible`、具体字段及处理建议，且 `cloud_execution_started=false`；不能仅靠 separate 声称已提供隔离。
+
+网络预检的 18 项针对性测试通过，包含真实上传路径在进入 builder 前拒绝不兼容配置、冻结内容哈希不变、默认 shared、源配置显式/隐式 separate、legacy flag、step 继承和现有 worker 恢复测试。两份 pipeline/troubleshooting skill 已更新并通过格式校验。本项未增加云端或模型调用。
