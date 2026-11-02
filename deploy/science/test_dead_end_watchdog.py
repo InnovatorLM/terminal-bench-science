@@ -91,6 +91,22 @@ class DeadEndTests(unittest.TestCase):
             resumed=json.loads((root/'monitor/author-01.json').read_text())
             self.assertEqual(resumed['action'],'observe');self.assertEqual(resumed['stable_since'],104301)
 
+    def test_git_child_uses_bounded_cpfs_budget_and_timeout_remains_unknown(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);self.make_repo(root)
+            for requested in (None,0.25):
+                seen=[]
+                def timeout(command,**kwargs):
+                    seen.append(kwargs['timeout'])
+                    raise subprocess.TimeoutExpired(command,kwargs['timeout'])
+                with self.subTest(requested=requested),patch.object(m.subprocess,'run',side_effect=timeout):
+                    with self.assertRaisesRegex(ValueError,'Git observation budget reached'):
+                        m.source_signature(root,**({} if requested is None else {'max_seconds':requested}))
+                self.assertEqual(len(seen),1)
+                self.assertGreater(seen[0],0)
+                self.assertLessEqual(seen[0],30 if requested is None else requested)
+                if requested is None:self.assertGreater(seen[0],5)
+
     def observation(self, **changes):
         return dict(dict(source_signature='a', sessions=['run-1','run-2','run-3'],
                          shared_failure=['failure'], runner_live=True, waiting=[]), **changes)

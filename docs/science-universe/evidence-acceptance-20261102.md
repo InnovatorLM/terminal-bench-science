@@ -32,6 +32,8 @@
 
 权限以真实 UID 验证：evaluator UID 21012 可读 packet，author UID 21010 不可读。结果见 `packet-permission-check.json`。
 
+迁移完成后，已根据正式 broker 和实际派单将五份既有脱敏 packet 发布到 `W/.tmp/gewu-terminal-bench-science-runtime-live/.config/gewu-multiverse/agents/evaluator-01/evaluation/evidence/<job_id>/`。该正式获派角色实际 UID/GID 为 **21011**，不同于早期隔离验收使用的 21012。真实角色 chroot 内验证其可读全部五包，author-01 至 author-10 的实际 UID 均不可读；每包 8 个文件逐字 SHA-256 一致，已知凭证值扫描通过。队列私有和角色可见结果均增加 `/evaluation/evidence/<job_id>` 引用，原 reward、status、模板和快照保持不变；缺失的历史 Pod 实测仍标为 `historical_incomplete_pod_observations`、`evidence_complete=false`。发布回执为 `W/.state/evidence-acceptance-4e838c1a95/final-historical-delivery.json`。
+
 ## 验收边界
 
 第一次模型评测触发平台缺陷，其状态保留 `infrastructure_failed`、reward=null。其后的 `oracle-report.json` 只复核 Pod 实测和独立 verifier。完整链路成功来自本报告首节的第二次真实模型运行，没有将 oracle 与失败模型的证据拼接。

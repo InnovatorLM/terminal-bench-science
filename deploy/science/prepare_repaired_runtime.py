@@ -364,6 +364,8 @@ def bind_runtime_configuration(source,runtime,journal_path):
                            ('.local/share/gewu-multiverse',65534,0o700),
                            ('.local/share/gewu-multiverse/forgejo',65534,0o700),
                            ('.local/share/gewu-multiverse/forgejo/instance',65534,0o700),
+                           ('.local/share/gewu-multiverse/forgejo/instance/data',65534,0o700),
+                           ('.local/share/gewu-multiverse/forgejo/instance/custom',65534,0o700),
                            ('.cache',65534,0o700),('.tmp',65534,0o700)]:
         path=runtime/rel;path.mkdir(parents=True,exist_ok=True,mode=mode)
         os.chown(path,owner,owner);path.chmod(mode)

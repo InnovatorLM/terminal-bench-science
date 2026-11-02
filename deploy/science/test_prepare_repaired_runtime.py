@@ -106,6 +106,10 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(registry['task']['snapshot'],str(snapshot))
             self.assertEqual(registry['task']['snapshot_sha256'],'unchanged')
             self.assertNotIn(str(source),(runtime/'start').read_text())
+            for name in ('data','custom'):
+                directory=instance/name
+                self.assertEqual(directory.stat().st_uid,65534)
+                self.assertEqual(directory.stat().st_mode&0o777,0o700)
 
 
 if __name__=='__main__':unittest.main()

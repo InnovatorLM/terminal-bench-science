@@ -33,7 +33,7 @@ def save(path, payload):
     temporary.replace(path)
 
 
-def source_signature(workspace, *, details=None, max_seconds=5):
+def source_signature(workspace, *, details=None, max_seconds=30):
     """Observe Git changes plus non-Git source, not every immutable baseline file.
 
     No index refresh writes, hooks, filters, lazy fetch or cloud clients are
