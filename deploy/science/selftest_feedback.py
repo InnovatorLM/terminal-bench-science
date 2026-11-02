@@ -148,8 +148,10 @@ def publish_handoff(work, state, entry, status, result):
             record_current_request(root, other)
             release_handoff(root, source)
             return
-    reused=(result.get('state')=='completed' and result.get('stage')=='previously_accepted_version')
-    if not reused and not current_idea_matches(root, source['idea_id']):
+    accepted_reuse=(result.get('state')=='completed' and result.get('stage')=='previously_accepted_version')
+    feedback_reuse=result.get('reused_review_feedback') is True
+    reused=accepted_reuse or feedback_reuse
+    if not accepted_reuse and not current_idea_matches(root, source['idea_id']):
         release_handoff(root, source)
         return
     if not record_current_request(root, status):
@@ -169,4 +171,5 @@ def publish_handoff(work, state, entry, status, result):
     row.pop('role')
     if reused:
         row.update(key=result['review_key'],generation=result['review_generation'],role=result['evaluator'])
+    if feedback_reuse:row['feedback_source']='review_result_reuse'
     publish_author_feedback({}, row, {'roles': {source['role']: entry}})

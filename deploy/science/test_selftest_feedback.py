@@ -163,6 +163,45 @@ class SelftestFeedbackTests(unittest.TestCase):
         self.assertFalse(record_current_request(self.root,dict(self.status,job_id='c'*32)))
         self.assertEqual(current_request(self.root)['job_id'],self.work.name)
 
+    def test_same_snapshot_review_defects_release_repeated_job_without_budget_or_cloud(self):
+        from completed_review_reuse import lookup_feedback
+        universe=self.base/'universe';state=universe/'.state/gewu-multiverse/review-dispatcher'
+        state.mkdir(parents=True)
+        self.status.update(source_git_tree_verified=True,snapshot_sha256='c'*64)
+        (self.work/'status.json').write_text(json.dumps(self.status))
+        key='b'*40+':tasks/example'
+        row=dict(commit='b'*40,task='tasks/example',snapshot_sha256='c'*64,
+                 author_role='author-01',role='evaluator-01',evaluation_id='review-v1',
+                 state='waiting_author',stage='completeness',generation=2,
+                 reason='Fix the inconsistent units in instruction and verifier.',
+                 last_activity_at=150,job_id='d'*32)
+        ledger={key:row};path=state/'ledger.json';path.write_text(json.dumps(ledger))
+        self.publish();original=(self.work/'status.json').read_bytes();clock=self.clock.read_bytes()
+        with patch('selftest_handoff.handoff') as handoff:
+            reconcile(self.work,self.state,self.entry,universe)
+            reconcile(self.work,self.state,self.entry,universe)
+            handoff.assert_not_called()
+        feedback=self.feedback()
+        self.assertEqual(feedback['state'],'waiting_author')
+        self.assertEqual(feedback['reason'],row['reason'])
+        self.assertEqual(feedback['job_id'],self.work.name)
+        self.assertEqual(feedback['reviewed_job_id'],'d'*32)
+        self.assertFalse(feedback['author_must_pause'])
+        self.assertEqual((self.work/'status.json').read_bytes(),original)
+        self.assertEqual(self.clock.read_bytes(),clock)
+        self.assertEqual(json.loads(path.read_text()),ledger)
+        self.assertEqual(len(list((self.work/'review-feedback-reuse').glob('*.json'))),1)
+        for change in [dict(source_commit='e'*40),dict(snapshot_sha256='f'*64),
+                       dict(role='author-02'),dict(source_git_tree_verified=False)]:
+            self.assertIsNone(lookup_feedback(dict(self.status,**change),universe))
+        row.update(state='completed',review_recommendation='reject')
+        path.write_text(json.dumps(ledger))
+        with patch('selftest_handoff.handoff') as handoff:
+            reconcile(self.work,self.state,self.entry,universe);handoff.assert_not_called()
+        self.assertEqual(self.feedback()['review_recommendation'],'reject')
+        self.assertFalse(self.feedback()['scientific_acceptance'])
+        self.assertEqual(len(list((self.work/'review-feedback-reuse').glob('*.json'))),2)
+
     def test_new_plain_selftest_invalidates_old_pause_without_claiming_idea(self):
         self.publish()
         newer=dict(self.status,job_id='c'*32,source_commit='d'*40,received_at=110)

@@ -2,6 +2,10 @@
 
 作者读取 `/review-feedback.json` 的当前 commit、`prior_reviews` 和 `next_action`。curator 读取 `/review-version-handoffs.json`。历史审核完成只适用于对应 commit/task/snapshot；当前 PR 的资格和正式合并仍需分别核对。历史证据缺项应明确保留，不能补造实际 Pod 观测，也不能为更新回执 schema 重跑五次。
 
+evaluator 的作者自测证明位于 `/evaluation/evidence/<evaluation_id>/selftest-status.json`，同目录的 `selftest-manifest.json` 绑定 commit/task/snapshot、原自测 job 和各文件摘要；oracle/nop、构建及题包检查是技术完整性证据，不是科学质量或模型正确率。文件缺失时请平台补交已有回执，不让作者为“评审没收到文件”重新运行 ACS。若另有真实题意或 verifier 缺陷，应单独列明，补交文件不会抹去这些缺陷。
+
+重复自测同一 author/commit/task/snapshot 后，已有的具体修改意见或拒绝结论仍然适用。平台反馈的 `reused_review_feedback=true` 表示把该版本的原审核意见交给当前 job，`reviewed_job_id` 保留原评审所用的自测。作者应按意见修改源码或换思路，不再为同一份源码申请一轮预算证明或重复审核。不同源码、作者或快照不能复用；自测通过也不能推翻原有科学问题和难度拒绝。
+
 1. 列明已审核 commit、当前 PR HEAD、task 路径、已有 evaluation ID，以及旧结论与证据缺项。
 2. 用 `git diff OLD NEW -- "$TASK"` 和 `git show "$COMMIT:$TASK/task.toml"` 只看该题内容。不要导出整个仓库、全盘搜索平台代码，或逐个尝试大量历史 commit。
 3. 原作者说明保留旧版本还是采用新版本，附科学契约、Dockerfile、verifier 的实际变化；curator 协调具体选择。新版本必须有自己的资格回执，旧版本的完成记录保留。未明确选择前不重复提交自测。

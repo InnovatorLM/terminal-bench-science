@@ -248,6 +248,46 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(first['source'],second['source'])
         self.assertGreaterEqual(second['source_checked_at'],row['started_at'])
         self.assertGreater(second['source_checked_at'],first['source_checked_at'])
+
+    def test_large_live_scan_cannot_starve_workspace_cursor_and_resumes(self):
+        run='.state/gewu-multiverse/author-01/run-100'
+        expected={run+f'/nested-{i:02d}/event.jsonl' for i in range(50)}
+        for name in expected:self.put(name,'event')
+        task='.config/gewu-multiverse/agents/author-01/workspace/tasks/current'
+        self.put(task+'/task.toml','task');expected.add(task+'/task.toml')
+        progress={'inventory_at':time.time()-1,'priority_walk':[task]}
+        tick=[0];scanner=b.os.scandir
+        def scan(path):
+            tick[0]+=1
+            return scanner(path)
+        with patch.object(b.os,'scandir',side_effect=scan),patch.object(b.time,'monotonic',side_effect=lambda:tick[0]):
+            items,warnings,complete=b.priority_inventory(self.src,[],progress,20)
+            got={i['path'] for i in items}
+            self.assertIn(task+'/task.toml',got)
+            self.assertTrue(progress['priority_fast_walk']);self.assertFalse(complete)
+            for _ in range(20):
+                items,warnings,complete=b.priority_inventory(self.src,[],progress,tick[0]+20)
+                got.update(i['path'] for i in items)
+                if complete:break
+            self.assertTrue(complete)
+            self.assertTrue(expected.issubset(got));self.assertFalse(warnings)
+
+    def test_transient_tool_marker_is_excluded_but_historical_warning_is_audited(self):
+        run='.state/gewu-multiverse/author-01/run-100/'
+        self.put(run+'transcript.jsonl','retained tool event and output')
+        self.put(run+'current-tool','shell')
+        self.put('task/current-tool','ordinary source')
+        self.dst.mkdir()
+        b.atomic(self.dst/'progress.json',dict(
+            identity={'source':str(self.src),'includes':[]},inventory_at=time.time()-1,
+            pending=[],warnings=[{'path':run+'current-tool','kind':'FileNotFoundError'}],
+            inventory_count=0,inventory_paths=[],priority_walk=[run]))
+        row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'ok');self.assertFalse(row['warnings'])
+        self.assertEqual(len(row['resolved_transient_warnings']),1)
+        self.assertFalse((self.dst/'data'/run/'current-tool').exists())
+        self.assertEqual((self.dst/'data'/run/'transcript.jsonl').read_text(),'retained tool event and output')
+        self.assertFalse(b.excluded(Path('task/current-tool')))
     def test_carried_git_warning_is_separate_from_new_cycle_errors(self):
         self.put('repo/.git/objects/old');self.put('work.txt')
         original=b.copy_file;calls=[]

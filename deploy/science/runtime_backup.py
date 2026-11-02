@@ -49,6 +49,11 @@ def atomic(path, value):
 def excluded(rel):
     parts = rel.parts
     if rel.name in {'runtime-backup.json','runtime-backup.jsonl'}:return True
+    # This is an in-flight dashboard indicator, deleted after each tool call.
+    # The durable tool event/output lives in transcript.jsonl in the same run.
+    if (len(parts)==5 and parts[:2]==('.state','gewu-multiverse')
+            and parts[2].startswith(('author-','evaluator-','curator'))
+            and parts[3].startswith('run-') and parts[4]=='current-tool'):return True
     if any(part in CACHES for part in parts):
         return True
     if any(any(fnmatch.fnmatch(part.lower(), pat) for pat in SENSITIVE) for part in parts):
@@ -305,6 +310,8 @@ def priority_inventory(source, includes, progress, deadline):
     trajectories or the bulk copy. Its cutoff stays fixed until that walk ends.
     """
     selected = {}; warnings = []
+    started=time.monotonic()
+    fast_deadline=started+(deadline-started)*0.5
     scopes = [Path(name) for name in includes]
     cutoff = progress.get('priority_cutoff_ns', int(progress['inventory_at']*1e9)-120_000_000_000)
 
@@ -382,13 +389,23 @@ def priority_inventory(source, includes, progress, deadline):
                 if len(task_scopes)>=2:break
             except OSError:continue
         fast.extend(sorted(task_scopes))
-    while fast and time.monotonic() < deadline:
+    # A large live-run tree must not consume every scan budget before the
+    # persisted workspace cursor gets a turn. Resume unfinished fast scans too,
+    # instead of restarting them at the same first directory each cycle.
+    previous_fast=progress.get('priority_fast_walk') or []
+    seen_roots=set(progress.get('priority_fast_roots',[]) if previous_fast else [])
+    roots=list(dict.fromkeys(fast))
+    fast=list(dict.fromkeys([*previous_fast,*(name for name in roots if name not in seen_roots)]))
+    seen_roots.update(roots)
+    while fast and time.monotonic() < fast_deadline:
         name = fast.pop(0); folder = source/name
         for entry in entries(folder):
             path = Path(entry.path); rel = path.relative_to(source)
             if not allowed(rel):continue
             if entry.is_dir(follow_symlinks=False):fast.append(str(rel))
             else:collect(path, force=True)
+    progress['priority_fast_walk']=fast or None
+    progress['priority_fast_roots']=sorted(seen_roots) if fast else []
 
     work = progress.get('priority_walk')
     if work is None:
@@ -485,7 +502,7 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
         try:
             resuming = progress.get('identity') == identity and any((
                 progress.get('pending'), progress.get('priority_pending'),
-                progress.get('priority_walk'), progress.get('inventory_scanning')))
+                progress.get('priority_walk'), progress.get('priority_fast_walk'),progress.get('inventory_scanning')))
             if not resuming:
                 progress=dict(identity=identity,inventory_at=started,pending=[],warnings=[],
                               inventory_count=0,inventory_paths=[],inventory_scanning=True)
@@ -494,7 +511,15 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                 atomic(latest,row)
                 advance_inventory(source,includes,progress,min(deadline,time.monotonic()+budget*0.2))
                 atomic(progress_path,progress)
-            remaining=progress['pending'];row['warnings']=list(progress.get('warnings',[]))
+            remaining=progress['pending']
+            carried=list(progress.get('warnings',[]))
+            resolved=[dict(item,resolution='transient_dashboard_marker_excluded_from_recovery_scope')
+                      for item in carried if Path(item.get('path','')).name=='current-tool'
+                      and item.get('kind') in ('FileNotFoundError','source_disappeared')
+                      and excluded(Path(item['path']))]
+            row['resolved_transient_warnings']=resolved
+            row['warnings']=[item for item in carried if not any(
+                item['path']==r['path'] and item['kind']==r['kind'] for r in resolved)]
             row['carried_warning_count']=len(row['warnings']) if resuming else 0
             completed=0;checkpoint=time.monotonic();reported=checkpoint;checked_parents=set()
             def process(item, copy_deadline=deadline):
@@ -594,7 +619,7 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                     for future in pending:future.cancel()
             progress['pending']=[]
             row['status']='partial' if (row['warnings'] or row.get('priority_warnings')
-                or progress.get('priority_pending') or progress.get('priority_walk')
+                or progress.get('priority_pending') or progress.get('priority_walk') or progress.get('priority_fast_walk')
                 or progress.get('inventory_scanning')) else 'ok'
             if row['status']=='ok':
                 manifest['last_success_at']=time.time()
@@ -618,6 +643,7 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                    inventory_remaining_paths=len(progress.get('inventory_walk',[])),
                    priority_remaining_files=len(progress.get('priority_pending',[])),
                    priority_scan_remaining_dirs=len(progress.get('priority_walk') or []),
+                   priority_fast_remaining_dirs=len(progress.get('priority_fast_walk') or []),
                    last_complete_inventory_at=manifest.get('last_complete_inventory_at'))
         row['warning_summary'] = {
             'carried_from_inventory':warning_counts(row['warnings'][:row.get('carried_warning_count', 0)]),

@@ -188,9 +188,9 @@ def _reconcile(work, state, entry, universe):
     # Restoring an already accepted commit is a handoff, not another review.
     # Check the original signed identity before budget/registration gates; do
     # not manufacture a new clock exemption or repeat cloud evaluations.
-    from completed_review_reuse import lookup, record as record_reuse
+    from completed_review_reuse import lookup, lookup_feedback, record as record_reuse
     current=json.loads(read_operator_file(work/'status.json'))
-    completed=lookup(current,universe)
+    completed=lookup(current,universe) or lookup_feedback(current,universe)
     if completed is not None:
         record_reuse(work,current,completed)
         atomic_json(output,completed)

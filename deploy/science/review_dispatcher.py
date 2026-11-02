@@ -117,7 +117,8 @@ def _publish_author_feedback_locked(pr,row,config,root):
                 # preflight) cannot replace the actionable platform ownership.
                 handoff_update=row.get('feedback_source')=='selftest_handoff' and same_binding(existing,row)
                 real_review=(same_binding(existing,row) and row.get('evaluation_id')
-                             and row.get('role') in config['roles'])
+                             and (row.get('role') in config['roles']
+                                  or row.get('feedback_source')=='review_result_reuse'))
                 if not handoff_update and not real_review and not selected_acceptance:return
             if (existing.get('state')=='waiting_platform' and existing.get('stage')=='five_rollouts'
                     and same_binding(existing,current_selftest) and not selected_acceptance):
@@ -176,8 +177,10 @@ def _publish_author_feedback_locked(pr,row,config,root):
                 'The accepted-version lessons reply is public on the proposal thread; use its transferable '
                 'patterns to begin the next idea. Do not wait for another review of this accepted version.')
     for field in (*BINDING_FIELDS,'evaluation_id','snapshot_sha256','feedback_source','error_type','evidence_gap',
-                  'retry_requires_task_change','selftest_rerun_required','accepted_review_job_id'):
+                  'retry_requires_task_change','selftest_rerun_required','accepted_review_job_id',
+                  'reused_review_feedback','review_feedback_sha256','reviewed_job_id'):
         if field in row:payload[field]=row[field]
+    if row.get('reused_review_feedback'):payload['next_action']=row['next_action']
     if pr.get('number') is not None or row.get('pr') is not None:
         payload['pr']=pr.get('number',row.get('pr'))
     if row.get('prior_reviews'):
