@@ -19,7 +19,8 @@ def observe(directory, role, ledger, live, at):
     if directory.is_symlink() or info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode&0o077:
         raise ValueError('Observations require operator-private directory')
     at=number(at);path=directory/(role+'.json')
-    previous=json.loads(read_operator_file(path)) if path.exists() else {'role':role,'ideas':{}}
+    previous_raw=read_operator_file(path) if path.exists() else None
+    previous=json.loads(previous_raw) if previous_raw else {'role':role,'ideas':{}}
     ideas=ledger.get('ideas')
     if not isinstance(ideas,dict):raise ValueError('Invalid idea ledger')
     if set(previous['ideas'])-set(ideas):raise ValueError('Previously observed idea removed')
@@ -42,5 +43,21 @@ def observe(directory, role, ledger, live, at):
         result['ideas'][idea]={'events':events,'first_observed_at':old['first_observed_at'] if old else at,
                               'status':row['status']}
     result['previous_observation_sha256']=hashlib.sha256(read_operator_file(path)).hexdigest() if path.exists() else None
+    if previous.get('recovery_evidence'):result['recovery_evidence']=previous['recovery_evidence']
+    # Retain evidence on structural transitions, not on every watchdog poll.
+    # Historical first-observed boundaries must survive later migrations.
+    if previous_raw and previous['ideas']!=result['ideas']:
+        history=directory/'history'/role;history.mkdir(parents=True,exist_ok=True,mode=0o700)
+        info=history.lstat()
+        if history.is_symlink() or info.st_uid!=0 or not stat.S_ISDIR(info.st_mode) or info.st_mode&0o077:
+            raise ValueError('Observation history requires an operator-private directory')
+        archive=history/(hashlib.sha256(previous_raw).hexdigest()+'.json')
+        if archive.exists():
+            if hashlib.sha256(read_operator_file(archive)).hexdigest()!=archive.stem:
+                raise ValueError('Observation history digest mismatch')
+        else:
+            # Preserve original bytes so the filename authenticates the source.
+            fd=os.open(archive,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'wb') as stream:stream.write(previous_raw)
     atomic_json(path,result)
     return result

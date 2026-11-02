@@ -6,7 +6,7 @@ from check_harbor_task import inspect_task
 from acs_network_preflight import NetworkPreflightError
 from selftest_lifecycle import owned_run, recover_interrupted, install_stop_handlers
 from build_task_images import builder_slot,validate_dockerfile,build_failure_details
-from selftest_source import verify_source
+from selftest_source import verify_source, SourceMismatchError
 from selftest_logs import credential_values, publish as publish_logs
 from selftest_upload import snapshot_upload
 from acs_result_diagnostics import classify_trial
@@ -70,6 +70,9 @@ def process(role,entry,request):
   frozen=work/'upload.tar';snapshot_upload(archive,entry['uid'],140*1024*1024,frozen)
   if hashlib.sha256(frozen.read_bytes()).hexdigest()!=q['archive_sha256']:raise ValueError('Upload changed')
   repo=work/'source';task=repo/name;unpack(frozen,task)
+  # Bind bytes and executable modes to the claimed version before attributing
+  # any task/network defect to it. An uncommitted upload is not that version.
+  status.update(verify_source(root/'workspace',q['source_repository'],q['source_task_path'],q['source_commit'],task));save()
   # Validate the real task policy against the same job environment used below,
   # before acquiring the builder or starting any cloud work. Never rewrite the
   # frozen source to force a verifier mode or change its network contract.
@@ -77,7 +80,7 @@ def process(role,entry,request):
   mechanical=inspect_task(task,acs_environment=run_template['environment'])
   atomic_json(work/'mechanical.json',mechanical)
   status['network_preflight']=mechanical['acs_network_preflight']
-  status.update(verify_source(root/'workspace',q['source_repository'],q['source_task_path'],q['source_commit'],task));save()
+  save()
   for args in [['init','-q'],['config','user.email','operator@localhost'],['config','user.name','operator'],['add','.'],['commit','-qm','Frozen author upload']]:subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
   commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();status.update(status='waiting_builder',source_commit=q['source_commit'],execution_commit=commit,execution_task_path=name,snapshot_sha256=digest_tree(task));save()
   if 'iteration' in q:
@@ -130,6 +133,12 @@ def process(role,entry,request):
   categories=[item['diagnostic'] for trial in status['trials'] for item in trial.get('diagnostics',[]) if not item['scored']]
   if categories:status['error_class']=categories[0]
   status['note']='Author selftest only; iteration/rerun and independent evaluation still required.'
+ except SourceMismatchError as e:
+  from selftest_logs import sanitize
+  status.update(status='failed',error_class='author_source_version_mismatch',stage='source_verification',
+                claimed_source_commit=q['source_commit'],claimed_source_repository=q['source_repository'],
+                claimed_source_task_path=q['source_task_path'],source_git_tree_verified=False,
+                error=sanitize(str(e),secrets)[:600],cloud_execution_started=False)
  except NetworkPreflightError as e:
   from selftest_logs import sanitize
   status.update(status='failed',error_class='task_acs_network_incompatible',stage='network_preflight',

@@ -21,12 +21,18 @@ print([(e.name, e.value) for e in d.entry_points if e.group == "pytest11"])
 
 若 pip 报某个传递依赖 `from versions: none`，保留最早报错、包名和目标 Python/平台。这个终行不足以证明整个 PyPI 不通，也不证明包不存在。为离线镜像准备 wheelhouse 时应包含完整传递依赖，并在匹配目标 Python/ABI 的干净环境下安装验证；只放 pytest 和 CTRF 两个 wheel 仍可能缺 pluggy、packaging 等依赖。不要把本地装好插件当作容器已装好。
 
+固定版本 NumPy 等包还要核对目标 Python 版本是否受支持，以及 wheel 的 ABI/架构。只修复实际依赖，不因安装报错改变科学题意或 JSON/CSV 输出契约；`json` 是 Python 标准库，不是需要 pip 安装或删除的第三方依赖。
+
 ## 提交内容与版本
 
 当前客户端打包 `--task` 指向的实际目录，平台按 `--commit` 的 Git 树逐文件/执行位验证。运行时生成的 `__pycache__`、未提交输出、被 `.gitignore` 忽略的证据文件仍可能进入上传，从而被拒绝。自测日志和临时环境放在题包外；提交必要的源码、数据和版本证明，避免把缓存塞进镜像。
 
 提交前只检查当前 task 路径的 tracked 修改、未跟踪与 ignored 文件，并比较执行位；不要全仓库反复 checkout/reset。若使用干净 staging，客户端已支持 `--source-repository /workspace/<repo> --source-task-path tasks/<path>` 绑定源仓库；staging 仍须对应完整 commit，不能手改原快照或用别的题目登记代替。
 
+`--commit` 仅声明待校验版本，不会替换实际上传的文件。需检查历史版本时按 [版本交接](version-handoff.md) 仅导出该 task，避免整个仓库的 archive、checkout 或遍历历史。
+
 ## 先验证结果，再判断失败
 
 负对照故意失败时，把该分支的退出码与预期对照一起记录；不要将 `pytest` 的预期非零当成平台故障。正对照必须实际通过，必须有新的 reward/报告文件，不能读取上次残留。初始化解释器或安装插件失败后立即停止当前演练，不继续运行后面的命令用最终 exit 0 掩盖错误。命令管道被 `head` 提前关闭产生 141，也应与任务程序报错分开。
+
+负对照没有 solver 输出是需要显式处理的预期情形：创建 verifier 日志目录，清除旧结果，明确写本次 reward=0 和缺输出诊断。不要让 `set -e` 在产生诊断前因文件不存在退出。初始化或依赖异常仍应暴露为异常，不能一律写 0 掩盖环境故障。参考解必须使用 Harbor 实际挂载的 solution 路径；不能凭本地目录布局假设 `/app/solution/solve.py` 存在。

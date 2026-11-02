@@ -9,12 +9,14 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 
 遇到本地演练的 `/app`、`/tests` 或 `/opt` 路径问题、pytest/CTRF 插件、上传内容与 commit 不一致时，读 [本地演练与题包预检](references/package-preflight.md)。这些问题需要区分角色环境和实际题目镜像，不应通过反复换 Dockerfile 猜测。
 
+同一题已有完成的审核、当前 PR 却仍在等待时，先读 [已审核版本与当前 PR 的交接](references/version-handoff.md)。旧版本结论、当前版本资格、最终合并是三个状态，不能互相替代。
+
 ## 先确定是哪一段失败
 
 | 证据/状态 | 谁处理，下一步 |
 | --- | --- |
 | 缺 `instruction.md`、`task.toml`、`environment/Dockerfile`、`tests/test.sh` 或 `solution/solve.sh`，schema/路径/执行权限错误 | 作者补齐已准备试跑的题包，检查 shell 语法、输入输出和引用文件后提交新版本。尚在研究的提案不要求已有完整题包。 |
-| `source_git_tree_verified` 未通过、上传与 commit 不同 | 作者确认完整 commit、仓库相对路径、文件内容和执行位一致。不要拿另一个 task 的登记绕过。 |
+| `author_source_version_mismatch`、`source_git_tree_verified` 未通过、上传与 commit 不同 | 作者确认完整 commit、仓库相对路径、文件内容和执行位一致。`--commit` 不会自动切换 `--task` 的文件；旧版 worker 未先验源时的网络诊断不能证明该 commit 本身有问题。不要拿另一个 task 的登记绕过。 |
 | `waiting_builder`、`building`、`running_oracle`、`running_nop` | 当前 job 正常等待或运行。保留 job ID，按状态变化检查；不要反复 submit、重建相同快照或清空状态。等待不证明死循环。 |
 | Docker 构建日志中的包缺失、编译失败、无效 Dockerfile | 作者看最早失败步骤，修复该依赖或构建上下文，先做小规模验证再提交。不能只看最后一条命令的退出码。 |
 | `Require fresh workspace runtime context`，或平台拒绝自己的输出路径 | 平台存储路径/构建器问题。附 job、commit、具体错误，记录一次 `waiting_platform`；作者不应靠重命名题目或同版本重试规避。 |
@@ -27,6 +29,7 @@ description: Diagnose a blocked Harbor task build, self-test, review handoff, or
 | OOMKilled 或明确资源耗尽 | 由平台核实后从 4c/8Gi 升到最多 8c/16Gi；一般计算慢或错误答案不构成扩容证据。磁盘不足单独检查镜像/解包与临时存储，不能用加CPU冒充修复。 |
 | `selftest_passed` 但 `review_handoff` 是 `waiting_author` | 按 stage/reason 补真实作者自解、结果驱动修改及新 commit 复跑；首次自测不证明已完成迭代。 |
 | `selftest_passed` 但 `review_handoff` 是 `waiting_platform` | 保留通过的原 job，提交登记/证据缺项一次，等待平台修复。不要为补交接重复跑相同自测。 |
+| 迭代计时的历史观测缺失或开始时间冲突 | 平台核对原始 observation、暂停区间和历史记录。作者保留现有 idea 和通过的 job；无需修改题目、全盘搜索平台源码、反复自测或重置五小时预算。 |
 | 五次 reward 已有但缺 trajectory/imageID/资源回显 | 是证据未闭环，先请求补收集/登记现存文件。配置请求不等于实际Pod回显，历史已删除Pod的信息不能编造。 |
 
 ## 等待与交接

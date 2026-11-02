@@ -197,5 +197,35 @@ class BackupTests(unittest.TestCase):
         self.assertTrue({task+'task.toml',task+'tests/test.sh',task+'solution/solve.sh'}.issubset(paths))
         self.assertNotIn(task+'auth.json',paths)
         self.assertFalse(any('/escape/' in p for p in paths));self.assertFalse(warnings)
+    def test_unchanged_source_freshness_is_separate_from_old_modification_time(self):
+        self.put('control.json','{}')
+        b.cycle(self.src,self.dst)
+        first=json.loads((self.dst/'manifest.json').read_text())['files']['control.json']
+        row=b.cycle(self.src,self.dst)
+        second=json.loads((self.dst/'manifest.json').read_text())['files']['control.json']
+        self.assertEqual(row['unchanged'],1)
+        self.assertEqual(first['source'],second['source'])
+        self.assertGreaterEqual(second['source_checked_at'],row['started_at'])
+        self.assertGreater(second['source_checked_at'],first['source_checked_at'])
+    def test_carried_git_warning_is_separate_from_new_cycle_errors(self):
+        self.put('repo/.git/objects/old');self.put('work.txt')
+        original=b.copy_file;calls=[]
+        def bounded(*args):
+            calls.append(args[0])
+            if len(calls)==1:raise FileNotFoundError()
+            raise b.BudgetExpired()
+        with patch.object(b,'copy_file',side_effect=bounded):first=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(first['warning_summary']['new_bulk']['count'],1)
+        row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'partial')
+        self.assertEqual(row['warning_summary']['carried_from_inventory']['count'],1)
+        self.assertEqual(row['warning_summary']['new_bulk']['count'],0)
+        kinds=b.warning_counts([
+            {'path':'repo/.git/objects/old','kind':'FileNotFoundError'},
+            {'path':'repos/repo.git/objects/graph','kind':'FileNotFoundError'},
+            {'path':'author/run/current-tool','kind':'FileNotFoundError'},
+            {'path':'task.py','kind':'PermissionError'}])
+        self.assertEqual(kinds['by_category'],{'git_entry_disappeared':2,
+            'transient_tool_marker_disappeared':1,'copy_or_inventory_error':1})
 
 if __name__=='__main__':unittest.main()

@@ -25,8 +25,11 @@ Create a receipt before handing off: PR commit or task archive hash, task
 snapshot hash, image digest (never a mutable tag), harness/runtime version,
 self-test result, ACS cluster/placement policy, resource request, and artifact
 locations. Evaluators may accept only the exact registered version. A changed
-commit, Dockerfile, verifier, or image requires a new receipt and invalidates
-the old result.
+commit, Dockerfile, verifier, or image requires a new receipt. The old result
+remains evidence for its original frozen version and does not transfer to the
+new version. For an already reviewed task with a different current PR, read
+`/review-feedback.json` and the version handoff reference in
+`/skills/acs-task-troubleshooting/references/version-handoff.md` before more tests.
 
 ## ACS execution
 

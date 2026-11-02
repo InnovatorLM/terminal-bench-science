@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -31,6 +32,37 @@ class NetworkPreflightTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
         return root
+
+    def queued_upload(self, root, text, mutate=None):
+        template = root / '.config/harbor-api/template.json'
+        template.parent.mkdir(parents=True)
+        template.write_text(json.dumps({'environment': {'type': 'ack'}}))
+        role = root / 'role'
+        repo = role / 'workspace/repo'
+        source = self.fixture(repo / 'tasks/example', text)
+        (source / 'tests/test.sh').chmod(0o755)
+        for args in [['init', '-q'], ['config', 'user.email', 'test@localhost'],
+                     ['config', 'user.name', 'test'], ['add', '.'], ['commit', '-qm', 'fixture']]:
+            subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True)
+        commit = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+        if mutate:
+            mutate(source)
+        inbox = role / 'selftest/inbox'
+        inbox.mkdir(parents=True)
+        (role / 'selftest/results').mkdir()
+        job = 'a' * 32
+        archive = inbox / (job + '.tar')
+        with tarfile.open(archive, 'w') as bundle:
+            for path in source.rglob('*'):
+                bundle.add(path, arcname=str(path.relative_to(source)), recursive=False)
+        request = inbox / (job + '.json')
+        request.write_text(json.dumps({'job_id': job, 'task_name': 'example', 'source_commit': commit,
+                                      'source_repository': 'repo', 'source_task_path': 'tasks/example',
+                                      'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}))
+        entry = {'root': str(role), 'uid': os.getuid(), 'gid': os.getgid()}
+        state = root / 'state'
+        state.mkdir()
+        return source, role, job, request, entry, state, commit
 
     def test_public_default_shared_passes_without_adapter_initialization(self):
         task = self.task()
@@ -112,26 +144,9 @@ class NetworkPreflightTests(unittest.TestCase):
     def test_real_upload_worker_rejects_before_builder_and_preserves_source(self):
         with tempfile.TemporaryDirectory(dir=W / '.tmp') as raw:
             root = Path(raw)
-            template = root / '.config/harbor-api/template.json'
-            template.parent.mkdir(parents=True)
-            template.write_text(json.dumps({'environment': {'type': 'ack'}}))
-            source = self.fixture(root / 'candidate', '[verifier]\nnetwork_mode="no-network"\n')
+            source, role, job, request, entry, state, commit = self.queued_upload(
+                root, '[verifier]\nnetwork_mode="no-network"\n')
             source_hash = digest_tree(source)
-            role = root / 'role'
-            inbox = role / 'selftest/inbox'
-            inbox.mkdir(parents=True)
-            (role / 'selftest/results').mkdir()
-            job = 'a' * 32
-            archive = inbox / (job + '.tar')
-            with tarfile.open(archive, 'w') as bundle:
-                for path in source.rglob('*'):
-                    bundle.add(path, arcname=str(path.relative_to(source)), recursive=False)
-            request = inbox / (job + '.json')
-            request.write_text(json.dumps({'job_id': job, 'task_name': 'example', 'source_commit': 'b' * 40,
-                                           'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}))
-            entry = {'root': str(role), 'uid': os.getuid(), 'gid': os.getgid()}
-            state = root / 'state'
-            state.mkdir()
             with patch.object(worker, 'W', root), patch.object(worker, 'STATE', state), \
                     patch.object(worker, 'credential_values', return_value=[]), \
                     patch.object(worker, 'builder_slot') as builder, patch.object(worker, 'owned_run') as runner:
@@ -142,11 +157,46 @@ class NetworkPreflightTests(unittest.TestCase):
             self.assertEqual(receipt['status'], 'failed')
             self.assertEqual(receipt['error_class'], 'task_acs_network_incompatible')
             self.assertEqual(receipt['stage'], 'network_preflight')
+            self.assertTrue(receipt['source_git_tree_verified'])
+            self.assertEqual(receipt['source_commit'], commit)
             self.assertFalse(receipt['cloud_execution_started'])
             self.assertFalse(receipt['network_preflight']['compatible'])
             self.assertTrue((state / job / 'network-preflight.json').is_file())
             self.assertEqual(digest_tree(state / job / 'source/example'), source_hash)
             self.assertEqual(digest_tree(source), source_hash)
+
+    def test_upload_version_mismatch_never_reaches_task_network_build_or_cloud(self):
+        mutations = {
+            'content': lambda source: (source / 'task.toml').write_text('[verifier]\nnetwork_mode="no-network"\n'),
+            'executable_mode': lambda source: (source / 'tests/test.sh').chmod(0o644),
+        }
+        for kind, mutate in mutations.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=W / '.tmp') as raw:
+                root = Path(raw)
+                source, role, job, request, entry, state, commit = self.queued_upload(root, '', mutate)
+                source_hash = digest_tree(source)
+                with patch.object(worker, 'W', root), patch.object(worker, 'STATE', state), \
+                        patch.object(worker, 'credential_values', return_value=[]), \
+                        patch.object(worker, 'inspect_task', side_effect=AssertionError('Unverified source inspected')) as inspect, \
+                        patch.object(worker, 'builder_slot') as builder, patch.object(worker, 'owned_run') as runner:
+                    worker.process('author-01', entry, request)
+                inspect.assert_not_called()
+                builder.assert_not_called()
+                runner.assert_not_called()
+                receipt = json.loads((role / 'selftest/results' / (job + '.json')).read_text())
+                self.assertEqual(receipt['status'], 'failed')
+                self.assertEqual(receipt['error_class'], 'author_source_version_mismatch')
+                self.assertEqual(receipt['stage'], 'source_verification')
+                self.assertEqual(receipt['claimed_source_commit'], commit)
+                self.assertEqual(receipt['claimed_source_repository'], 'repo')
+                self.assertEqual(receipt['claimed_source_task_path'], 'tasks/example')
+                self.assertFalse(receipt['source_git_tree_verified'])
+                self.assertFalse(receipt['cloud_execution_started'])
+                self.assertNotIn('source_commit', receipt)
+                self.assertNotIn('network_preflight', receipt)
+                self.assertFalse((state / job / 'network-preflight.json').exists())
+                self.assertEqual(digest_tree(state / job / 'source/example'), source_hash)
+                self.assertEqual(digest_tree(source), source_hash)
 
 
 if __name__ == '__main__':

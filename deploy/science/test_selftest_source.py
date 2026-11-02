@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from evaluation_queue import W
-from selftest_source import verify_source
+from selftest_source import verify_source, SourceMismatchError
 
 class SourceTests(unittest.TestCase):
     def test_upload_must_match_actual_commit(self):
@@ -26,15 +26,15 @@ class SourceTests(unittest.TestCase):
                 return verify_source(workspace, 'repo', 'tasks/example', commit, upload)
             self.assertTrue(verify()['source_git_tree_verified'])
             (upload / 'input.txt').write_text('changed')
-            with self.assertRaises(ValueError):
+            with self.assertRaises(SourceMismatchError):
                 verify()
             (upload / 'input.txt').write_text('original')
             (upload / 'solve.sh').chmod(0o644)
-            with self.assertRaises(ValueError):
+            with self.assertRaises(SourceMismatchError):
                 verify()
             (upload / 'solve.sh').chmod(0o755)
             (upload / 'unexpected').write_text('extra')
-            with self.assertRaises(ValueError):
+            with self.assertRaises(SourceMismatchError):
                 verify()
 
     def test_repository_escape_refused(self):

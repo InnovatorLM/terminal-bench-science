@@ -5,7 +5,7 @@ snapshot. Credentials, installed root filesystems and rebuildable caches are
 excluded. A bounded cycle resumes its pending inventory on the next invocation.
 """
 import argparse
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import fcntl
@@ -390,6 +390,23 @@ def priority_inventory(source, includes, progress, deadline):
     return items, warnings, not fast and not work
 
 
+def warning_counts(warnings):
+    """Classify without discarding the original path/type evidence."""
+    kinds = Counter(); categories = Counter()
+    for warning in warnings:
+        rel = Path(warning['path']); kind = warning['kind']; kinds[kind] += 1
+        git = '.git' in rel.parts or any(part.endswith('.git') for part in rel.parts)
+        if kind in {'FileNotFoundError', 'source_disappeared'} and git:
+            category = 'git_entry_disappeared'
+        elif kind in {'FileNotFoundError', 'source_disappeared'} and rel.name == 'current-tool':
+            category = 'transient_tool_marker_disappeared'
+        elif kind in {'FileNotFoundError', 'source_disappeared'}:
+            category = 'source_file_disappeared'
+        else:category = 'copy_or_inventory_error'
+        categories[category] += 1
+    return {'count':len(warnings), 'by_kind':dict(kinds), 'by_category':dict(categories)}
+
+
 def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, recovery=False):
     source = Path(source).resolve(strict=True);target=Path(target)
     if workers < 1 or workers > 64:raise ValueError('Backup workers must be between 1 and 64')
@@ -429,6 +446,7 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                 progress=dict(identity=identity,inventory_at=started,pending=items,warnings=warnings,inventory_count=len(items),inventory_paths=[item['path'] for item in items])
                 atomic(progress_path,progress)
             remaining=progress['pending'];row['warnings']=list(progress.get('warnings',[]))
+            row['carried_warning_count']=len(row['warnings']) if resuming else 0
             completed=0;checkpoint=time.monotonic();reported=checkpoint;checked_parents=set()
             def process(item, copy_deadline=deadline):
                 if time.monotonic()>copy_deadline:raise BudgetExpired()
@@ -469,6 +487,8 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                             else:
                                 manifest['files'][rel]=record
                                 row['priority_copied']+=1;row['copied']+=1
+                            if not warning:
+                                manifest['files'][rel]['source_checked_at']=time.time()
                             hot_completed+=1
                             now=time.monotonic()
                             if now-checkpoint>=60:
@@ -507,6 +527,7 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                         if warning:row['warnings'].append(warning)
                         elif record is None:row['unchanged']+=1
                         else:manifest['files'][rel]=record;row['copied']+=1
+                        if not warning:manifest['files'][rel]['source_checked_at']=time.time()
                         completed+=1
                         now=time.monotonic()
                         if completed%5000==0 or now-checkpoint>=60:
@@ -544,6 +565,11 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                    inventory_count=progress.get('inventory_count',0),last_success_at=manifest.get('last_success_at'),
                    verified_files=len(manifest['files']),
                    last_complete_inventory_at=manifest.get('last_complete_inventory_at'))
+        row['warning_summary'] = {
+            'carried_from_inventory':warning_counts(row['warnings'][:row.get('carried_warning_count', 0)]),
+            'new_bulk':warning_counts(row['warnings'][row.get('carried_warning_count', 0):]),
+            'this_cycle_priority':warning_counts(row.get('priority_warnings', [])),
+        }
         atomic(latest,row)
         logs=[target/'cycles.jsonl']
         # Historical /tmp sources are read-only recovery inputs. New runtime
@@ -607,7 +633,8 @@ def main():
     signal.signal(signal.SIGTERM,stop)
     while True:
         result=cycle(args.source,args.target,args.budget,args.include,args.receipt,args.workers,args.recovery_import)
-        print(json.dumps({k:result.get(k) for k in ('status','copied','unchanged','remaining_files','last_success_at')}),flush=True)
+        print(json.dumps({k:result.get(k) for k in ('status','reason','error_type','copied','unchanged',
+            'priority_copied','priority_remaining_files','remaining_files','last_success_at','warning_summary')}),flush=True)
         if args.once:return 0 if result['status'] in ('ok','already_running') else 2
         time.sleep(args.interval)
 

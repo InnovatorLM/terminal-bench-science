@@ -17,7 +17,7 @@ class AuthorEvidenceRequired(ValueError):
 def qualify(work, state, observation, template):
     from selftest_registration import prepare
     from selftest_iteration import validate
-    from selftest_budget import verify
+    from selftest_budget import verify,read_observation,BudgetEvidenceRequired
     status=json.loads(read_operator_file(work/'status.json'))
     request=json.loads(read_operator_file(work/'request.json'))
     idea=status.get('idea_id');role=status.get('role')
@@ -45,10 +45,13 @@ def qualify(work, state, observation, template):
     mechanical=work/'mechanical.json'
     validate_mechanical_check(mechanical,Path(bridge['snapshot']),hashlib.sha256(read_operator_file(mechanical)).hexdigest())
     clock=work/'handoff-clock.json'
-    atomic_json(clock,json.loads(read_operator_file(observation)))
+    atomic_json(clock,read_observation(observation,role,idea))
     budget=verify(state,role,idea,clock,time.time())
     if not budget['within_budget']:
-        raise ValueError('Conservative active-time bound needs additional pause evidence')
+        raise BudgetEvidenceRequired('iteration_pause_evidence_required',
+            'The conservative five-hour bound is exceeded. Platform must establish independently verified excluded intervals or confirm the actual budget outcome; this does not prove five hours of author work.',
+            role=role,idea_id=idea,active_iteration_seconds_upper_bound=budget['active_iteration_seconds_upper_bound'],
+            recorded_idea_started_at=budget['recorded_idea_started_at'],total_excluded_seconds=budget['total_excluded_seconds'])
     # The author-owned solution is part of the verified frozen Git tree and was
     # executed by the passing oracle control. Bind its actual bytes explicitly;
     # this proves execution, not scientific quality or independent model solving.
@@ -173,6 +176,7 @@ def reconcile(work, state, entry, universe):
                         reason=status['remediation'],scientific_acceptance=False)
         else:result=handoff(work,Path(state),entry,universe)
     except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        from selftest_budget import BudgetEvidenceRequired
         progress=work/'handoff-progress.json'
         stage=json.loads(read_operator_file(progress)).get('stage','verify_iteration_and_budget') if progress.exists() else 'verify_iteration_and_budget'
         guidance={'validate_selftest':'Complete and repair the source-bound container selftest before requesting review.',
@@ -183,6 +187,7 @@ def reconcile(work, state, entry, universe):
         status=json.loads(read_operator_file(work/'status.json'))
         result=dict(state='waiting_author' if isinstance(error,AuthorEvidenceRequired) or status.get('status') in ('selftest_failed','failed') else 'waiting_platform',
                     stage=stage,reason=guidance[stage],error_type=type(error).__name__,scientific_acceptance=False)
+        if isinstance(error,BudgetEvidenceRequired):result=error.handoff()
     atomic_json(output,result)
     status=json.loads(read_operator_file(work/'status.json'));status['review_handoff']=result
     destination=Path(entry['root'])/'selftest/results'/(status['job_id']+'.json')

@@ -27,6 +27,54 @@ class FakeApi:
         return issue
 
 class DispatchTests(unittest.TestCase):
+    @patch('author_submission_gate.approved', return_value=False)
+    def test_current_pr_keeps_completed_history_without_restarting_review(self, approved):
+        import tempfile,json,os
+        from pathlib import Path
+        import review_dispatcher as m
+        with tempfile.TemporaryDirectory(dir=m.W/'.tmp') as raw:
+            root=Path(raw);cfg={'roles':{}}
+            for role in ['evaluator-01','author-10','curator']:
+                (root/role/'home/role').mkdir(parents=True)
+                cfg['roles'][role]={'root':str(root/role),'uid':os.getuid(),'gid':os.getgid()}
+            old='a'*40;new='b'*40;task='tasks/science/example';key=old+':'+task
+            row=dict(key=key,role='evaluator-01',author_role='author-10',commit=old,
+                     task=task,generation=5,state='completed',stage='final_review',
+                     evaluation_id='old-execution',snapshot_sha256='c'*64,
+                     reason='Completed review, historical Pod observations unavailable',scientific_acceptance=False)
+            ledger={key:row};api=FakeApi()
+            api.pulls[0].update(head={'sha':new},user={'login':'gewu-author-10'})
+            with patch.object(m,'STATE',root):
+                m.reconcile(api,cfg,ledger)
+                current=json.loads((root/'author-10/review-feedback.json').read_text())
+                self.assertEqual(current['commit'],new)
+                self.assertEqual(current['stage'],'version_reconciliation')
+                self.assertEqual(current['prior_reviews'][0]['commit'],old)
+                self.assertFalse(current['author_must_pause'])
+                self.assertFalse(current['prior_reviews'][0]['scientific_acceptance'])
+                before=(root/'author-10/review-feedback.json').read_bytes()
+                m.sync_direct_assignments(cfg,ledger)
+                self.assertEqual((root/'author-10/review-feedback.json').read_bytes(),before)
+                m.reconcile(api,cfg,ledger)
+                handoffs=json.loads((root/'curator/review-version-handoffs.json').read_text())
+                self.assertEqual(handoffs['handoffs']['30:'+new]['decision_owner'],'curator')
+                self.assertEqual(handoffs['handoffs']['30:'+new]['owner'],'author-10')
+                self.assertEqual(list(ledger),[key])
+                self.assertEqual(row['state'],'completed')
+                self.assertEqual(api.issues,[])
+                # A closed PR no longer creates reconciliation work.
+                api.pulls=[];m.reconcile(api,cfg,ledger)
+                self.assertEqual(json.loads((root/'curator/review-version-handoffs.json').read_text())['handoffs'],{})
+
+    def test_prior_reviews_do_not_cross_author_or_task_boundaries(self):
+        import review_dispatcher as m
+        base=dict(state='completed',commit='old',task='tasks/one',author_role='author-10')
+        ledger={'valid':base,'other-author':dict(base,author_role='author-01'),
+                'other-task':dict(base,task='tasks/two'),'same-commit':dict(base,commit='new'),
+                'in-progress':dict(base,state='reviewing')}
+        self.assertEqual([v['key'] for v in m.completed_versions(ledger,'author-10','tasks/one','new')],['valid'])
+        self.assertEqual(m.completed_versions(ledger,None,'tasks/one','new'),[])
+
     def test_old_generation_cannot_overwrite_current_author_pause(self):
         import tempfile,json,os
         from pathlib import Path

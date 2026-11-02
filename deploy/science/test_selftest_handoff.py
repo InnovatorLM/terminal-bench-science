@@ -53,7 +53,8 @@ class HandoffTests(unittest.TestCase):
     def test_missing_observation_or_wrong_idea_never_qualifies(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             state,work,obs,template,status=self.fixture(Path(raw))
-            with self.assertRaises(FileNotFoundError):qualify(work,state,Path(raw)/'missing',template)
+            from selftest_budget import BudgetEvidenceRequired
+            with self.assertRaises(BudgetEvidenceRequired):qualify(work,state,Path(raw)/'missing',template)
             status['idea_id']='another';(work/'status.json').write_text(json.dumps(status))
             with self.assertRaisesRegex(ValueError,'idea-bound'):qualify(work,state,obs,template)
 
@@ -116,6 +117,23 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(result['status'],'failed')
             self.assertEqual(result['review_handoff']['state'],'waiting_platform')
             self.assertFalse(result['retry_requires_task_change'])
+
+    def test_clock_history_gap_is_actionable_platform_work_not_an_author_rerun(self):
+        from selftest_budget import BudgetEvidenceRequired
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,work,obs,template,status=self.fixture(root)
+            role=root/'role';(role/'selftest/results').mkdir(parents=True)
+            original=(work/'status.json').read_bytes()
+            error=BudgetEvidenceRequired('iteration_observation_history_gap',
+                'Recover authentic clock history.',first_observed_at=80,earliest_selftest_received_at=20)
+            with patch('selftest_handoff.handoff',side_effect=error):
+                reconcile(work,state,dict(root=str(role),gid=0),root/'universe')
+            result=json.loads((role/'selftest/results'/(work.name+'.json')).read_text())['review_handoff']
+            self.assertEqual(result['state'],'waiting_platform')
+            self.assertEqual(result['reason'],'Recover authentic clock history.')
+            self.assertEqual(result['evidence_gap']['earliest_selftest_received_at'],20)
+            self.assertFalse(result['retry_requires_task_change']);self.assertFalse(result['selftest_rerun_required'])
+            self.assertEqual((work/'status.json').read_bytes(),original)
 
     def test_incomplete_root_status_does_not_overwrite_interruption_receipt(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

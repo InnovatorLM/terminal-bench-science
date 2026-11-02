@@ -11,3 +11,5 @@ description: Coordinate version-bound author self-tests and exclusive evaluator 
 review_dispatcher 为准确 task/commit/snapshot 独占派单。没有本次版本登记时集中报告 waiting_platform，不让多个 evaluator 猜旧 ID 重跑；已有派单不重复分发。作者收到当前版本进入审核的反馈后暂停出题并等待，审核返回修复要求或完成后再推进。没有新事件时结束会话等待，不重复检查、发表评论或要求作者反复安装 Docker。
 
 平台缺陷用 job ID、具体阶段和一次错误证据汇总；作者缺陷交给原作者。缺旧轨迹/登记时优先补收集已有证据，不为填表重复运行。完整五次评测与质量判断由获派 evaluator 完成，不能由 curator 替代。
+
+读取 `/review-version-handoffs.json` 中的版本交接队列，并按 `/skills/acs-task-troubleshooting/references/version-handoff.md` 处理。已有完成审核但当前 PR 不同的题目，由原作者提供该 task 的有限差异和版本选择，由 curator 协调交接；不能让作者不断重跑历史版本或把旧分数套到当前 HEAD。没有完整历史计时证据时保留 `waiting_platform`，不要求作者改题或刷新 idea 计时。

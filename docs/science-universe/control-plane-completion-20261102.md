@@ -4,7 +4,7 @@
 
 | 项目 | 当前结论 | 权威证据与边界 |
 | --- | --- | --- |
-| 1. 备份失败／新日志被旧库存挡住 | 实时优先队列和恢复抽查通过；全量备份仍未完成 | 55.11 GB 独立历史归档已抽样恢复。10 作者最新轨迹摘要/源前缀逐一通过；抽查 author-02/03/04 工作文件，实际恢复并复核 13 个文件。bulk pending 从 64,910 降到 56,577，已验证 27,867 项；last_success 仍为空，作者后续修改等待下一周期。`W/.state/backups/live/recovery/live-priority-audit.json`。 |
+| 1. 备份失败／新日志被旧库存挡住 | 连续周期和恢复抽查通过；全量备份仍未完成 | 55.11 GB 独立历史归档已抽样恢复。追加审计验证 3 个自动周期、10 作者最新轨迹摘要/源前缀 10/10、实际恢复 23 文件；追加周期后 bulk pending=42,895、verified=41,771。逐文件增加 source_checked_at，历史库存告警与新 priority/bulk 告警分开。新增 24 个 priority 告警中 22 个是 author-02 在扫描与读取间删除的原型文件，不能称为轨迹丢失，也不能保证短于备份周期的文件都被备份。last_success 仍为空。`W/.state/backups/live/recovery/continuous-priority-audit-20261102.json`。 |
 | 2. runtime 构建路径冲突／完整自测 | 构建冲突及 verifier 时间覆盖已修复，真实对照通过 | 原 worker 冻结、三种镜像发布、oracle=1 已通过；同 snapshot/digest 的 nop 精准复跑 reward=0、无异常、Harbor exit=0，六个测试真实执行后因缺解答产物失败。实际 4c/8Gi、北京 i，清理确认。旧失败回执保留；修复模板把 900 秒预算缩成 600 秒及取消后日志丢失。见 [自测恢复报告](selftest-recovery-audit-20261102.md)。 |
 | 3. 审核开始停止作者、反馈后恢复 | 软件执行链已验证 | 生产 Engine/RealSpawner 的真实本地子进程测试覆盖 running/starting 边界、key/generation/commit 匹配、旧反馈拒绝、暂停中不重启、反馈后恢复。未伪造生产派单，见 [生命周期验收](author-lifecycle-acceptance-20261102.md)。 |
 | 4. 首次审核回执夸大迭代证明 | 已取消绕过并验证 | v3 要求真实前次执行、实际版本修改、作者 solution、复跑和预算证据；缺项不能写 true。历史 iod-enso 的 schema-2 不伪造升级，也不因此翻转已经完成的 3/5 评审。详细历史审计在 `W/.state/deployment-recovery-20261102/iod-enso-legacy-handoff-audit.md`。 |
@@ -20,6 +20,21 @@
 | 14. 新送审请求缺消费者 | 已接通并集成测试 | `selftest_review_dispatch.consume` 核验冻结版本与资格，持久独占派单；重复轮询及交付中断可恢复。没有新合格请求时不启动 evaluator 空转。 |
 | 15. PR 分页遗漏 | 已修复并回归验证 | 结束条件使用实际页长；12 条跨三页检查通过。 |
 | 16. iod-enso 已审核版本与当前 PR 不一致 | 解析缺陷已修复；作者已恢复版本比较，交接尚未完成 | 5ead0fe4 的独占审核已 completed、3/5、建议接收；PR #42 HEAD 898743be 的题目说明、task.toml 和 Dockerfile 有变化，尚未合并，不能套用旧评审。基础镜像解析改为请求仓库、本次 pull digest 与 inspect 交叉核验，原始日志重放通过；失败明确归平台、不要求改题。author-10 单角色 reset 已获 controller ACK，旧进程全部退出，文件/轨迹保留；新会话 run-1793601214920-0061 已实际读取回执并比较 task 路径，没有为此次修复重跑旧评测。`W/.state/deployment-recovery-20261102/author10-version-reconciliation-reset.json`。 |
+
+## 后续轨迹发现与修复
+
+06:43 的版本比较没有完成交接。author-10 随后把当前目录上传内容声明成历史 commit，两个 job `8d11e2a99a45449a9a9974929b1d480f`、`20fe4df14b374976801a8db60fdb5140` 被旧 worker 先做网络检查，错误地把当前版本的 `no-network` 问题归到历史版本。直接解析 bare Git 与冻结快照确认：已审核 5ead0fe4 的 verifier 是 public，当前 898743be 才是 no-network。
+
+- worker 改为先校验 Git 字节及执行位，再做题包/网络预检；不匹配明确报 `author_source_version_mismatch`，不启动云执行。历史错误回执保留，新增事实说明纠正其归因。
+- dispatcher 保留已完成旧版本结论，给当前 PR 发布 `version_reconciliation` 与 `prior_reviews`，避免旧直接派单覆盖当前反馈；curator 收到同一条版本交接队列。仅重启受监督的 dispatcher 子进程，已实际产生 PR #42 对应队列。
+- author-10 已经 controller ACK 暂停，再带确定的两个版本、有限 task diff 和修订 skill 恢复。解除暂停回执为 `W/.state/deployment-recovery-20261102/author10-reconciliation-release.json`；文件、分支、轨迹、原 idea 时钟均保留。新会话是否完成交接仍需行为观察，不能把恢复当成正式接收。
+- author-03 的通过 job `95589e219dff43e6badf567d293ea25a` 存在原始起点冲突；author-07 的 `89e10ff281544ca598974a9275a83baa` 缺迁移前 observation。新增结构化 `waiting_platform`，明确不需改题、重跑或全盘搜平台源码，已更新两个作者的结果反馈。真实时钟和执行记录未修改，历史前缀冲突不能拼接或回填。
+- 增加只生成方案的历史 observation 恢复预检及事件变化时历史存档；目前没有应用恢复方案，运行中 watchdog 的新存档逻辑尚待下一次加载。
+- 14 个角色收到版本交接、局部 Git 导出、实际 solver 路径、负对照 reward、Python ABI 与 wheelhouse 排障说明。技能文件摘要已验证；capability 的原执行探测时间保留，没有把纯技能更新称为重新运行软件探测。
+
+以上组合回归 85 项通过（171.302 秒），均为本地测试，没有为本次诊断新跑模型或 ACS。宇宙仍运行，evaluator 等待新合格任务，版本交接和历史预算缺口仍属未完成事项。
+
+07:20 UTC 行为观察：author-10 新会话 `run-1793603700351-0064` 已写具体版本选择说明，比较 task 范围，并提交 5c9277c8 的新自测 `73c220ec47444a2ab5e4e3f5e9c93815`。该次已通过源版本校验及网络预检，处于 waiting_builder；这是作者发起的新版自测，不是重跑旧五次模型评测。尚未证明 curator 完成交接决策或当前 PR 已进入审核。10 个作者和 curator 均有运行会话；3 个 evaluator 等待任务。
 
 没有为了验收而重置生产作者，也没有将离线模型脚本称为真实 LLM 行为验证。生命周期软件协议的真实进程验收已完成；自然发生的模型行为继续由轨迹和观察者监控。
 

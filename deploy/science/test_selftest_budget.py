@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from evaluation_queue import W
-from selftest_budget import verify,merge
+from selftest_budget import verify,merge,BudgetEvidenceRequired
 
 
 class BudgetTests(unittest.TestCase):
@@ -76,6 +76,23 @@ class BudgetTests(unittest.TestCase):
     def test_interval_boundaries_and_nonfinite_values(self):
         self.assertEqual(merge([(-1,20),(15,30),(40,200)],0,100),[[0,30],[40,100]])
         with self.assertRaises(ValueError):merge([(0,float('nan'))],0,100)
+
+    def test_observer_migration_gap_names_the_earliest_job_without_resetting_time(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,obs=self.fixture(root)
+            value=json.loads(obs.read_text());value['ideas']['idea']['first_observed_at']=80;obs.write_text(json.dumps(value))
+            with self.assertRaises(BudgetEvidenceRequired) as caught:verify(state,'author-01','idea',obs,100)
+            result=caught.exception.handoff()
+            self.assertEqual(result['error_class'],'iteration_observation_history_gap')
+            self.assertEqual(result['evidence_gap']['earliest_selftest_received_at'],20)
+            self.assertEqual(result['evidence_gap']['recorded_idea_started_at'],0)
+            self.assertFalse(result['retry_requires_task_change']);self.assertFalse(result['selftest_rerun_required'])
+            value['ideas']['idea']['events'][0]['at']=70;obs.write_text(json.dumps(value))
+            with self.assertRaises(BudgetEvidenceRequired) as caught:verify(state,'author-01','idea',obs,100)
+            self.assertEqual(caught.exception.code,'iteration_original_start_conflict')
+            obs.unlink()
+            with self.assertRaises(BudgetEvidenceRequired) as caught:verify(state,'author-01','idea',obs,100)
+            self.assertEqual(caught.exception.code,'iteration_observation_missing')
 
 
 if __name__=='__main__':unittest.main()

@@ -6,6 +6,9 @@ import subprocess
 import tempfile
 import os
 
+class SourceMismatchError(ValueError):
+    """Uploaded files or executable modes do not match the claimed Git tree."""
+
 def verify_source(workspace, repository, task_path, commit, uploaded):
     workspace = Path(workspace).resolve(strict=True)
     relative = PurePosixPath(repository)
@@ -43,5 +46,5 @@ def verify_source(workspace, repository, task_path, commit, uploaded):
             mode = '100755' if path.stat().st_mode & 0o111 else '100644'
             actual[path.relative_to(uploaded).as_posix()] = (mode, oid)
     if not expected or actual != expected:
-        raise ValueError('Uploaded task differs from claimed committed source; commit all intended changes before submitting')
+        raise SourceMismatchError('Author upload/version mismatch: uploaded file contents or executable modes differ from the claimed commit/path. Commit all intended changes and resubmit that exact version; no task/network diagnosis or cloud execution was performed.')
     return {'source_commit': commit, 'source_task_path': task_relative.as_posix(), 'source_repository': relative.as_posix(), 'source_git_tree_verified': True, 'file_count': len(actual)}

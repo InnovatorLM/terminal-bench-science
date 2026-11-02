@@ -73,6 +73,13 @@ def publish_author_feedback(pr, row, config):
             existing_key=str(existing.get('key',''))
             same_version=(existing.get('task')==row.get('task') and
                           existing.get('commit',existing.get('required_commit'))==row.get('commit'))
+            # A historical direct assignment is still reconciled every cycle.
+            # Its completed receipt must not replace the current PR's repair
+            # instructions just because that history is visited first.
+            if (existing.get('pr') is not None and row.get('pr') is None
+                    and existing.get('task') == row.get('task') and not same_version
+                    and row.get('state') == 'completed'):
+                return
             if (same_version and existing_key == key
                     and int(existing.get('generation',0)) > int(row.get('generation',0))):
                 return
@@ -89,6 +96,11 @@ def publish_author_feedback(pr, row, config):
              'author_must_pause':(row.get('state')=='reviewing'
                                   and row.get('evaluator_activity_confirmed') is True),
              'updated_at':time.time()}
+    if pr.get('number') is not None or row.get('pr') is not None:
+        payload['pr']=pr.get('number',row.get('pr'))
+    if row.get('prior_reviews'):
+        payload['prior_reviews']=row['prior_reviews']
+        payload['next_action']=row.get('next_action','')
     # A platform-waiting author is not paused: it has a concrete, bounded
     # action to complete before evaluator ownership can exist. Persist that
     # action beside the status so a fresh author session cannot drift to an
@@ -220,13 +232,33 @@ class Api:
                 return out
         raise ValueError('Pagination did not terminate')
 
+def completed_versions(ledger, author, task, current_commit):
+    """Historical review is evidence for its version, never approval of HEAD."""
+    return [dict(key=key, **{field:row.get(field) for field in (
+                'commit','task','snapshot_sha256','evaluation_id','role',
+                'generation','state','stage','reason','scientific_acceptance')})
+            for key,row in sorted(ledger.items())
+            if row.get('state')=='completed' and row.get('task')==task
+            and row.get('commit')!=current_commit
+            and author is not None and row.get('author_role')==author]
+
+def publish_version_handoffs(config, handoffs):
+    """Give the curator the same current-version ownership that authors see."""
+    payload={'schema_version':1,'handoffs':handoffs,'updated_at':time.time(),
+             'note':'Historical completed reviews remain valid for their frozen versions; '
+                    'this queue neither accepts a task nor transfers old scores to a new commit.'}
+    atomic(STATE/'review-version-handoffs.json',payload)
+    if 'curator' in config['roles']:
+        path=Path(config['roles']['curator']['root'])/'review-version-handoffs.json'
+        atomic(path,payload);path.chmod(0o644)
+
 def reconcile(api,config,ledger):
     from deployment_paths import universe_root
     from selftest_review_dispatch import consume
     consume(config,ledger,universe_root(W),STATE)
     sync_direct_assignments(config,ledger)
     pulls=api.pages('/pulls?state=open')
-    pending={}
+    pending={};handoffs={}
     for pr in pulls:
         if pr.get('draft') or 'draft' in pr['title'].lower():continue
         match=re.search(r'tasks/[a-zA-Z0-9_./-]+',pr.get('body') or '')
@@ -252,6 +284,17 @@ def reconcile(api,config,ledger):
                 reason='Container selftest and result-driven iteration evidence required before evaluator assignment',
                 evaluator_assigned=False)
             if gate_error:pending[key]['validation_error_type']=gate_error
+            author=author_for_pr(pr,config)
+            prior=completed_versions(ledger,author,task,pr['head']['sha'])
+            if prior:
+                pending[key].update(author_role=author,stage='version_reconciliation',
+                    prior_reviews=prior,
+                    reason='This task has a completed review on a different commit; current PR is not covered.',
+                    next_action='Read prior_reviews and compare only this task path between the reviewed commit and current PR. '
+                    'Send curator the exact version choice and meaningful changes before more tests. '
+                    'Do not requalify or rerun the completed version just to migrate receipt schemas. '
+                    'Do not archive or checkout the whole repository. A deliberately revised version still requires its own qualification.')
+                handoffs[key]=dict(pending[key],owner=author,decision_owner='curator')
             publish_author_feedback(pr,pending[key],config)
             old=ledger.get(key)
             if old and old.get('issue'):
@@ -277,7 +320,7 @@ def reconcile(api,config,ledger):
             roles=[n for n in config['roles'] if n.startswith('evaluator-') and n not in busy]
             if not roles:continue
             role=sorted(roles)[0]
-            row={'pr':pr['number'],'commit':pr['head']['sha'],'task':task,**execution,'snapshot_kind':'registered-task-content-sha256','role':role,'state':'reviewing','stage':'completeness','event':event,'generation':0,'issue':None,'updated_at':time.time()}
+            row={'pr':pr['number'],'author_role':author_for_pr(pr,config),'commit':pr['head']['sha'],'task':task,**execution,'snapshot_kind':'registered-task-content-sha256','role':role,'state':'reviewing','stage':'completeness','event':event,'generation':0,'issue':None,'updated_at':time.time()}
             ledger[key]=row;atomic(STATE/'ledger.json',ledger)
         elif any(row.get(k)!=execution[k] for k in ('evaluation_id','snapshot_sha256')):
             # Never silently change an active assignment to a different image/task.
@@ -320,6 +363,7 @@ def reconcile(api,config,ledger):
         atomic(wake,dict(key=key,generation=row['generation'],state=row['state']));wake.chmod(0o644)
         publish_author_feedback(pr,row,config)
     atomic(STATE/'pending-submissions.json',pending)
+    publish_version_handoffs(config,handoffs)
     atomic(STATE/'ledger.json',ledger)
 
 def main():
