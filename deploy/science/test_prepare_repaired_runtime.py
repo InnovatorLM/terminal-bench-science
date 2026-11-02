@@ -103,6 +103,8 @@ class PreparationTests(unittest.TestCase):
             result=bind_runtime_configuration(source,runtime,root/'binding.json')
             self.assertEqual(result['status'],'configuration_bound')
             self.assertFalse(result['production_started'])
+            queue=json.loads((configuration/'queue.json').read_text())
+            self.assertEqual(queue['broker_config'],str(state/'role-broker/config.json'))
             self.assertEqual(signed.read_bytes(),before)
             registry=json.loads((configuration/'registry.json').read_text())
             self.assertEqual(registry['task']['snapshot'],str(snapshot))

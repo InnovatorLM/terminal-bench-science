@@ -34,7 +34,7 @@ class QualityQueueTests(unittest.TestCase):
                             (job/'summary.json').write_text(json.dumps({'status':'quality_diagnostic_complete','cleanup_confirmed':True,'quality_acceptance':False,'scientific_acceptance':False,'release_eligible':False,'factual_verification_required':True,'acs_launched':False,'diagnostic':{'review':{'summary':'Mock diagnostic'}}}))
                     def wait(self,timeout=None):return 0
                     def poll(self):return 0
-                with patch('evaluation_queue.subprocess.Popen',FakeChild):
+                with patch('evaluation_queue.subprocess.Popen',FakeChild), patch('role_exec.role_processes',return_value=[]):
                     result=process(config,request,mock=False)
                 self.assertEqual(len(captured),1)
                 self.assertEqual(result['status'],'quality_diagnostic_complete' if report_present else 'quality_diagnostic_failed')

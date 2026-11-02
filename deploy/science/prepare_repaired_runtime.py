@@ -335,6 +335,7 @@ def bind_runtime_configuration(source,runtime,journal_path):
         os.chown(workspace,broker['controller_uid'],entry['gid']);workspace.chmod(0o2770)
         entry['root']=str(root)
     queue['state']=str(state/'evaluation-queue');queue['registry']=str(registry_path)
+    queue['broker_config']=str(broker_path)
     for item in queue.get('role_queues',[]):
         role=item['role'];root=Path(broker['roles'][role]['root'])
         evaluation=root/'evaluation';evaluation.mkdir(exist_ok=True,mode=0o755)

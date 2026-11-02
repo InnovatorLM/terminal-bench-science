@@ -96,6 +96,7 @@ def plan(root, source_broker=DEFAULT_BROKER, source_queue=DEFAULT_QUEUE):
     broker['socket']=broker_socket_name(root)
     queue['state']=str(state/'evaluation-queue')
     queue['registry']=str(registry_out)
+    queue['broker_config']=str(broker_out)
     queue['role_queues']=[configured[name] for name in sorted(configured)]
     service_configs={
         state/'review-dispatcher/config.json':{'broker_config':str(broker_out),'state':str(state/'review-dispatcher')},

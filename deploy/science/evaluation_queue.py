@@ -441,12 +441,76 @@ def handle_request(config, path, mock):
                     {'job_id': path.stem, 'status': 'rejected', 'quality_acceptance': False}, 0o644)
 
 
+def parallel_limit(config):
+    if not isinstance(config, dict):
+        raise ValueError('Queue config must be an object')
+    broker_path = config.get('broker_config')
+    if not isinstance(broker_path, str) or not broker_path:
+        raise ValueError('Queue requires the operator-owned author roster in broker_config')
+    broker = json.loads(root_file(broker_path).read_text())
+    roles = broker.get('roles') if isinstance(broker, dict) else None
+    if not isinstance(roles, dict) or any(not isinstance(role, dict) for role in roles.values()):
+        raise ValueError('Author roster requires a roles object with role entries')
+    # Waiting/paused authors still count: their submissions may be in review.
+    authors = sum(name == 'author' or name.startswith('author-') for name in roles)
+    if not authors:
+        raise ValueError('Evaluation capacity requires at least one configured author')
+    ceiling = 5 * authors
+    value = config.get('max_parallel_jobs', ceiling)
+    if type(value) is not int or not 1 <= value <= ceiling:
+        raise ValueError(f'max_parallel_jobs must be between 1 and {ceiling} (author count x 5)')
+    return value
+
+
+def dispatch_paused(config):
+    value = config.get('dispatch_paused', False)
+    if type(value) is not bool:
+        raise ValueError('dispatch_paused must be a boolean')
+    return value
+
+
+def adopt_workers(config, queues, active):
+    """Recover active reservations after replacing only the queue supervisor."""
+    from queue_parallel import RetainedWorker
+    adopted = []
+    for queue in queues:
+        for path in Path(queue['inbox']).glob('*.json'):
+            if not ID.fullmatch(path.stem) or str(path) in active.children:
+                continue
+            claim_path = Path(config['state']) / path.stem / 'claim.json'
+            if not claim_path.exists():
+                continue
+            claim = json.loads(root_file(claim_path).read_text())
+            if not active_queue_worker(claim, path.stem):
+                continue
+            try:
+                child = RetainedWorker(claim['queue_worker_pid'])
+            except ProcessLookupError:
+                continue
+            # Revalidate after opening the pidfd, then compare the actual
+            # request bytes and UID before binding the reservation to an inbox.
+            if not active_queue_worker(claim, path.stem) or child.poll() is not None:
+                child.close()
+                continue
+            try:
+                request = read_request(path, queue['evaluator_uid'])
+                if any(claim.get(key) != request[key] for key in REQUEST_KEYS):
+                    raise ValueError('Active claim differs from immutable request')
+            except BaseException:
+                child.close()
+                raise
+            active.children[str(path)] = child
+            adopted.append({'job_id': path.stem, 'pid': child.pid})
+    return adopted
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--ready-file', type=Path)
     parser.add_argument('--mock', action='store_true', help='No LLM/container; report explicitly mock')
+    parser.add_argument('--owner-pid', type=int, help='Stop with the owning universe launcher')
     parser.add_argument('--single-request', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--queue-index', type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -482,9 +546,13 @@ def main():
         handle_request(selected, path, args.mock)
         return
     from queue_parallel import ActiveJobs
-    parallel = config.get('max_parallel_jobs', 5)
-    if type(parallel) is not int or not 1 <= parallel <= 15:
-        raise SystemExit('max_parallel_jobs must be between 1 and 15')
+    parallel = parallel_limit(config)
+    paused = dispatch_paused(config)
+    from command_watchdog import process_info, owner_alive
+    try:
+        owner = process_info(args.owner_pid) if args.owner_pid is not None else None
+    except (OSError, ValueError, IndexError):
+        raise SystemExit('Universe launcher is not alive') from None
     with (Path(config['state']) / 'worker.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         active = ActiveJobs(parallel)
@@ -493,14 +561,46 @@ def main():
             nonlocal stopping
             stopping = True
         previous = signal.signal(signal.SIGTERM, stop)
+        supervising = False
         try:
+            adopted = adopt_workers(config, queues, active)
+            def publish_ready():
+                if args.ready_file is not None:
+                    atomic_json(args.ready_file, {'pid': os.getpid(), 'evaluator_uids': sorted(identities),
+                                'max_parallel_jobs': active.limit, 'adopted_workers': adopted,
+                                'owner_pid': args.owner_pid, 'dispatch_paused': paused})
             if args.ready_file is not None:
                 if args.ready_file.parent.resolve() != Path(config['state']).resolve():
                     raise SystemExit('Readiness file must be in the private worker state directory')
-                atomic_json(args.ready_file, {'pid': os.getpid(), 'evaluator_uids': sorted(identities), 'max_parallel_jobs': parallel})
-            while not stopping:
+            publish_ready()
+            supervising = True
+            import time
+            next_reload = 0
+            queue_offset = 0
+            while not stopping and owner_alive(owner):
+                if time.monotonic() >= next_reload:
+                    # Refresh capacity (including author roster changes) and
+                    # admission pause. Evaluator identities/paths stay fixed.
+                    try:
+                        updated = json.loads(root_file(args.config).read_text())
+                        if not isinstance(updated, dict):
+                            raise ValueError('Queue config must be an object')
+                        if updated.get('broker_config') != config.get('broker_config'):
+                            raise ValueError('Author roster path needs a validated restart')
+                        limit = parallel_limit(updated)
+                        updated_pause = dispatch_paused(updated)
+                    except (OSError, ValueError, TypeError):
+                        pass  # Keep the last valid capacity on partial/bad updates.
+                    else:
+                        if limit != active.limit or updated_pause != paused:
+                            active.limit = limit
+                            paused = updated_pause
+                            publish_ready()
+                    next_reload = time.monotonic() + 1
                 active.reap()
-                for index, queue in enumerate(queues):
+                for delta in range(0 if paused else len(queues)):
+                    index = (queue_offset + delta) % len(queues)
+                    queue = queues[index]
                     for path in sorted(Path(queue['inbox']).glob('*.json')):
                         if not ID.fullmatch(path.stem) or (Path(queue['results']) / path.name).exists():
                             continue
@@ -509,10 +609,11 @@ def main():
                         if args.mock:
                             command.append('--mock')
                         active.start(str(path), command)
+                queue_offset = (queue_offset + 1) % len(queues)
                 if args.once:
                     # One scan, then await its active children. Remaining requests
                     # stay queued for the next invocation when capacity is full.
-                    while active.children and not stopping:
+                    while active.children and not stopping and owner_alive(owner):
                         active.reap()
                         import time
                         time.sleep(.1)
@@ -520,7 +621,13 @@ def main():
                 import time
                 time.sleep(.2)
         finally:
-            active.stop()
+            if supervising:
+                active.stop()
+            else:
+                # Startup failure must leave existing executions intact; no
+                # new jobs are started before the readiness record is written.
+                for child in active.children.values():
+                    child.close()
             signal.signal(signal.SIGTERM, previous)
 
 

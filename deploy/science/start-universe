@@ -170,7 +170,11 @@ for role in sorted(active):
     print(json.dumps(dict(role=role,runtime_basics=receipt)),flush=True)
 # Recover derived catalogs from the immutable operator registry. This does not
 # rebuild tasks or alter their registered bytes/digests.
-queue=json.loads(root_file(universe/'.config/science-evaluation/queue.json').read_text())
+queue_path=root_file(universe/'.config/science-evaluation/queue.json')
+queue=json.loads(queue_path.read_text())
+if queue.get('broker_config')!=sys.argv[1]:
+    queue['broker_config']=sys.argv[1]
+    atomic_json(queue_path,queue)
 catalog=evaluation_catalog(json.loads(root_file(queue['registry']).read_text()))
 for entry in queue['role_queues']:
     path=Path(entry['inbox']).parent/'catalog.json'
@@ -272,7 +276,7 @@ PY_CHECK
 QUEUE_READY="$QUEUE_STATE/ready.json"
 mkdir -p "$QUEUE_STATE"
 "$PY" "$W/gewu-multiverse/deploy/science/evaluation_queue.py" \
-    --config "$QUEUE_CONFIG" --ready-file "$QUEUE_READY" \
+    --config "$QUEUE_CONFIG" --ready-file "$QUEUE_READY" --owner-pid "$$" \
     > "$QUEUE_STATE/production-worker.log" 2>&1 &
 evaluation_pid=$!
 "$PY" - "$evaluation_pid" "$QUEUE_READY" <<'PY_QUEUE_CHECK'
