@@ -54,6 +54,8 @@ class UniverseACK(ACKEnvironment):
         await super().start(force_build=force_build)
         await self._capture_pod_evidence('started')
         if self._universe_role == 'runtime' and getattr(self, 'trial_paths', None):
+            self._record_agent_collection(self.trial_paths.agent_dir,
+                dict(status='pending', complete=False, files=0, manifest={}))
             self._agent_checkpoint_task = asyncio.create_task(self._checkpoint_agent_logs())
 
     async def _checkpoint_agent_logs(self):
@@ -69,6 +71,22 @@ class UniverseACK(ACKEnvironment):
             self._agent_collection_lock = asyncio.Lock()
         async with self._agent_collection_lock:
             return await download_agent(self, target)
+
+    async def _final_agent_evidence(self, target):
+        # Final collection has a separate infrastructure budget; the model's
+        # four-hour budget is unchanged. Retries reuse verified partial bytes.
+        while True:
+            result = await self._download_agent_evidence(target)
+            if result.get('complete', True):
+                return result
+            await asyncio.sleep(1)
+
+    def _record_agent_collection(self, target, record):
+        from datetime import datetime, timezone
+        from acs_evidence_transport import safe_destination
+        path = safe_destination(Path(target) / 'acs-collection.json')
+        record = dict(record, schema_version=2, observed_at=datetime.now(timezone.utc).isoformat())
+        path.write_text(json.dumps(record)); path.chmod(0o600)
 
     async def stop(self, delete=True):
         try:
@@ -94,20 +112,18 @@ class UniverseACK(ACKEnvironment):
         if not checkpoint and getattr(self, '_agent_evidence_downloaded', False):
             return
         try:
-            result = await asyncio.wait_for(self._download_agent_evidence(target), timeout=90)
+            operation = self._download_agent_evidence(target) if checkpoint else self._final_agent_evidence(target)
+            result = await asyncio.wait_for(operation, timeout=90 if checkpoint else 600)
             record = dict(result, status='checkpoint' if checkpoint else 'collected')
         except Exception as error:
-            record = dict(status='collection_failed', error_type=type(error).__name__)
+            record = dict(status='collection_failed', complete=False, error_type=type(error).__name__,
+                          partial_chunks_retained=True)
             if hasattr(self, 'logger'):
                 self.logger.warning('Partial agent evidence collection (%s); cleanup continues', type(error).__name__)
         # The original files remain private. A failed later collection does not
         # delete the last successfully retained checkpoint.
         try:
-            from datetime import datetime, timezone
-            from acs_evidence_transport import safe_destination
-            path = safe_destination(Path(target) / 'acs-collection.json')
-            record['observed_at'] = datetime.now(timezone.utc).isoformat()
-            path.write_text(json.dumps(record)); path.chmod(0o600)
+            self._record_agent_collection(target, record)
         except (OSError, ValueError):
             pass
 
@@ -160,7 +176,8 @@ class UniverseACK(ACKEnvironment):
 
     async def download_dir(self, source_dir, target_dir):
         if str(source_dir) == '/logs/agent':
-            await asyncio.wait_for(self._download_agent_evidence(target_dir), timeout=90)
+            result = await asyncio.wait_for(self._final_agent_evidence(target_dir), timeout=600)
+            self._record_agent_collection(target_dir, dict(result, status='collected'))
             self._agent_evidence_downloaded = True
             return
         if str(source_dir) == '/logs/verifier':

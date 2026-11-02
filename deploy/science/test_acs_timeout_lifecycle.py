@@ -61,13 +61,18 @@ class TimeoutTests(unittest.TestCase):
 
     def test_checkpoint_collects_live_codex_sessions_without_auth_files(self):
         obj=SimpleNamespace()
-        responses=[{'codex.txt':{'source':'/logs/agent/codex.txt','size':4},
-                    'sessions/day/run.jsonl':{'source':'/tmp/codex-home/sessions/day/run.jsonl','size':7}},
-                   base64.b64encode(b'log\n').decode(),base64.b64encode(b'{"x":1}').decode()]
+        manifest={'codex.txt':{'source':'/logs/agent/codex.txt','size':4},
+                  'sessions/day/run.jsonl':{'source':'/tmp/codex-home/sessions/day/run.jsonl','size':7}}
+        async def transfer(environment,source,target,**kwargs):
+            target.parent.mkdir(parents=True,exist_ok=True)
+            content=b'log\n' if source.endswith('codex.txt') else b'{"x":1}'
+            target.write_bytes(content)
+            return {'bytes':len(content),'downloaded_bytes':len(content),'resumed_bytes':0,'sha256':'a'*64}
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
-            with patch('acs_evidence_transport.remote_json',AsyncMock(side_effect=responses)):
+            with patch('acs_evidence_transport.remote_json',AsyncMock(return_value=manifest)), \
+                 patch('acs_evidence_transport.download_file',AsyncMock(side_effect=transfer)):
                 result=asyncio.run(download_agent(obj,Path(raw)))
-            self.assertEqual(result,{'files':2,'bytes':11})
+            self.assertEqual((result['files'],result['bytes'],result['complete']),(2,11,True))
             self.assertEqual((Path(raw)/'sessions/day/run.jsonl').read_text(),'{"x":1}')
             self.assertFalse((Path(raw)/'auth.json').exists())
 

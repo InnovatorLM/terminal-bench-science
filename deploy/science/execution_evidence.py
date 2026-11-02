@@ -7,16 +7,25 @@ import stat
 from acs_helpers.pod_evidence import validate as validate_pods
 
 
-def read_file(path, root):
+def evidence_file(path, root):
     path, root = Path(path), Path(root).resolve()
     if not path.resolve().is_relative_to(root):
         raise ValueError('Evidence path escaped job')
     if any(p.is_symlink() for p in [path, *path.parents] if p != root.parent):
         raise ValueError('Evidence symlink refused')
     info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > 100 * 1024 * 1024:
-        raise ValueError('Evidence file type/size refused')
-    return path.read_bytes()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Evidence file type refused')
+    return path
+
+
+def read_file(path, root):
+    return evidence_file(path, root).read_bytes()
+
+
+def digest_file(path, root):
+    with evidence_file(path, root).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unchanged=False):
@@ -42,10 +51,32 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
             if path.is_file():
                 try:
                     name = str(path.relative_to(trial))
-                    read(name)
+                    hashes[str(path.relative_to(run_root))] = digest_file(path, run_root)
                     if name != 'agent/acs-collection.json': raw_agent_files.append(name)
                 except (OSError, ValueError, TypeError) as exc:
                     errors.append(type(exc).__name__)
+        # Only v2 records attest final coverage. The legacy adapter left its
+        # last checkpoint receipt behind even after a successful final copy.
+        # Preserve legacy checks for those already running jobs; a recorded
+        # failure, or any v2 incomplete collection, must still fail validation.
+        receipt = trial / 'agent/acs-collection.json'
+        if receipt.exists():
+            try:
+                collection = json.loads(read('agent/acs-collection.json'))
+                complete = collection.get('status') == 'collected' and collection.get('complete', True) is True
+                if collection.get('schema_version') == 2:
+                    manifest = collection.get('manifest')
+                    complete = complete and collection.get('complete') is True and isinstance(manifest, dict)
+                    if complete:
+                        complete = collection.get('files') == len(manifest) and all(
+                            isinstance(name, str) and not Path(name).is_absolute() and '..' not in Path(name).parts
+                            and hashes.get(str((trial / 'agent' / name).relative_to(run_root))) == item.get('sha256')
+                            for name, item in manifest.items())
+                    checks['agent_collection_complete'] = complete
+                elif collection.get('status') == 'collection_failed':
+                    checks['agent_collection_complete'] = False
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                errors.append(type(exc).__name__)
         result = {}
         try:
             result = json.loads(read('result.json'))

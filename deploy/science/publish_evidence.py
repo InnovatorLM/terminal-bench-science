@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-from execution_evidence import read_file
+from execution_evidence import read_file, evidence_file
 from selftest_logs import sanitize, credential_values
 
 W = Path('/mnt/data/zhanglinfeng/workspace')
@@ -22,6 +22,40 @@ def redact(value, secrets):
         return {key: '[REDACTED]' if re.search(r'(?i)(api[_-]?key|password|authorization|secret|access_token|credential)', key)
                 else redact(item, secrets) for key, item in value.items()}
     return value
+
+
+def publish_jsonl(path, src, target, secrets):
+    """Keep memory proportional to one event, not a four-hour native session."""
+    source_hash, output_hash = hashlib.sha256(), hashlib.sha256()
+    size, partial, in_key = 0, [], False
+    with evidence_file(path, src).open('rb') as inp, target.open('xb') as out:
+        os.fchmod(out.fileno(), 0o600)
+        for number, raw in enumerate(inp, 1):
+            source_hash.update(raw)
+            line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+            if not line.strip():
+                continue
+            try:
+                if in_key:
+                    raise ValueError('Unterminated private key')
+                value = json.dumps(redact(json.loads(line), secrets), ensure_ascii=False)
+            except ValueError:
+                partial.append(number)
+                # A cancelled native writer may leave invalid final JSON. Also
+                # protect a pasted multiline PEM in malformed diagnostic text.
+                if '-----BEGIN ' in line and 'PRIVATE KEY-----' in line:
+                    in_key = True
+                if in_key:
+                    value = '[REDACTED PRIVATE KEY]'
+                    if '-----END ' in line and 'PRIVATE KEY-----' in line:
+                        in_key = False
+                else:
+                    value = sanitize(line, secrets)
+            rendered = (value + '\n').encode()
+            if any(secret and str(secret).encode() in rendered for secret in secrets):
+                raise ValueError('Credential remains after redaction')
+            out.write(rendered); output_hash.update(rendered); size += len(rendered)
+    return {'source_sha256': source_hash.hexdigest(), 'sha256': output_hash.hexdigest(), 'bytes': size}, partial
 
 
 def publish(src, dst, secrets=(), gid=None):
@@ -42,6 +76,13 @@ def publish(src, dst, secrets=(), gid=None):
         for name in names:
             path = src / name
             if not path.exists():
+                continue
+            target = dst / name
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if name.endswith('.jsonl') and not any('\n' in secret or '\r' in secret for secret in secrets):
+                files[name], partial = publish_jsonl(path, src, target, secrets)
+                if partial:
+                    partial_jsonl[name] = partial
                 continue
             raw = read_file(path, src)
             if name == 'config.json':
@@ -67,8 +108,6 @@ def publish(src, dst, secrets=(), gid=None):
             rendered = (json.dumps(content, ensure_ascii=False, indent=2) if isinstance(content, (dict, list)) else content).encode()
             if any(secret and str(secret).encode() in rendered for secret in secrets):
                 raise ValueError('Credential remains after redaction')
-            target = dst / name
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             target.write_bytes(rendered)
             target.chmod(0o600)
             files[name] = {'source_sha256': hashlib.sha256(raw).hexdigest(), 'sha256': hashlib.sha256(rendered).hexdigest(), 'bytes': len(rendered)}

@@ -140,7 +140,7 @@ class EvidenceTests(unittest.TestCase):
         obj=object.__new__(UniverseACK)
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             target=Path(raw)/'result.json';target.write_text('stale result')
-            response=SimpleNamespace(return_code=0,stdout='{"size":null,"regular":false}')
+            response=SimpleNamespace(return_code=0,stdout='{"missing":true}')
             with patch.object(UniverseACK,'exec',AsyncMock(return_value=response)):
                 with self.assertRaisesRegex(FileNotFoundError,'source file is missing'):
                     asyncio.run(obj.download_file('/app/missing.json',target))

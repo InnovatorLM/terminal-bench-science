@@ -56,8 +56,34 @@ Path('/tmp/transport-smoke.bin').write_bytes(bytes(range(256))*8192)
         if not session.is_file() or 'partial execution evidence' not in session.read_text():
             raise RuntimeError('Native session checkpoint missing')
         report['checkpoint_retained']=True
+        appended=await env.exec(command='python3 -I -c '+shlex.quote(
+            "from pathlib import Path; import json; p=Path('/tmp/codex-home/sessions/smoke/run.jsonl'); "
+            "f=p.open('a'); f.write(json.dumps({'type':'smoke_only','text':'appended event'})+'\\n'); f.close()"),timeout_sec=30)
+        if appended.return_code!=0:raise RuntimeError('Unable to append smoke fixture')
+        await env._retain_incomplete_agent_evidence(checkpoint=True)
+        checkpoint=json.loads((paths.agent_dir/'acs-collection.json').read_text())
+        if not checkpoint.get('complete') or checkpoint.get('resumed_bytes',0)<=0:
+            raise RuntimeError('Incremental agent checkpoint did not reuse verified bytes')
+        report['incremental_checkpoint']=dict(downloaded_bytes=checkpoint['downloaded_bytes'],
+            resumed_bytes=checkpoint['resumed_bytes'])
         target=output/'binary-evidence.bin'
-        await env.download_file('/tmp/transport-smoke.bin',target)
+        from acs_evidence_transport import download_file, CHUNK_BYTES
+        class InterruptSecondChunk:
+            chunks=0
+            async def exec(self,**kwargs):
+                if 'base64.b64encode' in kwargs['command']:
+                    self.chunks+=1
+                    if self.chunks==2:raise asyncio.CancelledError()
+                return await env.exec(**kwargs)
+        target.write_bytes(b'previous complete checkpoint')
+        try:await download_file(InterruptSecondChunk(),'/tmp/transport-smoke.bin',target)
+        except asyncio.CancelledError:report['transfer_interruption_observed']=True
+        if target.read_bytes()!=b'previous complete checkpoint':
+            raise RuntimeError('Interrupted transfer overwrote complete checkpoint')
+        resumed=await download_file(env,'/tmp/transport-smoke.bin',target)
+        if resumed['resumed_bytes']!=CHUNK_BYTES or resumed['downloaded_bytes']!=CHUNK_BYTES:
+            raise RuntimeError('Transfer did not resume the retained chunk')
+        report['resumable_transfer']=resumed
         expected=hashlib.sha256(bytes(range(256))*8192).hexdigest()
         if hashlib.sha256(target.read_bytes()).hexdigest()!=expected:raise RuntimeError('Binary transfer differs')
         report['binary_transfer_sha256']=expected
@@ -66,7 +92,8 @@ Path('/tmp/transport-smoke.bin').write_bytes(bytes(range(256))*8192)
         report['command_timeout_observed']=True
         await env.stop(delete=True)
         record=json.loads((paths.agent_dir/'acs-collection.json').read_text())
-        if record['status']!='collected' or not session.is_file():raise RuntimeError('Final collection missing')
+        if record['status']!='collected' or record.get('complete') is not True or not session.is_file():
+            raise RuntimeError('Final collection missing')
         report['final_collection_retained']=True
     except Exception as error:
         report['error_type']=type(error).__name__
