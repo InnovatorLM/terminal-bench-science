@@ -153,6 +153,49 @@ def inventory(source, includes, deadline):
     return selected, warnings
 
 
+def advance_inventory(source, includes, progress, deadline):
+    """Persist a bounded file walk; copying can proceed before the walk ends.
+
+    A complete os.walk on network storage may itself exceed a cycle's budget.
+    Keep its remaining paths rather than restarting it and starving all copies.
+    Directory entries are enumerated once; no symlink directory is followed.
+    """
+    work = deque(progress.get('inventory_walk', includes or ['.']))
+    selected = {item['path']: item for item in progress.get('pending', [])}
+    paths = set(progress.get('inventory_paths', []))
+    warnings = progress.setdefault('warnings', [])
+    while work and time.monotonic() < deadline:
+        name = work.popleft(); rel = Path(name); path = source/rel
+        if excluded(rel):continue
+        try:
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                with os.scandir(path) as entries:
+                    children = sorted(str(Path(entry.path).relative_to(source)) for entry in entries)
+                work.extendleft(reversed(children))
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                resolved = path.resolve()
+                if (Path(os.readlink(path)).is_absolute() or not resolved.is_relative_to(source)
+                        or excluded(resolved.relative_to(source))):continue
+            metadata = inspect_source(path)
+        except FileNotFoundError:
+            warnings.append({'path':str(rel), 'kind':'source_disappeared'})
+            continue
+        except ValueError:
+            continue
+        except OSError as error:
+            warnings.append({'path':str(rel), 'kind':type(error).__name__})
+            continue
+        key = rel.as_posix()
+        selected[key] = {'path':key, 'source':metadata}; paths.add(key)
+    progress.update(inventory_walk=list(work), inventory_scanning=bool(work),
+                    inventory_paths=sorted(paths), inventory_count=len(paths),
+                    pending=sorted(selected.values(), key=lambda item:(
+                        0 if item['path'].startswith('.state/') else 1,
+                        -item['source']['mtime_ns'], item['path'])))
+
+
 def digest(path, deadline, limit=None):
     value = hashlib.sha256()
     with path.open('rb') as stream:
@@ -440,10 +483,16 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
         if not latest.resolve().is_relative_to(WORKSPACE):raise ValueError('Receipt must be workspace-local')
         atomic(latest,row)
         try:
-            resuming = progress.get('identity') == identity and bool(progress.get('pending'))
+            resuming = progress.get('identity') == identity and any((
+                progress.get('pending'), progress.get('priority_pending'),
+                progress.get('priority_walk'), progress.get('inventory_scanning')))
             if not resuming:
-                items,warnings=inventory(source,includes,deadline)
-                progress=dict(identity=identity,inventory_at=started,pending=items,warnings=warnings,inventory_count=len(items),inventory_paths=[item['path'] for item in items])
+                progress=dict(identity=identity,inventory_at=started,pending=[],warnings=[],
+                              inventory_count=0,inventory_paths=[],inventory_scanning=True)
+            if progress.get('inventory_scanning'):
+                row['phase']='bulk_inventory'
+                atomic(latest,row)
+                advance_inventory(source,includes,progress,min(deadline,time.monotonic()+budget*0.2))
                 atomic(progress_path,progress)
             remaining=progress['pending'];row['warnings']=list(progress.get('warnings',[]))
             row['carried_warning_count']=len(row['warnings']) if resuming else 0
@@ -466,7 +515,8 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                 # Reserve at least half the cycle for the resumable bulk copy.
                 # A large historical backlog cannot starve live author work,
                 # and continuously growing logs cannot starve the backlog.
-                hot_deadline = min(deadline, time.monotonic()+budget*0.5)
+                hot_deadline = (min(deadline, time.monotonic()+budget*0.5)
+                    if remaining or progress.get('inventory_scanning') else deadline)
                 row['phase']='priority_inventory'
                 atomic(latest,row)
                 hot, hot_warnings, scan_complete = priority_inventory(
@@ -544,7 +594,8 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                     for future in pending:future.cancel()
             progress['pending']=[]
             row['status']='partial' if (row['warnings'] or row.get('priority_warnings')
-                or progress.get('priority_pending') or progress.get('priority_walk')) else 'ok'
+                or progress.get('priority_pending') or progress.get('priority_walk')
+                or progress.get('inventory_scanning')) else 'ok'
             if row['status']=='ok':
                 manifest['last_success_at']=time.time()
                 manifest['last_complete_inventory_at']=progress['inventory_at']
@@ -564,6 +615,9 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                    remaining_files=len(progress.get('pending',[])),inventory_at=progress.get('inventory_at'),
                    inventory_count=progress.get('inventory_count',0),last_success_at=manifest.get('last_success_at'),
                    verified_files=len(manifest['files']),
+                   inventory_remaining_paths=len(progress.get('inventory_walk',[])),
+                   priority_remaining_files=len(progress.get('priority_pending',[])),
+                   priority_scan_remaining_dirs=len(progress.get('priority_walk') or []),
                    last_complete_inventory_at=manifest.get('last_complete_inventory_at'))
         row['warning_summary'] = {
             'carried_from_inventory':warning_counts(row['warnings'][:row.get('carried_warning_count', 0)]),
@@ -625,18 +679,27 @@ def main():
     p.add_argument('--interval',type=int,default=600);p.add_argument('--budget',type=float,default=300)
     p.add_argument('--once',action='store_true');p.add_argument('--receipt',type=Path)
     p.add_argument('--workers',type=int,default=4)
+    p.add_argument('--owner-pid',type=int,help='Exit when the owning launcher exits or its PID is reused')
     p.add_argument('--recovery-import',action='store_true',help='Preserve owner/mode for a private recovery staging tree')
     p.add_argument('--include',action='append',default=[])
     args=p.parse_args()
     if args.budget<=0 or args.interval<=0:raise SystemExit('Budget and interval must be positive')
-    def stop(*_):raise KeyboardInterrupt()
+    from command_watchdog import process_info, owner_alive
+    owner=process_info(args.owner_pid) if args.owner_pid is not None else None
+    stopping=False
+    def stop(*_):
+        nonlocal stopping
+        stopping=True
+        raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM,stop)
-    while True:
+    while not stopping and owner_alive(owner):
         result=cycle(args.source,args.target,args.budget,args.include,args.receipt,args.workers,args.recovery_import)
         print(json.dumps({k:result.get(k) for k in ('status','reason','error_type','copied','unchanged',
             'priority_copied','priority_remaining_files','remaining_files','last_success_at','warning_summary')}),flush=True)
         if args.once:return 0 if result['status'] in ('ok','already_running') else 2
-        time.sleep(args.interval)
+        until=time.monotonic()+args.interval
+        while not stopping and owner_alive(owner) and time.monotonic()<until:
+            time.sleep(min(30,max(0,until-time.monotonic())))
 
 
 if __name__=='__main__':raise SystemExit(main())

@@ -180,8 +180,49 @@ class BackupTests(unittest.TestCase):
         with patch.object(b,'copy_file',side_effect=hot_expired):row=b.cycle(self.src,self.dst,workers=1)
         self.assertEqual(row['status'],'partial');self.assertEqual(row['remaining_files'],0)
         self.assertEqual(row['copied'],3);self.assertEqual(row['priority_remaining_files'],1)
-        row=b.cycle(self.src,self.dst,workers=1)
+        # Bulk is empty here. The persisted priority queue must be resumed;
+        # a fresh full inventory may take longer than every cycle's budget.
+        with patch.object(b,'advance_inventory',side_effect=AssertionError('inventory restarted')):
+            row=b.cycle(self.src,self.dst,workers=1)
         self.assertEqual(row['status'],'ok');self.assertEqual((self.dst/'data'/new).read_text(),'live\n')
+    def test_priority_walk_without_pending_bulk_resumes(self):
+        task='.config/gewu-multiverse/agents/author-01/workspace/repo/tasks/current'
+        self.put(task+'/task.toml','new task')
+        self.dst.mkdir()
+        b.atomic(self.dst/'progress.json',dict(
+            identity={'source':str(self.src),'includes':[]},inventory_at=time.time()-1,
+            pending=[],warnings=[],inventory_count=0,inventory_paths=[],
+            priority_pending=[],priority_walk=[task]))
+        with patch.object(b,'advance_inventory',side_effect=AssertionError('inventory restarted')):
+            row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'ok')
+        self.assertEqual((self.dst/'data'/task/'task.toml').read_text(),'new task')
+    def test_full_inventory_is_resumable_and_copies_each_discovered_prefix(self):
+        expected={f'folder-{i}/data.txt' for i in range(5)}
+        for name in expected:self.put(name)
+        scanner=b.advance_inventory
+        cursors=[]
+        def bounded(source,includes,progress,deadline):
+            cursors.append(progress.get('inventory_walk'))
+            # Each cycle has time for two nodes, never the entire inventory.
+            with patch.object(b.time,'monotonic',side_effect=[0,0,2]):
+                scanner(source,includes,progress,1)
+        with patch.object(b,'advance_inventory',side_effect=bounded):
+            for _ in range(10):
+                row=b.cycle(self.src,self.dst,workers=1)
+                if row['status']=='ok':break
+            else:self.fail('inventory never completed')
+        self.assertIsNone(cursors[0]);self.assertTrue(all(c for c in cursors[1:]))
+        self.assertEqual(set(b.restore(self.dst,self.root/'restored')),expected)
+        self.assertEqual(row['inventory_remaining_paths'],0)
+    def test_detached_backup_stops_when_original_owner_exits(self):
+        argv=['runtime-backup','--source',str(self.src),'--target',str(self.dst),'--owner-pid','123']
+        with patch('sys.argv',argv), patch('command_watchdog.process_info',return_value={'pid':123}), \
+                patch('command_watchdog.owner_alive',side_effect=[True,False,False]), \
+                patch.object(b,'cycle',return_value={'status':'ok'}) as cycle, \
+                patch.object(b.signal,'signal'), patch.object(b.time,'sleep') as sleep:
+            b.main()
+        cycle.assert_called_once();sleep.assert_not_called()
     def test_live_task_hint_precedes_resumable_scan_without_expanding_secret_scope(self):
         role='.config/gewu-multiverse/agents/author-01/'
         task=role+'workspace/repo/tasks/current/'
