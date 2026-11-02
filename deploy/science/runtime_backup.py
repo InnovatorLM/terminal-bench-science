@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sqlite3
 import stat
@@ -22,7 +23,7 @@ import time
 WORKSPACE = Path('/mnt/data/zhanglinfeng/workspace')
 SENSITIVE = ('*.env', '*token*', '*secret*', '*credential*', 'app.ini', 'auth.json',
              'kubeconfig*', '*.key', 'id_rsa*', 'id_ed25519*', 'jwt')
-CACHES = {'.cache', '.tmp', '__pycache__', '.venv', 'node_modules', '.mypy_cache'}
+CACHES = {'.cache', '.tmp', '__pycache__', '.venv', 'node_modules', '.mypy_cache', '.pytest_cache'}
 ROLE_PAYLOADS = {'workspace', 'selftest', 'evaluation', 'skills', 'home', 'runs',
                  'instruction.md', 'capabilities.json', 'review-feedback.json',
                  'review-current-assignment.json', 'review-dispatch.json'}
@@ -252,6 +253,143 @@ def unchanged(record, item, destination):
             and record.get('backup_ctime_ns')==info.st_ctime_ns)
 
 
+def priority_inventory(source, includes, progress, deadline):
+    """Refresh live sessions, then resume a bounded walk of role workspaces.
+
+    Git objects and old clones remain in the bulk inventory. A pending bulk
+    inventory must never prevent discovery of new sessions or appended logs.
+    Workspace traversal has its own cursor so a slow scan cannot starve either
+    trajectories or the bulk copy. Its cutoff stays fixed until that walk ends.
+    """
+    selected = {}; warnings = []
+    scopes = [Path(name) for name in includes]
+    cutoff = progress.get('priority_cutoff_ns', int(progress['inventory_at']*1e9)-120_000_000_000)
+
+    def allowed(rel):
+        return (not excluded(rel) and (not scopes or any(
+            rel == scope or rel.is_relative_to(scope) or scope.is_relative_to(rel) for scope in scopes)))
+
+    def collect(path, force=False):
+        rel = path.relative_to(source)
+        if not allowed(rel):return
+        try:
+            info = inspect_source(path)
+            if info.get('kind') == 'symlink':
+                resolved = path.resolve()
+                if (Path(info['target']).is_absolute() or not resolved.is_relative_to(source)
+                        or excluded(resolved.relative_to(source))):return
+            if force or info['mtime_ns'] >= cutoff:
+                selected[str(rel)] = {'path':str(rel), 'source':info}
+        except FileNotFoundError:
+            pass  # A fresh scan does not promise files already removed.
+        except ValueError:
+            pass
+        except OSError as error:
+            warnings.append({'path':str(rel), 'kind':type(error).__name__})
+
+    def entries(path):
+        try:return list(os.scandir(path))
+        except FileNotFoundError:return []
+
+    state = source/'.state/gewu-multiverse'
+    fast = []
+    live_runs = []
+    for entry in entries(state):
+        path = Path(entry.path)
+        if not allowed(path.relative_to(source)):continue
+        if entry.is_file(follow_symlinks=False):collect(path)
+        elif entry.is_dir(follow_symlinks=False):
+            children = entries(path)
+            for child in children:
+                if child.is_file(follow_symlinks=False):collect(Path(child.path), force=True)
+            if entry.name.startswith(('author-', 'evaluator-')) and entry.name != 'author-selftest' or entry.name == 'curator':
+                runs = sorted((c.name for c in children if c.name.startswith('run-')), reverse=True)
+                fast.extend(str((path/name).relative_to(source)) for name in runs[:2])
+                if runs:live_runs.append((entry.name, path/runs[0]))
+            elif entry.name in {'review-dispatcher', 'command-watchdog', 'role-reset', 'monitor-briefs'}:
+                fast.append(str(path.relative_to(source)))
+            elif entry.name in {'author-selftest', 'evaluation-queue'}:
+                # Job receipts and logs are small; task/build trees use bulk.
+                for child in children:
+                    if child.is_dir(follow_symlinks=False):
+                        for leaf in entries(Path(child.path)):
+                            if leaf.is_file(follow_symlinks=False):collect(Path(leaf.path))
+    # Commands in the latest transcript identify the task currently being
+    # edited, even before a self-test receipt exists. Read only a bounded tail;
+    # these strings select ordinary files, and are never executed. The complete
+    # workspace walk remains the fallback for work without an absolute path.
+    for role, run in live_runs:
+        try:
+            with (run/'transcript.jsonl').open('rb') as stream:
+                stream.seek(0, os.SEEK_END);stream.seek(max(0, stream.tell()-131072))
+                tail=stream.read().decode('utf-8', errors='replace')
+        except OSError:continue
+        root=source/'.config/gewu-multiverse/agents'/role
+        task_scopes=set()
+        for name in reversed(re.findall(r'/workspace/[A-Za-z0-9_./-]+', tail)):
+            path=root/name.lstrip('/');rel=path.relative_to(source)
+            if '..' in rel.parts or '.git' in rel.parts or 'tasks' not in rel.parts or not allowed(rel):continue
+            try:
+                if not path.resolve().is_relative_to(root/'workspace') or not path.exists():continue
+                folder=path if path.is_dir() else path.parent
+                candidates=[folder,*folder.parents]
+                task=next((p for p in candidates if p.is_relative_to(root/'workspace') and (p/'task.toml').is_file()),folder)
+                if task.is_symlink():continue
+                task_scopes.add(str(task.relative_to(source)))
+                if len(task_scopes)>=2:break
+            except OSError:continue
+        fast.extend(sorted(task_scopes))
+    while fast and time.monotonic() < deadline:
+        name = fast.pop(0); folder = source/name
+        for entry in entries(folder):
+            path = Path(entry.path); rel = path.relative_to(source)
+            if not allowed(rel):continue
+            if entry.is_dir(follow_symlinks=False):fast.append(str(rel))
+            else:collect(path, force=True)
+
+    work = progress.get('priority_walk')
+    if work is None:
+        work = []
+        for entry in entries(source/'.config/gewu-multiverse/agents'):
+            if not entry.is_dir(follow_symlinks=False):continue
+            role = Path(entry.path)
+            for child in entries(role):
+                path=Path(child.path)
+                if child.is_file(follow_symlinks=False):collect(path, force=True)
+            for suffix in ['workspace', 'home/role/trajectories', 'home/role/.codex', 'home/role/.state']:
+                path=role/suffix
+                if path.is_dir() and not path.is_symlink() and allowed(path.relative_to(source)):
+                    work.append(str(path.relative_to(source)))
+        progress['priority_cutoff_ns'] = cutoff
+        progress['priority_walk_started_at'] = time.time()
+    def task_work(name):return '/workspace/' in name and ('/tasks/' in name or name.endswith('/tasks'))
+    work = deque(sorted(work, key=lambda name:0 if task_work(name) else 1))
+    while work and time.monotonic() < deadline:
+        name = work.popleft(); folder = source/name
+        # User-created virtual environments are rebuildable; their ordinary
+        # bulk treatment is unchanged. Do not spend the priority scan on them.
+        children = entries(folder)
+        if any(entry.name in {'pyvenv.cfg', 'conda-meta'} for entry in children):continue
+        for entry in children:
+            path = Path(entry.path); rel = path.relative_to(source)
+            if not allowed(rel) or '.git' in rel.parts:continue
+            if entry.is_dir(follow_symlinks=False):
+                # Actual task packages precede CI fixtures and old repo clones.
+                if task_work(str(rel)):work.appendleft(str(rel))
+                else:work.append(str(rel))
+            else:collect(path)
+    progress['priority_walk'] = list(work) if work else None
+    if not work:
+        progress['priority_cutoff_ns'] = int(progress.get('priority_walk_started_at', time.time())*1e9)-120_000_000_000
+    old = {item['path']:item for item in progress.get('priority_pending', [])}
+    old.update(selected)
+    items = sorted(old.values(), key=lambda item:(
+        0 if '/run-' in item['path'] or '/trajectories/' in item['path'] else
+        1 if item['path'].startswith('.state/') else 2,
+        -item['source']['mtime_ns'], item['path']))
+    return items, warnings, not fast and not work
+
+
 def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, recovery=False):
     source = Path(source).resolve(strict=True);target=Path(target)
     if workers < 1 or workers > 64:raise ValueError('Backup workers must be between 1 and 64')
@@ -285,14 +423,15 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
         if not latest.resolve().is_relative_to(WORKSPACE):raise ValueError('Receipt must be workspace-local')
         atomic(latest,row)
         try:
-            if progress.get('identity')!=identity or not progress.get('pending'):
+            resuming = progress.get('identity') == identity and bool(progress.get('pending'))
+            if not resuming:
                 items,warnings=inventory(source,includes,deadline)
                 progress=dict(identity=identity,inventory_at=started,pending=items,warnings=warnings,inventory_count=len(items),inventory_paths=[item['path'] for item in items])
                 atomic(progress_path,progress)
             remaining=progress['pending'];row['warnings']=list(progress.get('warnings',[]))
             completed=0;checkpoint=time.monotonic();reported=checkpoint;checked_parents=set()
-            def process(item):
-                if time.monotonic()>deadline:raise BudgetExpired()
+            def process(item, copy_deadline=deadline):
+                if time.monotonic()>copy_deadline:raise BudgetExpired()
                 rel=item['path'];destination=target/'data'/rel
                 try:
                     current=inspect_source(source/rel)
@@ -302,9 +441,59 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                         item['source']=current
                     if unchanged(manifest['files'].get(rel),item,destination):return rel,None,None
                     roots=(source,target/'data') if recovery else None
-                    return rel,copy_file(source/rel,destination,item['source'],deadline,checked_parents,roots),None
+                    return rel,copy_file(source/rel,destination,item['source'],copy_deadline,checked_parents,roots),None
                 except (OSError,ValueError) as error:
                     return rel,None,{'path':rel,'kind':type(error).__name__}
+            if resuming and not recovery:
+                # Reserve at least half the cycle for the resumable bulk copy.
+                # A large historical backlog cannot starve live author work,
+                # and continuously growing logs cannot starve the backlog.
+                hot_deadline = min(deadline, time.monotonic()+budget*0.5)
+                row['phase']='priority_inventory'
+                atomic(latest,row)
+                hot, hot_warnings, scan_complete = priority_inventory(
+                    source, includes, progress, min(hot_deadline, time.monotonic()+budget*0.2))
+                hot_completed = 0
+                row.update(priority_copied=0, priority_unchanged=0, priority_warnings=hot_warnings)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    work=iter(hot);pending=deque()
+                    for _ in range(workers):
+                        item=next(work,None)
+                        if item is not None:pending.append(pool.submit(process,item,hot_deadline))
+                    try:
+                        while pending:
+                            rel,record,warning=pending.popleft().result()
+                            if warning:row['priority_warnings'].append(warning)
+                            elif record is None:
+                                row['priority_unchanged']+=1;row['unchanged']+=1
+                            else:
+                                manifest['files'][rel]=record
+                                row['priority_copied']+=1;row['copied']+=1
+                            hot_completed+=1
+                            now=time.monotonic()
+                            if now-checkpoint>=60:
+                                progress['priority_pending']=hot[hot_completed:]
+                                atomic(manifest_path,manifest);atomic(progress_path,progress);checkpoint=now
+                            if now-reported>=15:
+                                row.update(phase='priority_copy',priority_remaining_files=len(hot)-hot_completed,
+                                           priority_scan_remaining_dirs=len(progress.get('priority_walk') or []),
+                                           verified_files=len(manifest['files']),elapsed_seconds=round(time.time()-started,2))
+                                atomic(latest,row);reported=now
+                            item=next(work,None)
+                            if item is not None:pending.append(pool.submit(process,item,hot_deadline))
+                    except BudgetExpired:
+                        pass
+                    finally:
+                        for future in pending:future.cancel()
+                progress['priority_pending']=hot[hot_completed:]
+                progress['priority_paths']=sorted(set(progress.get('priority_paths', [])) | {
+                    item['path'] for item in hot[:hot_completed] if item['path'] in manifest['files']})
+                row.update(priority_remaining_files=len(progress['priority_pending']),
+                           priority_scan_remaining_dirs=len(progress.get('priority_walk') or []),
+                           priority_scan_complete=scan_complete, priority_checked_at=started)
+                atomic(manifest_path,manifest);atomic(progress_path,progress)
+                row['phase']='bulk_copy'
+                atomic(latest,row)
             # Keep only one future per worker in flight. In-order collection
             # gives an exact resumable prefix even when copies finish out of order.
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -333,11 +522,12 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, re
                 finally:
                     for future in pending:future.cancel()
             progress['pending']=[]
-            row['status']='partial' if row['warnings'] else 'ok'
+            row['status']='partial' if (row['warnings'] or row.get('priority_warnings')
+                or progress.get('priority_pending') or progress.get('priority_walk')) else 'ok'
             if row['status']=='ok':
                 manifest['last_success_at']=time.time()
                 manifest['last_complete_inventory_at']=progress['inventory_at']
-                manifest['complete_inventory_paths']=progress['inventory_paths']
+                manifest['complete_inventory_paths']=sorted(set(progress['inventory_paths']) | set(progress.get('priority_paths', [])))
             else:
                 # Persistent missing/unreadable source files remain explicit.
                 # Next cycle takes a new inventory; last verified backup remains.

@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 import runtime_backup as b
@@ -20,6 +21,7 @@ class BackupTests(unittest.TestCase):
         role='.config/gewu-multiverse/agents/author-01/'
         excluded=['credentials.toml','git-credential.json','dawnfm.env','service.token','app.ini','kubeconfig','private.key','custom-secret-dir/key','secrets/key','.cache/data','.tmp/cache','worker.pid','state.lock',role+'usr/lib/lib.so',role+'tmp/pip/file',role+'workspace.preserved-1/old',role+'workspace/repo/.git/config',role+'workspace/repo/.git/objects/tmp_123']
         retained=['trajectory.json','review.json','session.stdout.log','.state/gewu-multiverse/author-selftest/job/source/task/requirements.lock',role+'runs/run-1/trajectory.json',role+'workspace/repo/.git/HEAD',role+'workspace/repo/.git/objects/ab/cdef',role+'workspace/repo/task/solution/solve.sh',role+'workspace/repo/task/requirements.lock',role+'workspace/repo/task/Cargo.lock']
+        excluded.append(role+'workspace/repo/tests/.pytest_cache/v/cache/nodeids')
         for name in excluded+retained:self.put(name)
         external=self.root/'external';external.write_text('outside');(self.src/'external-link').symlink_to(external)
         row=b.cycle(self.src,self.dst)
@@ -136,5 +138,64 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(set(json.loads((self.dst/'manifest.json').read_text())['files']),{home+n for n in retained})
         b.restore(self.dst,self.root/'restored')
         self.assertEqual((self.root/'restored'/home/retained[0]).read_text(),'{"event":"fixture"}\n')
+    def test_pending_bulk_refreshes_appended_and_new_sessions_and_author_work(self):
+        old='.state/gewu-multiverse/author-01/run-100/transcript.jsonl'
+        self.put(old,'first\n')
+        for i in range(8):self.put('repo/.git/objects/aa/%02d'%i)
+        original=b.copy_file;calls=[]
+        def first_cycle(*args):
+            calls.append(args[0])
+            if len(calls)==2:raise b.BudgetExpired()
+            return original(*args)
+        with patch.object(b,'copy_file',side_effect=first_cycle):row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['remaining_files'],8)
+        self.put(old,'first\nappended\n')
+        new='.state/gewu-multiverse/author-02/run-200/transcript.jsonl'
+        work='.config/gewu-multiverse/agents/author-02/workspace/repo/task/solution.py'
+        self.put(new,'new session\n');self.put(work,'print(42)\n')
+        self.put('.state/gewu-multiverse/author-02/run-200/auth.json','private')
+        bulk=[]
+        def second_cycle(*args):
+            if '/.git/' in str(args[0]):
+                bulk.append(args[0])
+                if len(bulk)==3:raise b.BudgetExpired()
+            return original(*args)
+        with patch.object(b,'copy_file',side_effect=second_cycle):row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'partial');self.assertEqual(row['remaining_files'],6)
+        self.assertEqual(row['priority_copied'],3)
+        for name in [old,new,work]:self.assertEqual((self.dst/'data'/name).read_bytes(),(self.src/name).read_bytes())
+        self.assertFalse((self.dst/'data/.state/gewu-multiverse/author-02/run-200/auth.json').exists())
+        row=b.cycle(self.src,self.dst,workers=1);self.assertEqual(row['status'],'ok')
+        restored=b.restore(self.dst,self.root/'restored')
+        self.assertTrue({old,new,work}.issubset(restored))
+    def test_priority_copy_budget_still_allows_bulk_to_advance(self):
+        for i in range(3):self.put('old-%02d'%i)
+        with patch.object(b,'copy_file',side_effect=b.BudgetExpired()):
+            b.cycle(self.src,self.dst,workers=1)
+        new='.state/gewu-multiverse/author-01/run-100/transcript.jsonl'
+        self.put(new,'live\n');original=b.copy_file
+        def hot_expired(*args):
+            if args[0].name=='transcript.jsonl':raise b.BudgetExpired()
+            return original(*args)
+        with patch.object(b,'copy_file',side_effect=hot_expired):row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'partial');self.assertEqual(row['remaining_files'],0)
+        self.assertEqual(row['copied'],3);self.assertEqual(row['priority_remaining_files'],1)
+        row=b.cycle(self.src,self.dst,workers=1)
+        self.assertEqual(row['status'],'ok');self.assertEqual((self.dst/'data'/new).read_text(),'live\n')
+    def test_live_task_hint_precedes_resumable_scan_without_expanding_secret_scope(self):
+        role='.config/gewu-multiverse/agents/author-01/'
+        task=role+'workspace/repo/tasks/current/'
+        for name in ['task.toml','tests/test.sh','solution/solve.sh','auth.json']:
+            self.put(task+name)
+        outside=self.root/'outside';outside.mkdir();(outside/'work').write_text('outside')
+        (self.src/(role+'workspace/repo/tasks/escape')).symlink_to(outside)
+        self.put('.state/gewu-multiverse/author-01/run-100/transcript.jsonl',
+                 'run /workspace/repo/tasks/current/tests/test.sh and /workspace/repo/tasks/escape/work\n')
+        progress={'inventory_at':time.time(),'priority_walk':[]}
+        items, warnings, complete=b.priority_inventory(self.src,[],progress,float('inf'))
+        paths={i['path'] for i in items}
+        self.assertTrue({task+'task.toml',task+'tests/test.sh',task+'solution/solve.sh'}.issubset(paths))
+        self.assertNotIn(task+'auth.json',paths)
+        self.assertFalse(any('/escape/' in p for p in paths));self.assertFalse(warnings)
 
 if __name__=='__main__':unittest.main()
