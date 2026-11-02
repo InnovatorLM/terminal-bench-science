@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,6 +8,51 @@ from selftest_budget import verify,merge
 
 
 class BudgetTests(unittest.TestCase):
+    def fixture(self,root):
+        state=root/'selftest';job=state/('a'*32);job.mkdir(parents=True)
+        (job/'status.json').write_text(json.dumps(dict(role='author-01',idea_id='idea',job_id='a'*32,
+            received_at=20,trials=[dict(cleanup_confirmed=True,acs_started_at=30,acs_finished_at=60)])))
+        obs=root/'clock.json';obs.write_text(json.dumps(dict(role='author-01',observed_at=95,
+            ideas={'idea':dict(status='active',first_observed_at=10,events=[dict(action='start',at=0)])})))
+        return state,obs
+
+    def maintenance(self,root,**changes):
+        interval=dict(origin='operator_confirmed_maintenance',iteration_paused=True,
+                      roles=['author-01'],started_at=40,finished_at=80)
+        interval.update(changes)
+        record=dict(schema_version=1,state_root=str(root),observed_at=100,intervals=[interval])
+        path=root/'maintenance/verified-pauses.json';path.parent.mkdir();path.write_text(json.dumps(record));path.chmod(0o600)
+        return path
+
+    def test_verified_maintenance_and_acs_overlap_are_refunded_once(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,obs=self.fixture(root)
+            self.assertEqual(verify(state,'author-01','idea',obs,100)['active_iteration_seconds_upper_bound'],70)
+            self.maintenance(root)
+            result=verify(state,'author-01','idea',obs,100)
+            self.assertEqual(result['active_iteration_seconds_upper_bound'],50)
+            self.assertEqual(result['acs_excluded_seconds'],30)
+            self.assertEqual(result['maintenance_excluded_seconds'],40)
+            self.assertEqual(result['total_excluded_seconds'],50)
+            self.assertFalse(result['unverified_pauses_refunded'])
+
+    def test_untrusted_or_unconfirmed_maintenance_is_refused(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,obs=self.fixture(root);path=self.maintenance(root)
+            path.chmod(0o666)
+            with self.assertRaises(ValueError):verify(state,'author-01','idea',obs,100)
+            path.chmod(0o600);os.chown(path,21001,21001)
+            with self.assertRaises(ValueError):verify(state,'author-01','idea',obs,100)
+            os.chown(path,0,0);record=json.loads(path.read_text());record['intervals'][0]['iteration_paused']=False;path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError,'Unconfirmed'):verify(state,'author-01','idea',obs,100)
+
+    def test_other_role_interval_not_refunded_and_abandoned_stays_closed(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,obs=self.fixture(root);self.maintenance(root,roles=['author-02'])
+            self.assertEqual(verify(state,'author-01','idea',obs,100)['maintenance_excluded_seconds'],0)
+            value=json.loads(obs.read_text());value['ideas']['idea']['status']='abandoned';obs.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError,'abandoned'):verify(state,'author-01','idea',obs,100)
+
     def test_actual_acs_intervals_refunded_once_and_unverified_pauses_not_refunded(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);state=root/'state';job=state/('a'*32);job.mkdir(parents=True)

@@ -1,4 +1,4 @@
-"""Conservative idea budget from operator observations and actual ACS intervals.
+"""Conservative idea budget from ACS and independently observed maintenance.
 
 Unverified pauses receive no time refund. Passing this upper bound proves the
 recorded idea stays within budget; an excessive upper bound requires additional
@@ -20,6 +20,27 @@ def merge(intervals, start, end):
         if merged and lower<=merged[-1][1]:merged[-1][1]=max(merged[-1][1],upper)
         else:merged.append([lower,upper])
     return merged
+
+
+def maintenance_intervals(state, role, start, end):
+    """Only the isolated operator record can attest maintenance, never a role ledger."""
+    state_root=Path(state).resolve().parent
+    path=state_root/'maintenance/verified-pauses.json'
+    try:record=json.loads(read_operator_file(path))
+    except FileNotFoundError:return []
+    if (record.get('schema_version')!=1 or record.get('state_root')!=str(state_root)
+            or not isinstance(record.get('intervals'),list)):
+        raise ValueError('Invalid operator maintenance evidence')
+    observed=number(record.get('observed_at'));intervals=[]
+    for item in record['intervals']:
+        if (not isinstance(item,dict) or item.get('origin')!='operator_confirmed_maintenance'
+                or item.get('iteration_paused') is not True or not isinstance(item.get('roles'),list)
+                or not all(isinstance(name,str) for name in item['roles'])):
+            raise ValueError('Unconfirmed maintenance interval')
+        lower=number(item.get('started_at'));upper=number(item.get('finished_at'))
+        if not 0<=lower<=upper<=observed:raise ValueError('Invalid maintenance interval chronology')
+        if role in item['roles']:intervals.append((lower,upper))
+    return merge(intervals,start,end)
 
 
 def verify(state, role, idea, observation, at):
@@ -50,11 +71,16 @@ def verify(state, role, idea, observation, at):
             intervals.append((lower,upper))
         jobs.append(status['job_id'])
     if not jobs:raise ValueError('No source-bound selftest for observed idea')
-    excluded=merge(intervals,start,at);refund=sum(b-a for a,b in excluded)
+    acs=merge(intervals,start,at)
+    maintenance=maintenance_intervals(state,role,start,at)
+    excluded=merge([*acs,*maintenance],start,at);refund=sum(b-a for a,b in excluded)
     active=at-start-refund
     return dict(idea_id=idea,active_iteration_seconds_upper_bound=active,
                 recorded_idea_started_at=start,observed_before_selftest=True,
-                acs_excluded_seconds=refund,verified_acs_intervals=excluded,
+                acs_excluded_seconds=sum(b-a for a,b in acs),verified_acs_intervals=acs,
+                maintenance_excluded_seconds=sum(b-a for a,b in maintenance),
+                verified_maintenance_intervals=maintenance,
+                total_excluded_seconds=refund,verified_excluded_intervals=excluded,
                 selftest_jobs=sorted(jobs),within_budget=active<=18000,
                 unverified_pauses_refunded=False,event_origin_attested=False,
                 scientific_acceptance=False)

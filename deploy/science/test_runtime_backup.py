@@ -19,7 +19,7 @@ class BackupTests(unittest.TestCase):
     def test_recovery_payload_excludes_secrets_rootfs_caches_and_links(self):
         role='.config/gewu-multiverse/agents/author-01/'
         excluded=['credentials.toml','git-credential.json','dawnfm.env','service.token','app.ini','kubeconfig','private.key','custom-secret-dir/key','secrets/key','.cache/data','.tmp/cache','worker.pid','state.lock',role+'usr/lib/lib.so',role+'tmp/pip/file',role+'workspace.preserved-1/old',role+'workspace/repo/.git/config',role+'workspace/repo/.git/objects/tmp_123']
-        retained=['trajectory.json','review.json','session.stdout.log',role+'runs/run-1/trajectory.json',role+'workspace/repo/.git/HEAD',role+'workspace/repo/.git/objects/ab/cdef',role+'workspace/repo/task/solution/solve.sh']
+        retained=['trajectory.json','review.json','session.stdout.log','.state/gewu-multiverse/author-selftest/job/source/task/requirements.lock',role+'runs/run-1/trajectory.json',role+'workspace/repo/.git/HEAD',role+'workspace/repo/.git/objects/ab/cdef',role+'workspace/repo/task/solution/solve.sh',role+'workspace/repo/task/requirements.lock',role+'workspace/repo/task/Cargo.lock']
         for name in excluded+retained:self.put(name)
         external=self.root/'external';external.write_text('outside');(self.src/'external-link').symlink_to(external)
         row=b.cycle(self.src,self.dst)
@@ -114,5 +114,14 @@ class BackupTests(unittest.TestCase):
         b.restore(self.dst,self.root/'restored')
         self.assertTrue((self.root/'restored/repo/CLAUDE.md').is_symlink())
         self.assertEqual((self.root/'restored/repo/CLAUDE.md').read_text(),'instructions')
+    def test_recovery_import_preserves_owner_executable_and_directory_access(self):
+        script=self.put('nested/work/solve.sh','#!/bin/sh\ntrue\n');script.chmod(0o755)
+        (self.src/'nested').chmod(0o750)
+        row=b.cycle(self.src,self.dst,recovery=True)
+        self.assertEqual(row['status'],'ok');self.assertEqual(row['purpose'],'recovery_import')
+        self.assertEqual((self.dst/'data/nested/work/solve.sh').stat().st_mode&0o777,0o755)
+        self.assertEqual((self.dst/'data/nested').stat().st_mode&0o777,0o750)
+        self.assertEqual((self.dst/'data/nested/work/solve.sh').stat().st_uid,script.stat().st_uid)
+        self.assertEqual(self.dst.stat().st_mode&0o777,0o700)
 
 if __name__=='__main__':unittest.main()

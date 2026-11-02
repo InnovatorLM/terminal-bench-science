@@ -1,7 +1,9 @@
-"""Inventory a stopped runtime and checkpoint small controls without copying rootfs.
+"""Prepare a stopped runtime through private checkpoints and reversible recovery.
 
-This produces a migration plan, not a runnable universe. Latest mutable state
-must be restored and path-bound evidence revalidated before a controller starts.
+The inventory phase does not claim readiness. Software is moved independently
+per role, full mutable payloads are verified by the recovery importer, and only
+active service descriptors are rebound. Historical evidence remains unchanged.
+No phase launches production.
 """
 import argparse
 import hashlib
@@ -253,6 +255,8 @@ def restore_private_controls(source,runtime,journal_path):
     selected=[Path('.config/gewu-multiverse/credentials.toml')]
     instance=Path('.local/share/gewu-multiverse/forgejo/instance')
     selected.append(instance/'app.ini')
+    for key in ('data/jwt/private.pem','data/actions_id_token/private.pem'):
+        if (source/instance/key).is_file():selected.append(instance/key)
     for name in ('home','secrets','custom'):
         directory=source/instance/name
         if directory.exists():
@@ -275,7 +279,7 @@ def restore_private_controls(source,runtime,journal_path):
             with os.fdopen(fd,'wb') as stream:stream.write(data)
         dst.chmod(0o600);os.chown(dst,info.st_uid,info.st_gid)
         # Copy private subtree ownership without changing broad role parents.
-        if 'home/role/' in str(relative) or relative.parent in (instance/'home',instance/'secrets'):
+        if 'home/role/' in str(relative) or relative.parent in (instance/'home',instance/'secrets',instance/'data/jwt',instance/'data/actions_id_token'):
             dst.parent.chmod(0o700);os.chown(dst.parent,info.st_uid,info.st_gid)
         records.append({'path':str(relative),'bytes':len(data),'uid':info.st_uid,'gid':info.st_gid,
                         'sha256':hashlib.sha256(data).hexdigest(),'mode':0o600})
@@ -285,6 +289,97 @@ def restore_private_controls(source,runtime,journal_path):
     return receipt
 
 
+def bind_runtime_configuration(source,runtime,journal_path):
+    """Bind restored mutable controls after verified payload promotion.
+
+    This deliberately leaves historical receipts and signed evidence untouched.
+    Only the active registry paths and service descriptors change identity.
+    """
+    from deployment_paths import broker_socket_name,require_isolated_service_config
+    from forgejo_runtime_paths import normalize
+    import re
+    source=valid_source(source);runtime=Path(runtime).resolve(strict=True)
+    if not runtime.is_relative_to(WORKSPACE):raise ValueError('Runtime must remain inside workspace')
+    state=runtime/'.state/gewu-multiverse';instance=runtime/'.local/share/gewu-multiverse/forgejo/instance'
+    if not (instance/'data/forgejo.db').is_file() or not (instance/'data/repositories').is_dir():
+        raise ValueError('Restore the matching Forgejo database/repositories before binding services')
+    broker_path=state/'role-broker/config.json';queue_path=runtime/'.config/science-evaluation/queue.json'
+    registry_path=runtime/'.config/science-evaluation/registry.json'
+    for path in (broker_path,queue_path,registry_path):
+        if path.is_symlink() or not path.is_file():raise ValueError('Restored control is missing or linked')
+    broker=json.loads(broker_path.read_text());queue=json.loads(queue_path.read_text())
+    registry=json.loads(registry_path.read_text())
+    originals={str(p.relative_to(runtime)):hashlib.sha256(p.read_bytes()).hexdigest() for p in (broker_path,queue_path,registry_path)}
+    match=re.search(r'^HTTP_PORT\s*=\s*(\d+)\s*$',(instance/'app.ini').read_text(),re.M)
+    if not match:raise ValueError('Missing restored Forgejo port')
+    port=int(match.group(1));normalize(instance,port)
+    broker['socket']=broker_socket_name(runtime);broker['_lock_dir']=str(state/'role-broker/locks')
+    broker['_forgejo_url']='http://127.0.0.1:'+str(port)
+    for role,entry in broker['roles'].items():
+        root=runtime/ROLE_BASE/role
+        if root.is_symlink() or not root.is_dir():raise ValueError('Role software has not been restored')
+        workspace=root/'workspace'
+        if workspace.is_symlink():raise ValueError('Workspace aliases must be restored to real directories')
+        original_workspace=source/ROLE_BASE/role/'workspace'
+        if not workspace.exists() and original_workspace.is_dir() and next(original_workspace.iterdir(),None) is not None:
+            raise ValueError('Restore the current nonempty workspace before binding: '+role)
+        workspace.mkdir(exist_ok=True,mode=0o2770)
+        os.chown(workspace,broker['controller_uid'],entry['gid']);workspace.chmod(0o2770)
+        entry['root']=str(root)
+    queue['state']=str(state/'evaluation-queue');queue['registry']=str(registry_path)
+    for item in queue.get('role_queues',[]):
+        role=item['role'];root=Path(broker['roles'][role]['root'])
+        evaluation=root/'evaluation';evaluation.mkdir(exist_ok=True,mode=0o755)
+        os.chown(evaluation,0,item['evaluator_uid']);evaluation.chmod(0o755)
+        for name,owner,mode in [('inbox',item['evaluator_uid'],0o700),('results',0,0o755)]:
+            path=evaluation/name;path.mkdir(exist_ok=True,mode=mode)
+            if path.is_symlink():raise ValueError('Linked evaluation queue refused')
+            path.chmod(mode);os.chown(path,owner,owner);item[name]=str(path)
+    rebound=[]
+    for name,entry in registry.items():
+        for key in ('template','snapshot','review_root','reference_corpus','build_receipt'):
+            value=entry.get(key)
+            if isinstance(value,str) and value.startswith(str(source)+'/'):
+                path=runtime/Path(value).relative_to(source)
+                if not path.exists():raise ValueError('Registered artifact was not restored: '+name+'/'+key)
+                entry[key]=str(path);rebound.append({'entry':name,'field':key})
+    replace_private_json(broker_path,broker);broker_path.chmod(0o644)
+    replace_private_json(queue_path,queue);replace_private_json(registry_path,registry)
+    for service in ('review-dispatcher','author-selftest','command-watchdog'):
+        path=state/service/'config.json'
+        payload=json.loads(path.read_text());payload['broker_config']=str(broker_path)
+        payload['state']=str(state/service);replace_private_json(path,payload)
+    marker_path=state/'deployment.json';marker=json.loads(marker_path.read_text())
+    marker.update(status='service_config_prepared',universe_root=str(runtime),recovered_at=time.time())
+    replace_private_json(marker_path,marker)
+    # The wrapper uses the current tracked launcher and cannot select old data.
+    start=runtime/'start'
+    wrapper='#!/bin/bash\nset -euo pipefail\nexport GEWU_UNIVERSE_ROOT="'+str(runtime)+'"\nexec "'+str(WORKSPACE/'gewu-multiverse/deploy/science/start-universe')+'" "$@"\n'
+    if start.is_symlink():raise ValueError('Linked runtime launcher refused')
+    start.write_text(wrapper);start.chmod(0o755)
+    for rel,owner,mode in [('.config',65534,0o755),('.config/gewu-multiverse',65534,0o755),
+                           ('.config/gewu-multiverse/agents',0,0o755),('.config/science-evaluation',0,0o755),
+                           ('.state',0,0o755),('.state/gewu-multiverse',0,0o755),
+                           ('.local',65534,0o755),('.local/share',65534,0o755),
+                           ('.local/share/gewu-multiverse',65534,0o700),
+                           ('.local/share/gewu-multiverse/forgejo',65534,0o700),
+                           ('.local/share/gewu-multiverse/forgejo/instance',65534,0o700),
+                           ('.cache',65534,0o700),('.tmp',65534,0o700)]:
+        path=runtime/rel;path.mkdir(parents=True,exist_ok=True,mode=mode)
+        os.chown(path,owner,owner);path.chmod(mode)
+    for service in ('role-broker','review-dispatcher','author-selftest','command-watchdog','evaluation-queue'):
+        directory=state/service;directory.mkdir(exist_ok=True,mode=0o755)
+        os.chown(directory,0,0);directory.chmod(0o755)
+    require_isolated_service_config(runtime)
+    result={'status':'configuration_bound','production_started':False,'runtime':str(runtime),
+            'original_control_sha256':originals,'rebound_registry_fields':rebound,'forgejo_port':port,
+            'remaining_gates':['Install current role clients and skills; run all capability checks.',
+                               'Validate restored Git worktrees and immutable registration hashes.',
+                               'Reconcile stopped selftest/evaluation jobs before scheduling.']}
+    replace_private_json(journal_path,result)
+    return result
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,required=True)
@@ -292,10 +387,15 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--inventory-seconds',type=int,default=20)
     parser.add_argument('--runtime-root',type=Path,help='Move stopped donor software to this runtime; --output names the private migration journal')
+    parser.add_argument('--phase',choices=['inventory','software','private','configuration'])
     args=parser.parse_args()
-    if args.runtime_root:
-        result=stage_software(args.source,args.software_donor,args.runtime_root,args.output)
-        print(json.dumps({'status':result['status'],'roles':len(result['roles']),'production_started':False}))
+    phase=args.phase or ('software' if args.runtime_root else 'inventory')
+    if phase!='inventory':
+        if args.runtime_root is None:parser.error('--runtime-root is required for this phase')
+        if phase=='software':result=stage_software(args.source,args.software_donor,args.runtime_root,args.output)
+        elif phase=='private':result=restore_private_controls(args.source,args.runtime_root,args.output)
+        else:result=bind_runtime_configuration(args.source,args.runtime_root,args.output)
+        print(json.dumps({'status':result['status'],'production_started':False}))
         return
     result=prepare(args.source,args.software_donor,args.output,args.inventory_seconds)
     print(json.dumps({'status':result['status'],'roles':len(result['roles']),

@@ -1,41 +1,35 @@
-# 维护后部署准备
+# 维护后部署恢复（2026-11-02）
 
-本次未启动生产，也没有写入历史 `/tmp` 运行目录。最新工作区规则要求所有新增数据位于 `/mnt/data/zhanglinfeng/workspace`；该路径当前是 CPFS，容器没有 `CAP_SYS_ADMIN`，不能自行将本地盘 bind mount 到此路径。
+目标为 `/mnt/data/zhanglinfeng/workspace/.tmp/gewu-terminal-bench-science-runtime-live`。本恢复不启动生产；最新 `/tmp/gewu-terminal-bench-science-runtime-live-20261101` 始终只读。所有新数据位于工作区。当前工作区实际挂载在 CPFS；目录名 `.tmp` 不表示它是本地 ext4，且容器没有自行 bind mount 所需权限。
 
 ## 已实际完成
 
-`prepare_repaired_runtime.py` 已从停机的 `/tmp/gewu-terminal-bench-science-runtime-live-20261101` 生成工作区内的私有控制文件检查点：
+- 私有检查点位于 `.state/deployment-recovery-20261102`：45 个原始控制文件，267624 字节，逐文件 SHA-256 验证；目录 0700、文件 0600，清单不含凭证正文。
+- 14 个角色独立软件环境已从停机的 `universes/my-terminal-bench-science` **可逆搬迁**到新运行目录。使用同文件系统 `rename`，没有重新复制或解包科学环境。旧 donor 的工作区、Git、指令、服务状态保留原处；donor 软件已迁出，因此不能把它当作可直接启动的旧实例。
+- 共搬迁 93 个软件目录，耗时 117 秒，包括每角色 `bin`、`usr`、`lib`、`lib64`、`etc`、存在的 `opt` 和 `home/role/.local`。迁移前确认所有角色 UID 没有运行进程；逐目录记录源/目标、inode、UID/GID/mode 和移动状态，支持中断续做、不覆盖冲突目标。清单为 `software-migration.json`。
+- 14/14 角色均在自己的 chroot 和 UID 下通过 NumPy/SciPy 导入及计算验证；没有模型或云调用。可写环境没有跨角色共享，也没有使用指向 chroot 外部的环境符号链接。
+- 从**最新停机实例**恢复了匹配最新 Forgejo 数据库的 21 个私有文件，包括角色 Git 凭证、controller 凭证、Forgejo 配置与签名密钥；保持 0600 及实际使用者 UID，记录仅包含路径/摘要。没有用较旧 donor 的凭证覆盖最新身份。
+- 已安装当前的 10 个 self-test 客户端、3 个 evaluator batch 客户端，以及支持运行时 Forgejo URL 的 14 个角色辅助程序。已复制最新角色指令并安装当前版本的 skills 和题目策略。完整 capability 门检 **14/14 通过**：包括五个 Python 模块、九个基础工具、角色客户端的真实 `--help` 和全部 skill 资源摘要；回执在各角色 `capabilities.json`。
 
-`workspace/.state/deployment-recovery-20261102/`
+## 正在恢复的当前数据
 
-- 45 个控制文件，267624 字节，逐文件 SHA-256 验证。
-- 目录权限 0700，文件 0600；清单不包含凭证内容。
-- 包括当前角色指令、可用审核反馈、思路计时、broker/queue/registry、review ledger 等小文件；保留原 UID/GID/mode 元数据，恢复时需要显式应用。
-- `migration-plan.json` 明确标记 `runnable=false`、`control_checkpoint_only`。这不是已恢复的生产实例。
-- 角色软件只检查存在性，没有复制软件目录，没有修改旧角色工作区。
+`runtime_backup.py` 的恢复导入保留源 UID/GID/mode，并逐文件核验内容。大约 55 GB 的初始库存包含大量重复历史 Git/临时克隆。当前优先恢复作者实际工作、未提交文件、所需 Git/worktree、controller 轨迹、Forgejo DB/repositories、队列/评测证据和控制状态；旧 completed self-test 源克隆及 curator 历史 scratch 由清单明确列为后续独立归档。
 
-## 真实存储量与软件复用
+工作区文件系统不支持 reflink。经过验证的恢复 staging 将合并提升到运行目录，避免再复制一份大 payload；提升后的 staging 会标为已移交，不能继续声称它是独立完整备份。最新历史 `/tmp` 原件继续保留。启动后不能把旧归档再次覆盖到活动工作区。
 
-14 个当前角色在 `universes/my-terminal-bench-science` 下均已存在角色 Python、独立科学环境 Python、bash、git。`my-terminal-bench-science-v2` 中多数角色缺独立科学环境，所以应优先复用前者的软件，不能盲目选择 v2 或重装十四份环境。存在性不代表所有包已经逐个验收，恢复后仍须运行角色 capabilities。
+通用备份刻意过滤凭证，因此运行恢复还需补充私有 Git config、签名密钥及名称中包含 `secret` 的合法审计源码。仅文件路径过滤不能证明保存了全部原始证据。
 
-对最新实例的当前角色 workspace/selftest/evaluation/计时状态、控制器状态及 Forgejo data 做了有时间和文件数边界的只读盘点：约 61.42 GB（57.2 GiB），181925 个文件，不含软件 rootfs、包缓存和历史 `workspace.preserved-*`。因此全量搬迁并非一个小配置复制操作。最大部分是控制器与自测状态约 14.02 GB、curator workspace 约 12.48 GB、author-02 workspace 约 8.22 GB。未开始大规模复制。
+## 剩余启动门检
 
-工作区源的 Forgejo DB 约 3.67 MB，最新运行实例约 8.34 MB，不能拿旧数据库覆盖最新数据。最新数据库必须和同一实例的 repository objects、签名密钥等一起保留，并在停机快照/SQLite backup 方式下迁移。
+1. 完成并验收当前数据导入；核对所有作者工作、Git 远端/HEAD/worktree、最新调度和评测状态，记录延后归档范围。
+2. 运行 `prepare_repaired_runtime.py --phase configuration`，仅重绑定 active broker/queue/registry/service descriptors。历史签名模板、轨迹和回执保持原字节；registry 指向恢复后相同摘要的 snapshot。
+3. 所有启用角色通过完整 capability 和工作区读写验证；重建 derived evaluation catalog，检查 Forgejo 数据库与代码仓库配套完整。
+4. 对停机中的自测/评测任务作生命周期协调，确保旧运行不会被错误重复调度。用已有简单题验证平台链路后，父控制器决定生产启动。
 
-## 恢复顺序
+启动器已修复同路径 workspace alias 自引用问题，并保留已恢复凭证和服务配置。目标已有软件、指令和工作时不会再从较旧 donor 覆盖。
 
-1. 停机来源保持只读；确定工作区内目标，并保存现有软件 donor 的旧 workspace 和服务状态，不覆盖。
-2. 采用增量备份恢复最新作者 workspace/Git、controller 轨迹、自测/评测证据和配套 Forgejo 数据。源路径里的签名证据不应整体文本替换；重新绑定并核验 hash。
-3. 在保持每角色独立 UID 和包环境的前提下复用工作区已有软件，恢复真实当前控制状态；检查路径、权限及注册表。
-4. 安装新客户端和完整 skills，构建部署控制器，生成角色能力回执。验证队列未遗留未知 ACS 资源、审核唯一绑定和作者暂停状态。
-5. 验证恢复文件摘要与一次简单题平台链路后，再启动生产并观察新会话。
+## 工具与验证
 
-## 启动器须先修复的一处问题
+`prepare_repaired_runtime.py` 提供四阶段：`inventory`、`software`、`private`、`configuration`。`--output` 为当前阶段私有清单或检查点路径；后三阶段要求 `--runtime-root`。所有阶段均不启动生产。
 
-`start-universe-local-runtime` 中“Keep the controller's local layout connected”段，将 `agents/<role>/workspace` 与 `Path(entry['root'])/'workspace'` 设为同一地址后，仍把真实目录重命名为 `workspace.preserved-*`，再建立指向自己的 symlink。随后 `start-universe` 发现 symlink 又以空目录替换。历史角色根目录下已出现多份 `workspace.preserved-*`。恢复前必须在 `link == target` 时直接保留实际目录；不能重复执行该段丢失当前工作入口。
-
-## 验证边界
-
-两个隔离单元测试通过：控制检查点不复制软件、不声称可运行、逐文件摘要及私有权限有效、旧输出不覆盖、符号链接控制文件拒绝。Python AST、`node --check -` 和 `git diff --check` 通过。
-
-另以工作区软件 donor 的真实 author-01（UID 21001）和 evaluator-01（UID 21011）分别运行隔离 chroot 验证：独立环境 NumPy 2.4.6、SciPy 1.17.1 均可导入，`numpy.arange(5).sum()` 均为 10。没有运行模型或云服务。其余十二个角色的完整运行能力、完整数据恢复、生产技能加载和模型进度尚未验证。
+五个隔离测试通过：检查点不冒称可运行、拒绝链接控制文件、软件搬迁可恢复且保留 donor 工作、目标冲突不覆盖，以及服务路径重绑定不改历史证据。完整 capability、数据导入和生产行为验收分别记录，不能用单元测试代替。

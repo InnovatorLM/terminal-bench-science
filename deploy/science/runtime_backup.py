@@ -52,7 +52,10 @@ def excluded(rel):
         return True
     if any(any(fnmatch.fnmatch(part.lower(), pat) for pat in SENSITIVE) for part in parts):
         return True
-    if rel.name.endswith(('.lock', '.sock', '.pid', '.pending', '.backup-pending', '-wal', '-shm')):
+    if rel.name.endswith(('.sock', '.pid', '.pending', '.backup-pending', '-wal', '-shm')):
+        return True
+    runtime_lock=rel.name in {'state.lock','worker.lock','backup.lock','launcher.lock','watchdog.lock','reservation.lock','dispatcher.lock','lifecycle.lock','curator.lock'} or fnmatch.fnmatch(rel.name,'author-*.lock') or fnmatch.fnmatch(rel.name,'evaluator-*.lock')
+    if rel.name.endswith('.lock') and ('.git' in parts or runtime_lock):
         return True
     if '.git' in parts and (rel.name.startswith(('tmp_', 'tmp_obj_')) or rel.name in {'FETCH_HEAD', 'config'}):
         return True
@@ -93,7 +96,7 @@ def inspect_source(path):
         raise ValueError('Expected ordinary source file')
     result={'size': value.st_size, 'mtime_ns': value.st_mtime_ns,
             'mode': stat.S_IMODE(value.st_mode), 'inode': value.st_ino,
-            'ctime_ns': value.st_ctime_ns}
+            'ctime_ns': value.st_ctime_ns, 'uid':value.st_uid, 'gid':value.st_gid}
     if stat.S_ISLNK(value.st_mode):result.update(kind='symlink',target=os.readlink(path))
     if path.name=='forgejo.db':
         try:
@@ -161,7 +164,7 @@ def digest(path, deadline, limit=None):
     return value.hexdigest()
 
 
-def copy_file(source, target, expected, deadline, checked_parents=None):
+def copy_file(source, target, expected, deadline, checked_parents=None, recovery_roots=None):
     if inspect_source(source) != expected:
         raise ValueError('Source changed since inventory')
     is_link=expected.get('kind')=='symlink'
@@ -170,8 +173,19 @@ def copy_file(source, target, expected, deadline, checked_parents=None):
     # for every small file creates severe metadata overhead on network storage.
     if checked_parents is None or target.parent not in checked_parents:
         if any(p.is_symlink() for p in target.parents):raise ValueError('Linked backup destination refused')
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if checked_parents is not None:checked_parents.add(target.parent)
+        if recovery_roots:
+            source_root,data_root=recovery_roots
+            chain=[target.parent,*target.parent.parents]
+            for folder in reversed([p for p in chain if p==data_root or p.is_relative_to(data_root)]):
+                if checked_parents is not None and folder in checked_parents:continue
+                folder.mkdir(mode=0o700,parents=True,exist_ok=True)
+                metadata=(source_root/folder.relative_to(data_root)).stat()
+                os.chown(folder,metadata.st_uid,metadata.st_gid)
+                folder.chmod(stat.S_IMODE(metadata.st_mode))
+                if checked_parents is not None:checked_parents.add(folder)
+        else:
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if checked_parents is not None:checked_parents.add(target.parent)
     pending = target.with_name(target.name + '.backup-pending')
     try:
         if pending.is_symlink():raise ValueError('Linked pending destination refused')
@@ -211,7 +225,10 @@ def copy_file(source, target, expected, deadline, checked_parents=None):
             checksum = checksum.hexdigest()
             if digest(pending, deadline) != checksum:
                 raise ValueError('Backup checksum differs')
-        if not is_link:pending.chmod(0o600)
+        if recovery_roots:
+            os.chown(pending,expected['uid'],expected['gid'],follow_symlinks=False)
+            if not is_link:pending.chmod(expected['mode'])
+        elif not is_link:pending.chmod(0o600)
         pending.replace(target)
         result = target.lstat()
         return dict(source=expected, sha256=checksum, size=result.st_size,
@@ -231,9 +248,9 @@ def unchanged(record, item, destination):
             and record.get('backup_ctime_ns')==info.st_ctime_ns)
 
 
-def cycle(source, target, budget=300, includes=None, receipt=None, workers=4):
+def cycle(source, target, budget=300, includes=None, receipt=None, workers=4, recovery=False):
     source = Path(source).resolve(strict=True);target=Path(target)
-    if workers < 1 or workers > 16:raise ValueError('Backup workers must be between 1 and 16')
+    if workers < 1 or workers > 64:raise ValueError('Backup workers must be between 1 and 64')
     if target.is_symlink():raise ValueError('Linked backup root refused')
     target=target.resolve()
     if not target.is_relative_to(WORKSPACE) or target==source or target.is_relative_to(source):
@@ -253,9 +270,12 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4):
         identity={'source':str(source),'includes':includes}
         if old and old.get('identity')!=identity:raise ValueError('Target belongs to another backup scope')
         manifest=old or {'identity':identity,'files':{},'last_complete_inventory_at':None}
+        if manifest.get('recovery') not in (None,recovery):raise ValueError('Cannot change backup purpose')
+        manifest['recovery']=recovery
         progress=json.loads(progress_path.read_text()) if progress_path.exists() else {}
         row=dict(identity,started_at=started,status='running',copied=0,unchanged=0,warnings=[],
-                 coverage='selected_scope' if includes else 'recovery_payload',
+                 coverage=manifest.get('scope','selected_scope' if includes else 'recovery_payload'),
+                 purpose='recovery_import' if recovery else 'independent_backup',
                  consistency='per-file-verified-live-inventory',last_success_at=manifest.get('last_success_at'))
         latest=Path(receipt) if receipt else target/'latest.json'
         if not latest.resolve().is_relative_to(WORKSPACE):raise ValueError('Receipt must be workspace-local')
@@ -277,7 +297,8 @@ def cycle(source, target, budget=300, includes=None, receipt=None, workers=4):
                         # stale size/mtime forever. Record the changed snapshot.
                         item['source']=current
                     if unchanged(manifest['files'].get(rel),item,destination):return rel,None,None
-                    return rel,copy_file(source/rel,destination,item['source'],deadline,checked_parents),None
+                    roots=(source,target/'data') if recovery else None
+                    return rel,copy_file(source/rel,destination,item['source'],deadline,checked_parents,roots),None
                 except (OSError,ValueError) as error:
                     return rel,None,{'path':rel,'kind':type(error).__name__}
             # Keep only one future per worker in flight. In-order collection
@@ -384,13 +405,14 @@ def main():
     p.add_argument('--interval',type=int,default=600);p.add_argument('--budget',type=float,default=300)
     p.add_argument('--once',action='store_true');p.add_argument('--receipt',type=Path)
     p.add_argument('--workers',type=int,default=4)
+    p.add_argument('--recovery-import',action='store_true',help='Preserve owner/mode for a private recovery staging tree')
     p.add_argument('--include',action='append',default=[])
     args=p.parse_args()
     if args.budget<=0 or args.interval<=0:raise SystemExit('Budget and interval must be positive')
     def stop(*_):raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM,stop)
     while True:
-        result=cycle(args.source,args.target,args.budget,args.include,args.receipt,args.workers)
+        result=cycle(args.source,args.target,args.budget,args.include,args.receipt,args.workers,args.recovery_import)
         print(json.dumps({k:result.get(k) for k in ('status','copied','unchanged','remaining_files','last_success_at')}),flush=True)
         if args.once:return 0 if result['status'] in ('ok','already_running') else 2
         time.sleep(args.interval)

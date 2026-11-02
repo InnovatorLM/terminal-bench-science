@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from prepare_repaired_runtime import prepare,stage_software,WORKSPACE
+from prepare_repaired_runtime import prepare,stage_software,bind_runtime_configuration,WORKSPACE
 
 
 class PreparationTests(unittest.TestCase):
@@ -69,6 +69,43 @@ class PreparationTests(unittest.TestCase):
                 stage_software(source,donor,runtime,root/'journal.json',lambda *_:{})
             self.assertEqual((donor/scope/'bash').read_text(),'source')
             self.assertEqual((runtime/scope/'bash').read_text(),'target')
+
+    def test_service_rebinding_preserves_historical_evidence(self):
+        with tempfile.TemporaryDirectory(dir=WORKSPACE/'.tmp') as raw:
+            root=Path(raw);source=root/'source';source.mkdir();runtime=root/'runtime'
+            state=runtime/'.state/gewu-multiverse';configuration=runtime/'.config/science-evaluation'
+            configuration.mkdir(parents=True)
+            roles=runtime/'.config/gewu-multiverse/agents';(roles/'evaluator-01').mkdir(parents=True)
+            def write(path,payload):
+                path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(payload))
+            write(state/'role-broker/config.json',{'controller_uid':65534,'roles':{'evaluator-01':{'uid':29001,'gid':29001,'root':str(source/'old-role')}}})
+            write(configuration/'queue.json',{'registry':str(source/'old-registry'),'state':str(source/'old-state'),
+                'role_queues':[{'role':'evaluator-01','evaluator_uid':29001,'inbox':'old','results':'old'}]})
+            snapshot=runtime/'registered/task';snapshot.mkdir(parents=True)
+            template=runtime/'registered/template.json';template.write_text('{}')
+            write(configuration/'registry.json',{'task':{'snapshot':str(source/'registered/task'),'template':str(source/'registered/template.json'),'snapshot_sha256':'unchanged'}})
+            for name in ['review-dispatcher','author-selftest','command-watchdog']:
+                write(state/name/'config.json',{'broker_config':'old','state':'old'})
+            write(state/'deployment.json',{'status':'service_config_prepared','universe_root':str(source)})
+            instance=runtime/'.local/share/gewu-multiverse/forgejo/instance'
+            (instance/'data/repositories').mkdir(parents=True);(instance/'data/forgejo.db').write_bytes(b'fixture')
+            (instance/'app.ini').write_text('[server]\nHTTP_PORT = 3000\n')
+            signed=runtime/'signed-evidence.json';signed.write_text(json.dumps({'old_path':str(source/'original'),'signature':'unchanged'}))
+            before=signed.read_bytes()
+            old_workspace=source/'.config/gewu-multiverse/agents/evaluator-01/workspace'
+            old_workspace.mkdir(parents=True);(old_workspace/'keep.txt').write_text('work')
+            with self.assertRaisesRegex(ValueError,'Restore the current nonempty workspace'):
+                bind_runtime_configuration(source,runtime,root/'binding.json')
+            new_workspace=roles/'evaluator-01/workspace';new_workspace.mkdir()
+            (new_workspace/'keep.txt').write_text('work')
+            result=bind_runtime_configuration(source,runtime,root/'binding.json')
+            self.assertEqual(result['status'],'configuration_bound')
+            self.assertFalse(result['production_started'])
+            self.assertEqual(signed.read_bytes(),before)
+            registry=json.loads((configuration/'registry.json').read_text())
+            self.assertEqual(registry['task']['snapshot'],str(snapshot))
+            self.assertEqual(registry['task']['snapshot_sha256'],'unchanged')
+            self.assertNotIn(str(source),(runtime/'start').read_text())
 
 
 if __name__=='__main__':unittest.main()
