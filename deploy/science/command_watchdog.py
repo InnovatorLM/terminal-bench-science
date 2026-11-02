@@ -92,7 +92,11 @@ def main():
             observations=STATE/'iteration-observations'
             scan_clocks(config,state_root=a.session_state,observation_root=observations)
             from author_budget_watchdog import scan as scan_author_budgets
-            scan_author_budgets(config,a.session_state,observations,STATE/'budget-resets')
+            budget_outcomes=scan_author_budgets(config,a.session_state,observations,STATE/'budget-resets')
+            if budget_outcomes:
+                # A retained/corrupt history requires operator attention. Do
+                # not silently discard that result while the daemon continues.
+                print(json.dumps(dict(event='author_budget_watchdog',results=budget_outcomes)),flush=True)
             from dead_end_watchdog import scan as scan_dead_ends
             scan_dead_ends(config, a.session_state, STATE/'dead-end-observations')
             if a.once:return

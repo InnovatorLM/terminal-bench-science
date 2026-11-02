@@ -1,7 +1,25 @@
-import os,signal,subprocess,sys,time,unittest
+import contextlib,io,json,os,signal,subprocess,sys,tempfile,time,unittest
+from pathlib import Path
+import command_watchdog as watchdog
 from command_watchdog import overdue,process_info,stop_command_group,owner_alive
 from unittest.mock import patch
 class DeadlineTests(unittest.TestCase):
+    def test_budget_inspection_failure_is_visible_without_stopping_other_scans(self):
+        with tempfile.TemporaryDirectory(dir=watchdog.W/'.tmp') as raw:
+            root=Path(raw);config=root/'config.json';config.write_text('{"roles":{}}')
+            outcome=[dict(role='author-01',status='inspection_required',error_type='JSONDecodeError')]
+            output=io.StringIO()
+            with patch.object(watchdog,'CONFIG',config),patch.object(watchdog,'STATE',root/'monitor'), \
+                 patch.object(sys,'argv',['command-watchdog','--once','--config',str(config),
+                                        '--state',str(root/'monitor'),'--session-state',str(root/'sessions')]), \
+                 patch.object(watchdog,'scan'),patch('iteration_lifecycle.scan_clocks'), \
+                 patch('author_budget_watchdog.scan',return_value=outcome), \
+                 patch('dead_end_watchdog.scan') as dead_ends,contextlib.redirect_stdout(output):
+                watchdog.main()
+            records=[json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertIn(dict(event='author_budget_watchdog',results=outcome),records)
+            dead_ends.assert_called_once()
+
     def test_hot_restarted_service_stops_if_launcher_exits_or_pid_is_reused(self):
         owner=dict(pid=123,uid=0,start_ticks=456,state='S')
         with patch('command_watchdog.process_info',return_value=owner):

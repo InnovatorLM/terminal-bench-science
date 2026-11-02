@@ -8,7 +8,7 @@ from dead_end_watchdog import read_json, save
 from iteration_budget import LIMIT
 
 
-def exhausted_idea(role, entry, observations):
+def exhausted_idea(role, entry, observations, *, attempted_ideas=()):
     root = Path(entry['root'])
     ledger = root/'home/role/.state/author-iteration/ledger.json'
     observation = Path(observations)/(role+'.json')
@@ -19,6 +19,10 @@ def exhausted_idea(role, entry, observations):
         raise ValueError('Budget observation role mismatch')
     state = read_json(ledger)
     for idea, row in state.get('ideas', {}).items():
+        # Closed ideas remain in the ledger permanently. A prior reset must
+        # not hide a later idea that independently exhausts its own budget.
+        if idea in attempted_ideas:
+            continue
         events = row.get('events', [])
         proof = observed.get('ideas', {}).get(idea, {})
         if (row.get('status') == 'abandoned' and row.get('reason') == EXHAUSTED_REASON
@@ -42,13 +46,15 @@ def scan(config, session_state, observations, state, now=None, reset_action=None
         if not role.startswith('author-'):
             continue
         idea = None
+        previous = None
         path = state/(role+'.json')
         try:
-            idea = exhausted_idea(role, entry, observations)
-            if idea is None:
-                continue
             previous = read_json(path) if path.exists() else {}
-            if idea in previous.get('attempted_ideas', {}):
+            if not isinstance(previous, dict) or not isinstance(previous.get('attempted_ideas', {}), dict):
+                raise ValueError('Invalid budget reset history')
+            idea = exhausted_idea(role, entry, observations,
+                                  attempted_ideas=previous.get('attempted_ideas', {}))
+            if idea is None:
                 continue
             previous.setdefault('attempted_ideas', {})[idea] = dict(at=now, status='reset_requested')
             save(path, previous)
@@ -69,8 +75,9 @@ def scan(config, session_state, observations, state, now=None, reset_action=None
             save(path, previous)
             results.append(dict(role=role, idea=idea, status='reset_ready'))
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
-            previous = read_json(path) if path.exists() else {}
-            if idea is not None and idea in previous.get('attempted_ideas', {}):
+            # An unreadable history must neither crash the whole watchdog nor
+            # be replaced with an empty one, which could repeat an old reset.
+            if idea is not None and isinstance(previous, dict) and idea in previous.get('attempted_ideas', {}):
                 previous['attempted_ideas'][idea].update(status='inspection_required', error_type=type(error).__name__)
                 save(path, previous)
             results.append(dict(role=role, status='inspection_required', error_type=type(error).__name__))

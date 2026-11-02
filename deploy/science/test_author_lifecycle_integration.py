@@ -16,6 +16,9 @@ import unittest
 
 import dead_end_watchdog
 import role_reset
+import author_budget_watchdog
+from author_iteration_clock import EXHAUSTED_REASON, LIMIT, transition
+from iteration_lifecycle import scan_clocks
 
 
 MOCK_RUNNER = r'''
@@ -130,7 +133,12 @@ class AuthorLifecycleIntegration(unittest.TestCase):
             return False
 
     def assert_settled(self, run, pid):
-        self.wait_for(lambda: not (run/'session.pid').exists(), 'PID cleanup')
+        # The controller removes these two files sequentially. Wait for the
+        # complete cleanup boundary rather than treating the first unlink as
+        # proof that every subsequent cleanup operation has already finished.
+        self.wait_for(lambda: not (run/'session.pid').exists()
+                      and not (run/'session.pgid').exists()
+                      and not self.process_alive(pid), 'process and PID/PGID cleanup')
         self.assertFalse((run/'session.pgid').exists())
         self.assertFalse(self.process_alive(pid))
         contents = (run/'transcript.jsonl').read_bytes()
@@ -194,7 +202,7 @@ class AuthorLifecycleIntegration(unittest.TestCase):
                          'already_attempted')
         self.assertEqual(len(list((self.state/'role-reset').glob('*.json'))), 1)
 
-    def test_review_identity_pause_and_feedback_resume_real_runner(self):
+    def review_pause_and_resume(self, conclusion):
         current = dict(key='commit:tasks/fixture', generation=3,
                        commit='a'*40, task='tasks/fixture', state='reviewing',
                        author_must_pause=True)
@@ -209,11 +217,73 @@ class AuthorLifecycleIntegration(unittest.TestCase):
         self.assert_settled(self.first, self.first_pid)
         time.sleep(.2)
         self.assertEqual(len(list((self.state/'author-01').glob('run-*'))), 1)
-        feedback.write_text(json.dumps(dict(current, state='waiting_author', author_must_pause=False)))
+        feedback.write_text(json.dumps(dict(current, state=conclusion, author_must_pause=False)))
         resumed = self.wait_for_run(excluding=self.first)
         self.assertNotEqual(int((resumed/'session.pid').read_text()), self.first_pid)
         self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
         self.assertEqual(self.work.read_text(), 'preserve existing source and numerical evidence\n')
+
+    def test_review_identity_pause_and_feedback_resume_real_runner(self):
+        self.review_pause_and_resume('waiting_author')
+
+    def test_formal_review_conclusion_resumes_real_runner(self):
+        self.review_pause_and_resume('completed')
+
+    def test_waiting_for_acs_and_platform_never_resets_a_live_author(self):
+        inbox=self.role/'selftest/inbox';results=self.role/'selftest/results'
+        inbox.mkdir(parents=True);results.mkdir()
+        request=inbox/('a'*32+'.json');result=results/request.name
+        request.write_text('{}')
+        for action,status in [('acs-wait','running'),('platform-wait','waiting_platform')]:
+            with self.subTest(action=action):
+                clock={};started=time.time()-LIMIT-100
+                transition(clock,'start','existing-idea',started)
+                transition(clock,action,'existing-idea',started+10,
+                           run_id='isolated-acs-job' if action=='acs-wait' else None,
+                           reason='isolated platform wait')
+                self.ledger.write_text(json.dumps(clock))
+                retained=self.ledger.read_bytes()
+                result.write_text(json.dumps({'status':status}))
+                observations=self.root/(action+'-clock-observations')
+                self.assertEqual(scan_clocks(self.config,self.state,observations),[])
+                self.assertEqual(author_budget_watchdog.scan(
+                    self.config,self.state,observations,self.root/'budget-resets'),[])
+                monitor=self.root/(action+'-dead-end-observations')
+                for at in [100000,100000+LIMIT+1]:
+                    dead_end_watchdog.scan(self.config,self.state,monitor,now=at)
+                    self.assertEqual(json.loads((monitor/'author-01.json').read_text())['action'],
+                                     'waiting')
+                self.assertEqual(self.ledger.read_bytes(),retained)
+                self.assertTrue(self.process_alive(self.first_pid))
+                self.assertEqual(len(list((self.state/'author-01').glob('run-*'))),1)
+                self.assertFalse(list((self.state/'role-reset').glob('*.json')))
+
+    def test_budget_expiry_reconciles_stops_and_starts_a_new_session(self):
+        clock={};transition(clock,'start','expired-idea',time.time()-LIMIT-10)
+        self.ledger.write_text(json.dumps(clock))
+        observations=self.root/'clock-observations'
+        self.assertEqual(scan_clocks(self.config,self.state,observations),[])
+        retained=self.ledger.read_bytes();row=json.loads(retained)['ideas']['expired-idea']
+        self.assertEqual(row['status'],'abandoned')
+        self.assertEqual(row['reason'],EXHAUSTED_REASON)
+        self.assertGreater(row['active_seconds'],LIMIT)
+        resets=self.root/'budget-resets'
+        result=author_budget_watchdog.scan(self.config,self.state,observations,resets)
+        self.assertEqual(result,[dict(role='author-01',idea='expired-idea',status='reset_ready')])
+        receipt_id=json.loads((resets/'author-01.json').read_text())['attempted_ideas']['expired-idea']['reset_id']
+        receipt=json.loads((self.state/'role-reset'/(receipt_id+'.json')).read_text())
+        self.assertTrue(receipt['hold_released'])
+        self.assertEqual(receipt['survivors'],[])
+        self.assert_settled(self.first,self.first_pid)
+        resumed=self.wait_for_run(excluding=self.first)
+        self.assertNotEqual(int((resumed/'session.pid').read_text()),self.first_pid)
+        instruction=(resumed/'fixture-instruction.txt').read_text()
+        self.assertIn('Operator reset: '+receipt_id,instruction)
+        self.assertIn('Close expired-idea and start a new idea.',instruction)
+        self.assertEqual(self.ledger.read_bytes(),retained)
+        self.assertEqual(self.work.read_text(),'preserve existing source and numerical evidence\n')
+        self.assertEqual(author_budget_watchdog.scan(self.config,self.state,observations,resets),[])
+        self.assertEqual(len(list((self.state/'role-reset').glob('*.json'))),1)
 
 
 if __name__ == '__main__':
