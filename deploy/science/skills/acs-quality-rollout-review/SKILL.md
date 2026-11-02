@@ -18,6 +18,8 @@ description: Independently evaluate a frozen Harbor task with five ACS rollouts 
 
 保存每次 result、agent轨迹、verifier输出、镜像digest、run ID及清理证据。基础设施/适配器失败或无verifier结果不能算模型答错；先修复补跑。四小时超时先查题目缺失与环境缺陷；排除后确属难题才计模型失败。有效通过率<=60%可接收，但必须结合科学正确性、题意/测试一致性、捷径检查和轨迹审查，不能用五次全错自动证明高质量。
 
+`role-evaluation-batch status` 的 `evidence_index` 固定列出五个 job 的证据位置与缺项。按 [逐次证据索引](references/evidence-index.md) 核对轨迹、原生会话、实际镜像/资源、清理记录；正式报告交付这五项索引和逐次结论。`raw_trajectory_exported=false` 表示原始文件没有直接交给角色，不表示轨迹丢失。
+
 作者自测不等于独立评测。只对所派不可变版本输出结论；用 role-review-status 记录状态（先看 --help），平台问题与作者问题分开交接。
 
 ## 题目难度与现实来源（作者和审核者共同遵守）

@@ -105,6 +105,7 @@ def recover(config, request):
         try:
             answer.update(evidence_packet='/evaluation/evidence/'+request['job_id'],
                           sanitized_trajectory_exported=receipt['trajectory_available'],
+                          sanitized_native_session_exported=receipt['sanitized_native_session_exported'],
                           published_evidence_manifest_sha256=digest_file(staging/'manifest.json', packet_root))
             binding = dict(run_id=run_id, snapshot_sha256=entry['snapshot_sha256'],
                 evidence_manifest_sha256=answer['evidence_manifest_sha256'],
@@ -112,6 +113,7 @@ def recover(config, request):
                 execution_identity=report.get('execution_identity', {}), cleanup_confirmed=True)
             atomic_json(staging/'execution-binding.json', binding, 0o640)
             os.chown(staging/'execution-binding.json', 0, config['evaluator_uid'])
+            answer['execution_binding_sha256'] = digest_file(staging/'execution-binding.json', packet_root)
             # Preserve any interrupted partial publication instead of deleting
             # forensic evidence. No worker is active for this immutable job.
             if packet.exists():

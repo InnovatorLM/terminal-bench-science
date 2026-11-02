@@ -136,6 +136,10 @@ def trial_directories(run_root):
 
 def public_status(evidence):
     return {'evidence_complete': evidence['complete'], 'evidence_status': 'complete' if evidence['complete'] else 'incomplete_evidence',
+            'run_id': evidence.get('run_id'),
+            'raw_trajectory_retained': evidence['checks']['trajectory_retained'],
+            'native_session_retained': any('/agent/sessions/' in name and name.endswith('.jsonl')
+                and value != hashlib.sha256(b'').hexdigest() for name, value in evidence.get('files', {}).items()),
             'trajectory_retained': evidence['checks']['trajectory_retained'],
             'agent_logs_retained': evidence.get('agent_logs_retained', False),
             'verifier_evidence_retained': evidence['checks']['verifier_retained'],

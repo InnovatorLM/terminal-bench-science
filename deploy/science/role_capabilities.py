@@ -103,6 +103,11 @@ def inspect(role, entry, runner=subprocess.run):
         expected=Path(__file__).with_name('role_evaluation_batch.py')
         entrypoints['role-evaluation-batch']=deployed.is_file() and not deployed.is_symlink() and os.access(deployed,os.X_OK)
         entrypoints['evaluation_batch_client_current']=entrypoints['role-evaluation-batch'] and hashlib.sha256(deployed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest()
+        for name in ('role_evaluation_batch.py', 'timeout_review.py', 'rollout_evidence_index.py'):
+            deployed=root/'usr/local/bin'/name
+            expected=Path(__file__).with_name(name)
+            entrypoints[name+'_current']=(deployed.is_file() and not deployed.is_symlink()
+                and hashlib.sha256(deployed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest())
     if set(observed.get('modules',{}))!=set(MODULES) or set(observed.get('tools',{}))!=set(TOOLS):
         raise ValueError('Incomplete capability probe response')
     command_checks=observed.get('commands',{})

@@ -71,6 +71,8 @@ def submit(assignment, inbox):
 
 def summary(assignment, results, inbox=None):
     rows=[];valid=[];failures=[];not_submitted=[]
+    from rollout_evidence_index import entry as evidence_entry
+    evidence_index=[]
     inbox=Path(inbox) if inbox is not None else Path(results).parent/'inbox'
     for request in requests(assignment):
         path=Path(results)/(request['job_id']+'.json')
@@ -80,10 +82,12 @@ def summary(assignment, results, inbox=None):
             if submitted and json.loads(queued.read_text())!=request:
                 raise ValueError('Queued request belongs to another version')
             if not submitted:not_submitted.append(request['job_id'])
-            rows.append(dict(job_id=request['job_id'],status='pending' if submitted else 'not_submitted'));continue
+            rows.append(dict(job_id=request['job_id'],status='pending' if submitted else 'not_submitted'))
+            evidence_index.append(evidence_entry(request,None,results));continue
         if path.is_symlink():raise ValueError('Result symlink refused')
         result=json.loads(path.read_text())
         if any(result.get(k)!=v for k,v in request.items()):raise ValueError('Result belongs to another version')
+        evidence_index.append(evidence_entry(request,result,results))
         reward=result.get('reward')
         from timeout_review import judgment
         reviewed=judgment(assignment,request,results)
@@ -96,14 +100,33 @@ def summary(assignment, results, inbox=None):
             reward=reviewed['scoring_reward']
         if eligible:valid.append(reward)
         else:failures.append(request['job_id'])
-        rows.append(dict(job_id=request['job_id'],status=result.get('status'),valid=eligible,
+        rows.append(dict(job_id=request['job_id'],run_id=result.get('run_id') or evidence_index[-1]['run_id'],
+                         status=result.get('status'),valid=eligible,
                          reward=reward if eligible else None,cleanup_confirmed=result.get('cleanup_confirmed') is True,
                          evidence_status=result.get('evidence_status','incomplete_evidence'),
                          missing_evidence=result.get('missing_evidence',[]),
                          raw_reward=result.get('reward'),timeout_review=reviewed,
                          score_source='timeout_review' if reviewed and eligible else 'verifier' if eligible else None))
+    # Multiple job files must not make one execution appear independent.
+    # Old receipts without run IDs remain subject to final evidence validation.
+    runs={}
+    for row in rows:
+        if row.get('run_id'):runs.setdefault(row['run_id'],[]).append(row)
+    duplicates={row['job_id'] for group in runs.values() if len(group)>1 for row in group}
+    for row in rows:
+        if row['job_id'] in duplicates:
+            row.update(valid=False,reward=None,score_source=None,evidence_status='duplicate_run_identity')
+    for item in evidence_index:
+        if item['job_id'] in duplicates:
+            item.update(packet_index_verified=False,execution_identity_verified=False)
+            item['evidence_errors'].append('duplicate_run_identity')
+    valid=[row['reward'] for row in rows if row.get('valid')]
+    failures=[row['job_id'] for row in rows if row.get('valid') is False]
     complete=len(valid)==5
-    return dict(jobs=rows,valid_trials=len(valid),invalid_jobs=failures,complete=complete,
+    return dict(jobs=rows,evidence_index=evidence_index,
+                independent_runs_verified=len(runs)==5 and all(item['execution_identity_verified'] for item in evidence_index),
+                evidence_index_scope='Published manifest/binding identity and file presence/size; final acceptance also hashes file contents.',
+                valid_trials=len(valid),invalid_jobs=failures,complete=complete,
                 not_submitted_jobs=not_submitted,batch_submitted=not not_submitted,
                 next_action='Run role-evaluation-batch submit once; status does not enqueue jobs.' if not_submitted else
                             'Wait for existing jobs or diagnose terminal results; do not create another batch.',
@@ -132,6 +155,7 @@ def install_clients(config):
         finally:
             Path(name).unlink(missing_ok=True)
         for source,target in [('timeout_review.py','timeout_review.py'),
+                              ('rollout_evidence_index.py','rollout_evidence_index.py'),
                               ('role_evaluation_batch.py','role_evaluation_batch.py'),
                               ('role_review_status.py','role-review-status')]:
             fd,name=tempfile.mkstemp(prefix='.review-client-',dir=directory)

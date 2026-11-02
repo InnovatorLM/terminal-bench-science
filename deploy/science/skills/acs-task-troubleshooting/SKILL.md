@@ -25,6 +25,7 @@ Codex 一直 `Reconnecting`、没有首次模型响应或工具调用时，读 [
 | `author_source_version_mismatch`、`source_git_tree_verified` 未通过、上传与 commit 不同 | 作者确认完整 commit、仓库相对路径、文件内容和执行位一致。`--commit` 不会自动切换 `--task` 的文件；旧版 worker 未先验源时的网络诊断不能证明该 commit 本身有问题。不要拿另一个 task 的登记绕过。 |
 | `waiting_builder`、`building`、`running_oracle`、`running_nop` | 当前 job 正常等待或运行。保留 job ID，按状态变化检查；不要反复 submit、重建相同快照或清空状态。等待不证明死循环。 |
 | Docker 构建日志中的包缺失、编译失败、无效 Dockerfile | 作者看最早失败步骤，修复该依赖或构建上下文，先做小规模验证再提交。不能只看最后一条命令的退出码。 |
+| verifier 独立环境缺构建定义、入口或 COPY/ADD 文件 | 按源 task.toml 核对 verifier 的 Dockerfile/镜像和 tests 上下文；由作者补齐已声明的环境。共享或继承任务镜像的 verifier 可以合法没有 tests/Dockerfile，不能仅凭这个文件名判定缺陷。预检失败尚未启动 ACS。 |
 | `Require fresh workspace runtime context`，或平台拒绝自己的输出路径 | 平台存储路径/构建器问题。附 job、commit、具体错误，记录一次 `waiting_platform`；作者不应靠重命名题目或同版本重试规避。 |
 | `manifest unknown`、digest 不存在、基础镜像解析失败 | 核对哪个镜像及哪个阶段失败；作者修复自己写错的镜像引用，平台修复冻结/发布/镜像解析失败。成功回执绑定 digest，不能用可变 tag 猜测替换。 |
 | `unauthorized`、`ImagePullBackOff`、DNS/TLS/连接超时 | 平台核查 Pod events、pull secret、registry 和实际网络路径。公共 registry 地址本身不是失败证据；不能仅凭报错断言 ACS 或 ACR 故障。 |
@@ -45,6 +46,10 @@ Codex 一直 `Reconnecting`、没有首次模型响应或工具调用时，读 [
 记录 task 路径、完整 commit、job/run ID、状态、首次失败步骤、已尝试的具体修复，以及下一步由谁处理。避免整段日志贴到公开 issue。curator 汇总同根因平台故障，不替代作者修题或 evaluator 独立评测。evaluator 可用 `role-review-status waiting_platform --stage <阶段> --reason '<具体证据缺项>'`，作者问题使用 `waiting_author`。终态回执受版本/代次约束，后续恢复由 dispatcher 派新代次，不能手改 generation。
 
 没有新结果或反馈就结束当前会话并等待，不重复发表评论、反复探测安装或重新派单。作者收到当前版本进入审核的反馈后暂停出题，等审核结果；不要把正常评测等待当作卡死。平台故障修复后由明确恢复事件继续。
+
+同一源码连续出现相同失败时，先比较已有诊断并记录新假设或实际修改；没有新证据时不要重提同一 job。平台 watchdog 对重复失败且至少一小时源码无进展的作者执行 reset，保留工作区、轨迹和原 idea 计时。收到 reset 指令后读取原因，调整方法或换方向；重启本身不修复题目，也不重置 48 小时预算。ACS、审核、构建或平台等待按状态处理，不因等待时间长自行杀进程、清账本或重复派单。
+
+evaluator 查看 `role-evaluation-batch status.evidence_index`，区分原始留存与脱敏交付。`raw_trajectory_exported=false` 本身不是缺证据；实际是否可读看 `trajectory_available`、`sanitized_native_session_exported` 和具体错误。历史 packet 可能有轨迹但没有当时 Pod 资源记录，保留这一限制，不把它混称为 ACS 无法保存轨迹。
 
 先核对当前 commit/job 和已完成审核的版本，再使用旧诊断。旧自测失败不会推翻后来同一固定版本的正式评审；旧版回执缺新 schema 字段也不表示应重跑五次。保留已完成结论和具体证据缺项，新增版本才按当前门检提交。
 

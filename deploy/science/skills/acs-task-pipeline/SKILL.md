@@ -18,6 +18,12 @@ Run a schema/path check and an author self-test in a real ACS sandbox. Confirm
 the test produces an explicit verifier result and reward. Missing verifier
 output, `rewards=null`, a bare `ValueError`, or an infrastructure exception is
 an unscored failure requiring diagnosis (task/verifier or platform), never a solver score.
+Check the verifier's own build context before requesting ACS: `tests/test.sh`
+and every local COPY/ADD source must exist in the frozen version. An explicitly
+declared independent verifier environment must have its configured Dockerfile
+or usable image. Shared/inherited verifier environments may legitimately reuse
+the task image; do not add a redundant `tests/Dockerfile` merely to satisfy a
+filename checklist. Read the actual builder receipt to confirm which was used.
 
 ## Immutable registration
 

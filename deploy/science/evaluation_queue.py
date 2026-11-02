@@ -208,7 +208,8 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
             'cleanup_confirmed': cleanup, 'n_errors': errors if stats.get('evals') else None,
             'input_tokens': stats.get('n_input_tokens'), 'output_tokens': stats.get('n_output_tokens'),
             'aggregate_metrics': metadata, 'diagnostics': diagnostics,
-            'quality_acceptance': False, 'raw_trajectory_exported': evidence['checks']['trajectory_retained'],
+            'quality_acceptance': False, 'raw_trajectory_exported': False,
+            'sanitized_trajectory_exported': False, 'sanitized_native_session_exported': False,
             'raw_trajectory_exported_to_roles': False}
 
 
@@ -420,6 +421,7 @@ def process(config, request_path, mock=False):
                 # Only the role-visible relative reference is returned; raw paths stay private.
                 answer['evidence_packet'] = '/evaluation/evidence/' + request['job_id']
                 answer['sanitized_trajectory_exported'] = receipt['trajectory_available']
+                answer['sanitized_native_session_exported'] = receipt['sanitized_native_session_exported']
                 answer['published_evidence_manifest_sha256']=hashlib.sha256((packet/'manifest.json').read_bytes()).hexdigest()
                 binding = {'run_id': report['run_id'], 'snapshot_sha256': entry['snapshot_sha256'],
                            'evidence_manifest_sha256': answer['evidence_manifest_sha256'],
@@ -428,6 +430,7 @@ def process(config, request_path, mock=False):
                            'cleanup_confirmed': answer.get('cleanup_confirmed') is True}
                 atomic_json(packet / 'execution-binding.json', binding, 0o640)
                 os.chown(packet / 'execution-binding.json', 0, config['evaluator_uid'])
+                answer['execution_binding_sha256'] = hashlib.sha256((packet / 'execution-binding.json').read_bytes()).hexdigest()
 
         if private is not None:
             # A retained trace is not reviewable until execution identity and

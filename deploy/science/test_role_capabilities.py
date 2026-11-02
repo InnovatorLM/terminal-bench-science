@@ -70,11 +70,16 @@ class CapabilityTests(unittest.TestCase):
             runner=lambda *a,**k:subprocess.CompletedProcess([],0,json.dumps(payload),'')
             self.assertFalse(inspect('evaluator-01',entry,runner)['ready'])
             client=root/'usr/local/bin/role-evaluation-batch'
-            client.write_bytes(Path(__file__).with_name('role_evaluation_batch.py').read_bytes())
+            from role_evaluation_batch import install_clients
+            install_clients({'roles':{'evaluator-01':entry}})
             client.chmod(0o644)
             self.assertFalse(inspect('evaluator-01',entry,runner)['ready'])
             client.chmod(0o755)
             self.assertTrue(inspect('evaluator-01',entry,runner)['ready'])
+            helper=root/'usr/local/bin/rollout_evidence_index.py';current=helper.read_bytes()
+            helper.write_text('stale helper')
+            self.assertFalse(inspect('evaluator-01',entry,runner)['ready'])
+            helper.write_bytes(current)
             client.write_text('stale client')
             self.assertFalse(inspect('evaluator-01',entry,runner)['ready'])
 

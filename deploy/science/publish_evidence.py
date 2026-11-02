@@ -116,7 +116,13 @@ def publish(src, dst, secrets=(), gid=None):
         trajectory = (str(trace.get('schema_version', '')).startswith('ATIF-') and isinstance(trace.get('steps'), list)
                       and any(isinstance(step, dict) and step.get('source') == 'agent' for step in trace['steps']))
         verifier = ('verifier/test-stdout.txt' in files and any(name in files for name in ('verifier/reward.txt','verifier/reward.json')))
+        native = [item for name, item in files.items() if name.startswith('agent/sessions/')
+                  and name.endswith('.jsonl') and item['bytes'] > 0]
         manifest = {'trajectory_available': trajectory, 'verifier_available': verifier, 'files': files,
+                    'raw_trajectory_retained': trajectory,
+                    'native_session_retained': any(item['source_sha256'] != hashlib.sha256(b'').hexdigest() for item in native),
+                    'sanitized_trajectory_exported': trajectory,
+                    'sanitized_native_session_exported': bool(native),
                     'partial_jsonl_lines': partial_jsonl,
                     'sanitized': True, 'raw_trajectory_exported': False, 'scientific_acceptance': False,
                     'redaction_scope': 'Known credential values, structured secret fields, bearer tokens and private keys; not an exhaustive secret audit'}
