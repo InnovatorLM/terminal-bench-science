@@ -123,5 +123,18 @@ class BackupTests(unittest.TestCase):
         self.assertEqual((self.dst/'data/nested').stat().st_mode&0o777,0o750)
         self.assertEqual((self.dst/'data/nested/work/solve.sh').stat().st_uid,script.stat().st_uid)
         self.assertEqual(self.dst.stat().st_mode&0o777,0o700)
+    def test_role_codex_trajectories_are_retained_without_provider_credentials(self):
+        home='.config/gewu-multiverse/agents/author-01/home/role/'
+        retained=['trajectories/run-1/events.jsonl','trajectories/run-1/stderr.log',
+                  'trajectories/run-1/final-message.txt','trajectories/run-1/raw/sessions/2026/session.jsonl',
+                  '.codex/sessions/2026/session.jsonl','.codex/archived_sessions/old.jsonl',
+                  '.codex/history.jsonl','.codex/session_index.jsonl']
+        private=['.codex/auth.json','.codex/config.toml','trajectories/run-1/auth.json',
+                 'trajectories/run-1/provider.env','git-credential.json']
+        for name in retained+private:self.put(home+name,'{"event":"fixture"}\n')
+        row=b.cycle(self.src,self.dst);self.assertEqual(row['status'],'ok')
+        self.assertEqual(set(json.loads((self.dst/'manifest.json').read_text())['files']),{home+n for n in retained})
+        b.restore(self.dst,self.root/'restored')
+        self.assertEqual((self.root/'restored'/home/retained[0]).read_text(),'{"event":"fixture"}\n')
 
 if __name__=='__main__':unittest.main()

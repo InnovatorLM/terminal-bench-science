@@ -20,7 +20,7 @@ import stat
 import time
 
 WORKSPACE = Path('/mnt/data/zhanglinfeng/workspace')
-SENSITIVE = ('*.env', '*token*', '*secret*', '*credential*', 'app.ini',
+SENSITIVE = ('*.env', '*token*', '*secret*', '*credential*', 'app.ini', 'auth.json',
              'kubeconfig*', '*.key', 'id_rsa*', 'id_ed25519*', 'jwt')
 CACHES = {'.cache', '.tmp', '__pycache__', '.venv', 'node_modules', '.mypy_cache'}
 ROLE_PAYLOADS = {'workspace', 'selftest', 'evaluation', 'skills', 'home', 'runs',
@@ -67,7 +67,11 @@ def excluded(rel):
             return True
         if parts[4] == 'home' and len(parts) >= 7:
             if parts[6] not in {'.state', 'review-assignment.json', 'review-status.json',
-                                'activity-receipt.json', 'reset-instruction.md'}:
+                                'activity-receipt.json', 'reset-instruction.md',
+                                'trajectories', '.codex'}:
+                return True
+            if parts[6] == '.codex' and len(parts) >= 8 and parts[7] not in {
+                    'sessions', 'archived_sessions', 'history.jsonl', 'session_index.jsonl'}:
                 return True
         if parts[4] == 'workspace' and len(parts) >= 6 and parts[5] == 'nodesrc':
             return True

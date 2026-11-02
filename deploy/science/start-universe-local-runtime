@@ -291,13 +291,17 @@ for name, entry in config['roles'].items():
     link.symlink_to(target)
 PY
 cp "$SOURCE/README.md" "$RUNTIME/README.md" 2>/dev/null || true
-IMPORT_SOURCE=$(python3 - "$W" "$SOURCE/import" <<'PY_IMPORT'
+IMPORT_SOURCE=$(python3 - "$W" "$SOURCE/import" "$DONOR/import" <<'PY_IMPORT'
 from pathlib import Path
 import sys
-source=Path(sys.argv[2]).resolve(strict=True)
-if not source.is_relative_to(Path(sys.argv[1]).resolve()):
-    raise SystemExit('Imported benchmark source must remain inside workspace')
-print(source)
+workspace=Path(sys.argv[1]).resolve()
+for candidate in sys.argv[2:]:
+    source=Path(candidate).resolve()
+    if source.is_relative_to(workspace) and source.is_dir():
+        print(source)
+        break
+else:
+    raise SystemExit('No existing workspace-local benchmark import in source or donor')
 PY_IMPORT
 )
 ln -sfn "$IMPORT_SOURCE" "$RUNTIME/import"
