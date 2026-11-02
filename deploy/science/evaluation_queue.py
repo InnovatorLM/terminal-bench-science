@@ -221,6 +221,15 @@ def process(config, request_path, mock=False):
         if any(claim.get(key) != request[key] for key in REQUEST_KEYS):
             raise ValueError('Job ID already belongs to a different immutable request')
         retained = job / 'result.json'
+        if not retained.exists() and active_queue_worker(claim, request['job_id']):
+            # A duplicate observer must not publish a terminal interruption
+            # over a worker that still owns this immutable execution.
+            return {**request, 'status': 'running', 'cleanup_confirmed': False, 'quality_acceptance': False}
+        if not retained.exists() and not mock:
+            from recover_completed_evaluation import recover
+            recovered = recover(config, request)
+            if recovered is not None:
+                return recovered
         answer = json.loads(retained.read_text()) if retained.exists() else {**request, 'status': 'interrupted', 'cleanup_confirmed': False, 'quality_acceptance': False}
         if any(answer.get(key) != request[key] for key in REQUEST_KEYS):
             raise ValueError('Retained job result identity differs from immutable request')

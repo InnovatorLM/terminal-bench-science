@@ -23,4 +23,3 @@ def read_file(path, root):
 def digest_file(path, root):
     with evidence_file(path, root).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
-
