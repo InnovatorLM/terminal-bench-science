@@ -11,6 +11,12 @@ from universe_ack import UniverseACK
 
 
 class EvidenceTests(unittest.TestCase):
+    def collect(self, payload, target, **kwargs):
+        encoded={name:base64.b64encode(value).decode() for name,value in payload.items()}
+        obj=object.__new__(UniverseACK)
+        with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(encoded)))):
+            return asyncio.run(obj.download_dir_filtered('/logs/verifier',target,**kwargs))
+
     def test_full_verifier_output_and_reward_collected(self):
         data={k:base64.b64encode(v).decode() for k,v in {'reward.txt':b'1\n','test-stdout.txt':b'All tests passed\n','ctrf.json':b'{"passed":true}'}.items()}
         obj=object.__new__(UniverseACK)
@@ -28,6 +34,72 @@ class EvidenceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
                 with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
                     with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',raw))
+
+    def test_timeout_preserves_diagnostics_without_creating_a_reward(self):
+        from acs_result_diagnostics import classify_trial
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw)
+            payload={'test-stdout.txt':b'Collected tests; waiting for result\n',
+                     'test-stderr.txt':b'No result before timeout\n',
+                     'details/progress.txt':b'phase: verify\n'}
+            with self.assertRaisesRegex(ValueError,'Missing verifier reward; available diagnostics retained'):
+                self.collect(payload,root)
+            for name,value in payload.items():
+                self.assertEqual((root/name).read_bytes(),value)
+                self.assertEqual((root/name).stat().st_mode&0o777,0o600)
+            self.assertFalse((root/'reward.txt').exists())
+            diagnostic=classify_trial({'verifier_result':None,'exception_info':{'exception_type':'VerifierTimeoutError'}})
+            self.assertFalse(diagnostic['scored']);self.assertIsNone(diagnostic['reward'])
+
+    def test_invalid_reward_retained_verbatim_with_logs_but_still_fails(self):
+        for reward in (b'',b'NaN\n',b'0.75',b'not a score\n',b'\xff'):
+            with self.subTest(reward=reward),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                root=Path(raw)
+                with self.assertRaisesRegex(ValueError,'Invalid verifier reward; available diagnostics retained'):
+                    self.collect({'test-stdout.txt':b'failed while writing result\n','reward.txt':reward},root)
+                self.assertEqual((root/'test-stdout.txt').read_bytes(),b'failed while writing result\n')
+                self.assertEqual((root/'reward.txt').read_bytes(),reward)
+
+    def test_missing_reward_respects_log_filters_and_retains_protected_diagnostics(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw)
+            with self.assertRaises(ValueError):
+                self.collect({'test-stdout.txt':b'output','test-stderr.txt':b'error','debug.txt':b'debug'},root,
+                             include=['test-stdout.txt'],protect=['test-stderr.txt'])
+            self.assertEqual((root/'test-stdout.txt').read_bytes(),b'output')
+            self.assertEqual((root/'test-stderr.txt').read_bytes(),b'error')
+            self.assertFalse((root/'debug.txt').exists())
+
+    def test_late_unsafe_path_or_collision_cannot_partially_write_any_files(self):
+        malicious=[{'../escape':b'bad'},{'/absolute':b'bad'},{'nested/../escape':b'bad'},
+                   {'./ambiguous':b'bad'},{'a':b'file','a/child':b'bad'}]
+        for extra in malicious:
+            with self.subTest(extra=list(extra)),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                root=Path(raw);target=root/'evidence'
+                with self.assertRaises(ValueError):
+                    self.collect({'test-stdout.txt':b'must not be partially written','reward.txt':b'1',**extra},target)
+                self.assertFalse(target.exists())
+                self.assertEqual(list(root.iterdir()),[])
+
+    def test_symlink_destination_refused_before_any_other_diagnostic_is_written(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);target=root/'evidence';target.mkdir();outside=root/'outside';outside.mkdir()
+            (target/'linked').symlink_to(outside,target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'Symlink'):
+                self.collect({'test-stdout.txt':b'not yet','reward.txt':b'1','linked/escape':b'bad'},target)
+            self.assertFalse((target/'test-stdout.txt').exists());self.assertEqual(list(outside.iterdir()),[])
+
+    def test_oversized_or_corrupt_payload_refused_before_any_write(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw)
+            with self.assertRaisesRegex(ValueError,'transfer limit'):
+                self.collect({'test-stdout.txt':b'not yet','reward.txt':b'1','huge.log':b'x'*(16*1024*1024)},root/'large')
+            self.assertFalse((root/'large').exists())
+            obj=object.__new__(UniverseACK)
+            data={'test-stdout.txt':base64.b64encode(b'not yet').decode(),'reward.txt':base64.b64encode(b'1').decode(),'corrupt':'not-base64!'}
+            with patch.object(UniverseACK,'exec',AsyncMock(return_value=SimpleNamespace(return_code=0,stdout=json.dumps(data)))):
+                with self.assertRaises(ValueError):asyncio.run(obj.download_dir('/logs/verifier',root/'bad'))
+            self.assertFalse((root/'bad').exists())
 
     def test_digest_execution_does_not_require_unused_tests_dockerfile(self):
         obj=object.__new__(UniverseACK)

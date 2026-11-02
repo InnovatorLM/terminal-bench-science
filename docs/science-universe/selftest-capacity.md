@@ -26,3 +26,5 @@
 十路槽位配置已进入源码；2026-11-02 的控制面离线回归 358 项通过，Rust 库回归 362 项通过、1 项忽略。重建的控制器已安装到工作区 `.local/libexec/gewu-multiverse`。真实单题 DawnFM/Codex → 独立 verifier → 自动私有证据包验收通过，两个 Pod 的实际 imageID、资源、节点和清理均有证据；该单题验收不等于十路独立 verifier 已压测。
 
 恢复启动器同时修复了两类进度丢失风险：同一路径的 workspace 不再被改成自引用链接；已恢复的当前凭证、注册表、调度状态和角色指令不再被旧软件 donor 覆盖。正式运行仍以恢复后的 worker 进程及队列状态为准。
+
+另用原始 OpenSSL benchmark 通过真实 author self-test worker 验证从 Git 冻结上传、构建 Codex runtime、上海 ACR 发布、北京 ACS 执行的路径。三种镜像发布和 manifest/config 关联验证通过，Codex 0.164.0、rg 15.2.0；oracle=1，随后 nop 的 verifier 超时且 reward=null，worker 正确记录 selftest_failed，两次云资源清理均确认。该回执只能证明构建路径已打通，不能作为完整 self-test 通过。证据：`.state/real-worker-acceptance-adbe05c65c/`。原题测试入口运行时下载/安装依赖，失败诊断收集另有修复；未因该结果修改原始题包或伪造负对照分数。

@@ -73,6 +73,7 @@ root=pathlib.Path('/logs/verifier'); files={}; total=0
 for p in sorted(root.rglob('*')):
  if p.is_symlink(): raise ValueError('Symlink in verifier evidence')
  if not p.is_file(): continue
+ if total+p.stat().st_size>16*1024*1024: raise ValueError('Verifier evidence exceeds transfer limit')
  data=p.read_bytes(); total+=len(data)
  if total>16*1024*1024: raise ValueError('Verifier evidence exceeds transfer limit')
  files[p.relative_to(root).as_posix()]=base64.b64encode(data).decode('ascii')
@@ -82,23 +83,57 @@ print(json.dumps(files))'''
                 raise ValueError('Unable to collect complete verifier evidence')
             files = json.loads(result.stdout)
             target = Path(target_dir)
-            target.mkdir(parents=True, exist_ok=True, mode=0o700)
-            reward = base64.b64decode(files.get('reward.txt', ''), validate=True).decode().strip()
-            if reward not in {'0', '1', '0.0', '1.0'}:
-                raise ValueError('Missing or invalid verifier reward')
+            if not isinstance(files, dict):
+                raise ValueError('Invalid verifier evidence payload')
+            if target.is_symlink() or any(p.is_symlink() for p in target.parents):
+                raise ValueError('Symlink in evidence destination')
+            # Validate the entire payload before writing any file. A later
+            # malicious path, collision or oversized file must not leave a
+            # partially accepted evidence bundle or write outside the target.
+            decoded = {}
+            total = 0
             for name, encoded in files.items():
+                if not isinstance(name, str) or not isinstance(encoded, str):
+                    raise ValueError('Invalid verifier evidence entry')
                 rel = Path(name)
-                if rel.is_absolute() or '..' in rel.parts or not rel.parts:
+                if rel.is_absolute() or '..' in rel.parts or not rel.parts or str(rel) != name:
                     raise ValueError('Unsafe verifier evidence path')
+                dest = target / rel
+                if dest.is_symlink() or any(p.is_symlink() for p in dest.parents):
+                    raise ValueError('Symlink in evidence destination')
+                if (dest.exists() and not dest.is_file()) or any(p.exists() and not p.is_dir() for p in dest.parents):
+                    raise ValueError('Conflicting verifier evidence path')
+                if len(encoded) > 4 * ((16 * 1024 * 1024 + 2) // 3):
+                    raise ValueError('Verifier evidence exceeds transfer limit')
+                data = base64.b64decode(encoded, validate=True)
+                total += len(data)
+                if total > 16 * 1024 * 1024:
+                    raise ValueError('Verifier evidence exceeds transfer limit')
+                decoded[rel] = data
+            if any(parent in decoded for rel in decoded for parent in rel.parents):
+                raise ValueError('Conflicting verifier evidence paths')
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for rel, data in decoded.items():
+                name = str(rel)
                 selected = (not include or any(fnmatch.fnmatch(name, p) for p in include))
                 selected = selected and not any(fnmatch.fnmatch(name, p) for p in (exclude or []))
                 if not selected and name not in (protect or []) and name != 'reward.txt':
                     continue
                 dest = target / rel
-                if dest.is_symlink() or any(p.is_symlink() for p in dest.parents):
-                    raise ValueError('Symlink in evidence destination')
                 dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                dest.write_bytes(base64.b64decode(encoded, validate=True))
+                dest.write_bytes(data)
                 dest.chmod(0o600)
+            # Timeouts and verifier crashes often never write reward.txt. Keep
+            # their stdout/stderr before reporting that scoring is unavailable.
+            # An invalid reward is retained verbatim for diagnosis, never fixed.
+            raw_reward = decoded.get(Path('reward.txt'))
+            if raw_reward is None:
+                raise ValueError('Missing verifier reward; available diagnostics retained')
+            try:
+                reward = raw_reward.decode().strip()
+            except UnicodeDecodeError:
+                raise ValueError('Invalid verifier reward; available diagnostics retained') from None
+            if reward not in {'0', '1', '0.0', '1.0'}:
+                raise ValueError('Invalid verifier reward; available diagnostics retained')
             return
         return await super().download_dir_filtered(source_dir, target_dir, include=include, exclude=exclude, protect=protect)

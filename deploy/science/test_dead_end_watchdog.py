@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,88 @@ import dead_end_watchdog as m
 from evaluation_queue import W
 
 class DeadEndTests(unittest.TestCase):
+    def git(self, repo, *args):
+        command=['/usr/bin/git','-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-C',str(repo),*args]
+        return subprocess.run(command,check=True,capture_output=True).stdout
+
+    def make_repo(self, root):
+        repo=root/'repo';repo.mkdir()
+        self.git(repo,'init','-q');self.git(repo,'config','user.name','Test');self.git(repo,'config','user.email','test@localhost')
+        for i in range(48):(repo/f'baseline-{i}.py').write_text(f'value = {i}\n')
+        (repo/'.gitignore').write_text('ignored-source/\nnode_modules/\n')
+        self.git(repo,'add','.');self.git(repo,'commit','-qm','baseline')
+        return repo
+
+    def test_git_baselines_and_chroot_worktrees_are_not_counted_as_changed_files(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root);work=root/'work'
+            self.git(repo,'worktree','add','-q','-b','work',str(work))
+            marker=work/'.git';reference=marker.read_text()
+            marker.write_text(reference.replace(str(root),'/workspace'))
+            before={p:p.read_bytes() for p in (repo/'.git/index',repo/'.git/HEAD',marker)}
+            details={};first=m.source_signature(root,details=details)
+            self.assertEqual(details['repositories'],2);self.assertEqual(details['files'],0)
+            self.assertEqual(m.source_signature(root),first)
+            self.assertTrue(all(p.read_bytes()==value for p,value in before.items()))
+            (work/'baseline-0.py').write_text('changed only in the linked worktree\n')
+            changed=m.source_signature(root)
+            self.assertNotEqual(changed,first)
+            self.git(repo,'checkout','-q','-b','other')
+            (repo/'baseline-1.py').write_text('new head\n');self.git(repo,'add','.');self.git(repo,'commit','-qm','progress')
+            self.assertNotEqual(m.source_signature(root),changed)
+
+    def test_dirty_untracked_ignored_sources_and_non_git_scratch_are_observed(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root)
+            previous=m.source_signature(root)
+            for path in (repo/'baseline-0.py',repo/'new.py',repo/'ignored-source/code.py',root/'scratch/prototype.py'):
+                path.parent.mkdir(parents=True,exist_ok=True);path.write_text('active source\n')
+                observed=m.source_signature(root);self.assertNotEqual(observed,previous);previous=observed
+                path.write_text('revised source\n')
+                observed=m.source_signature(root);self.assertNotEqual(observed,previous);previous=observed
+            cache=repo/'node_modules/dependency/index.js';cache.parent.mkdir(parents=True);cache.write_text('cache')
+            previous=m.source_signature(root);cache.write_text('cache changes are not source progress')
+            self.assertEqual(m.source_signature(root),previous)
+
+    def test_git_filters_fsmonitor_and_index_refresh_do_not_run_or_write(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root);sentinel=root/'must-not-exist'
+            self.git(repo,'config','core.fsmonitor',f'touch {sentinel}')
+            self.git(repo,'config','filter.bad.clean',f'touch {sentinel}; cat')
+            self.git(repo,'config','filter.bad.process',f'touch {sentinel}')
+            self.git(repo,'config','filter.bad.required','true')
+            (repo/'.gitattributes').write_text('*.py filter=bad\n')
+            (repo/'baseline-0.py').write_text('modified\n')
+            index=repo/'.git/index';before=index.read_bytes();stamp=index.stat().st_mtime_ns
+            m.source_signature(root)
+            self.assertFalse(sentinel.exists());self.assertEqual(index.read_bytes(),before);self.assertEqual(index.stat().st_mtime_ns,stamp)
+
+    def test_unobservable_index_flags_or_git_errors_never_claim_stasis(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);repo=self.make_repo(root)
+            self.git(repo,'update-index','--assume-unchanged','baseline-0.py')
+            with self.assertRaisesRegex(ValueError,'hides worktree'):m.source_signature(root)
+            self.git(repo,'update-index','--no-assume-unchanged','baseline-0.py')
+            self.git(repo,'update-index','--skip-worktree','baseline-0.py')
+            with self.assertRaisesRegex(ValueError,'hides worktree'):m.source_signature(root)
+            self.git(repo,'update-index','--no-skip-worktree','baseline-0.py')
+            with self.assertRaisesRegex(ValueError,'budget'):m.source_signature(root,max_seconds=0)
+            broken=root/'broken';broken.mkdir();(broken/'.git').write_text('gitdir: /outside/worktree\n')
+            with self.assertRaises((OSError,ValueError)):m.source_signature(root)
+
+    def test_unknown_inspection_restarts_the_stasis_window_before_any_reset(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);config={'roles':{'author-01':{}},'controller_uid':0}
+            with patch.object(m,'observe',side_effect=[self.observation(),ValueError('unknown'),self.observation()]),patch('role_reset.online_reset') as reset:
+                m.scan(config,root/'sessions',root/'monitor',now=100000)
+                m.scan(config,root/'sessions',root/'monitor',now=104000)
+                unknown=json.loads((root/'monitor/author-01.json').read_text())
+                self.assertEqual(unknown['action'],'inspection_required');self.assertIsNone(unknown['source_signature'])
+                m.scan(config,root/'sessions',root/'monitor',now=104301)
+                reset.assert_not_called()
+            resumed=json.loads((root/'monitor/author-01.json').read_text())
+            self.assertEqual(resumed['action'],'observe');self.assertEqual(resumed['stable_since'],104301)
+
     def observation(self, **changes):
         return dict(dict(source_signature='a', sessions=['run-1','run-2','run-3'],
                          shared_failure=['failure'], runner_live=True, waiting=[]), **changes)
