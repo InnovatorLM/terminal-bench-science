@@ -2704,6 +2704,31 @@ fn run_declared_step(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn chat_with_retries(
+    config: &ModelConfig, messages: &[Message], tools: &[model::ToolSpec],
+    tokens: Option<u32>, thinking: Option<&str>, deadline: Instant,
+    plan: &RunPlan, turn: u32, transcript: &mut Transcript, log: &mut RunLog,
+) -> Result<model::Exchange, model::ModelError> {
+    let retry_deadline=deadline.min(Instant::now()+crate::model_retry::MAX_RETRY_WINDOW);
+    let marker=transcript.path().parent().expect("run directory").join("model-retry.json");
+    let result=crate::model_retry::run(
+        |remaining| {let mut request=config.clone();request.timeout=request.timeout.min(remaining);model::chat_with_thinking(&request,messages,tools,tokens,thinking)},
+        ||retry_deadline.saturating_duration_since(Instant::now()),
+        std::thread::sleep,
+        |error,attempt,delay| {
+            let detail=config.api_key.redact(&error.to_string());
+            let _=transcript.append(&Record::model_call_failed(&plan.run_id,turn,error.class(),&detail));
+            log.line(&format!("[turn {turn}] transient model failure; retry {attempt}/{} in {}s: {detail}",crate::model_retry::MAX_ATTEMPTS,delay.as_secs()));
+            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let state=serde_json::json!({"state":"retrying","attempt":attempt,"maximum_attempts":crate::model_retry::MAX_ATTEMPTS,"class":error.class(),"next_retry_at":now+delay.as_secs(),"observed_at":now});
+            let _=crate::mode::write_private(&marker,state.to_string().as_bytes());
+        }, crate::model_retry::MAX_ATTEMPTS,u64::from(std::process::id()),
+    );
+    let _=fs::remove_file(marker);
+    result
+}
+
 /// The whole model loop: one turn at a time, until the model finishes or a bound ends it.
 #[allow(clippy::too_many_arguments)]
 fn model_loop(
@@ -2735,6 +2760,19 @@ fn model_loop(
         Message::system(system_prompt(plan, forgejo.as_ref())),
         Message::user(instruction_text.clone()),
     ];
+    match crate::conversation::continuation(transcript.path().parent().expect("run directory")) {
+        Ok(Some(memory)) => {
+            let memory=secret.redact(&memory);
+            let path=transcript.path().parent().expect("run directory").join("continuation.txt");
+            if let Err(error)=crate::mode::write_private(&path,memory.as_bytes()) {
+                return RunEnd::failed(format!("Cannot preserve continuation context: {error}"));
+            }
+            log.line(&format!("previous conversation restored: {} bytes",memory.len()));
+            messages.push(Message::user(memory));
+        }
+        Ok(None) => {},
+        Err(error) => return RunEnd::failed(format!("Cannot read previous conversation safely: {error}")),
+    }
     let declared_tools = model::tools_with(forgejo.is_some(), shell.method);
     let deadline = Instant::now() + Duration::from_secs(plan.timeout_secs);
     let mut turn: u32 = 0;
@@ -2775,7 +2813,7 @@ fn model_loop(
             if let Err(error) = transcript.append(&Record::model_request_sent(&plan.run_id, turn, &plan.endpoint, &plan.model)) {
                 return RunEnd::failed(format!("Cannot record context checkpoint send: {error}"));
             }
-            let summary_exchange = match model::chat_with_thinking(&config, &history, &[], Some(4096), thinking.as_deref()) {
+            let summary_exchange = match chat_with_retries(&config, &history, &[], Some(4096), thinking.as_deref(), deadline, plan, turn, transcript, log) {
                 Ok(exchange) => exchange,
                 Err(error) => return RunEnd::failed(format!("Context checkpoint failed; full trajectory preserved: {error}")),
             };
@@ -2858,12 +2896,13 @@ fn model_loop(
             }
             system.content = Some(text);
         }
-        let exchange = match model::chat_with_thinking(
+        let exchange = match chat_with_retries(
             &config,
             &request_messages,
             &declared_tools,
             Some(response_tokens),
             thinking.as_deref(),
+            deadline, plan, turn, transcript, log,
         ) {
             Ok(exchange) => exchange,
             Err(error) => {

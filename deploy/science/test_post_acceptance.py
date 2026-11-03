@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import post_acceptance as p
@@ -73,6 +74,16 @@ class PostAcceptanceTests(unittest.TestCase):
                         if not line.startswith(('Proposal thread:', 'Evaluation ID:')))
         legacy=dict(comment,body=body)
         self.assertIsNotNone(p.public_lessons_comment([legacy],row,'author-10',42))
+
+    def test_comment_must_follow_formal_acceptance_when_decision_time_is_known(self):
+        row=dict(self.row,proposal_thread=42,
+                 formal_decided_at=datetime(2026,11,2,14,0,tzinfo=timezone.utc).timestamp())
+        comment=self.comment()
+        self.assertIsNone(p.public_lessons_comment([comment],row,'author-10',42))
+        after=dict(comment,created_at='2026-11-02T14:00:01Z')
+        self.assertIsNotNone(p.public_lessons_comment([after],row,'author-10',42))
+        missing_time=dict(comment,created_at=None)
+        self.assertIsNone(p.public_lessons_comment([missing_time],row,'author-10',42))
 
     def test_direct_acceptance_without_thread_is_explicitly_blocked(self):
         class EmptyApi:

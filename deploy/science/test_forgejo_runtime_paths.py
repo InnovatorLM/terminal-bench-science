@@ -7,6 +7,16 @@ from forgejo_runtime_paths import normalize
 W=Path('/mnt/data/zhanglinfeng/workspace')
 
 class ForgejoPathsTests(unittest.TestCase):
+    def test_public_url_survives_runtime_normalization(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw)
+            (root/'app.ini').write_text('[server]\nROOT_URL = http://127.0.0.1:3000/\n')
+            (root/'public-root-url').write_text('https://example.org:3443/\n')
+            normalize(root,3000)
+            cfg=configparser.ConfigParser();cfg.read_string('[top]\n'+(root/'app.ini').read_text())
+            self.assertEqual(cfg['server']['ROOT_URL'],'https://example.org:3443/')
+            self.assertEqual(cfg['server']['HTTP_PORT'],'3000')
+
     def test_rewrites_database_repository_and_data_paths_together(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);path=root/'app.ini'

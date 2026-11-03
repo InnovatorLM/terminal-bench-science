@@ -73,8 +73,8 @@ def plan(root, source_broker=DEFAULT_BROKER, source_queue=DEFAULT_QUEUE):
         raise ValueError('Every configured evaluator needs exactly one queue')
     registry_source=Path(queue['registry'])
     registry=trusted_json(registry_source)
-    if not registry:
-        raise ValueError('Evaluation registry is empty')
+    if not isinstance(registry, dict):
+        raise ValueError('Evaluation registry must be an object')
     for entry in registry.values():
         template=entry.get('template')
         if template:

@@ -4,6 +4,8 @@ The Markdown comment is the record. No private file or author-written receipt
 can substitute for publication, and no additional reviewer approval is needed.
 """
 import hashlib
+from datetime import datetime
+import math
 import re
 from urllib.parse import urlparse
 
@@ -34,6 +36,20 @@ def template(row):
     return '\n'.join(lines) + '\n'
 
 
+def posted_after_acceptance(comment, row):
+    decided_at = row.get('formal_decided_at')
+    if decided_at is None:
+        return True
+    created_at = comment.get('created_at')
+    try:
+        decided_at = float(decided_at)
+        created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        return (math.isfinite(decided_at) and created.tzinfo is not None
+                and created.timestamp() > decided_at)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def public_lessons_comment(comments, row, author, thread):
     """Comments must come from this thread's paginated Forgejo API response."""
     if not accepted(row) or thread != row.get('proposal_thread'):
@@ -44,6 +60,8 @@ def public_lessons_comment(comments, row, author, thread):
         if not isinstance(body, str) or MARKER not in body:
             continue
         if (comment.get('user') or {}).get('login') != 'gewu-' + author:
+            continue
+        if not posted_after_acceptance(comment, row):
             continue
         url = comment.get('html_url') or comment.get('issue_url')
         if url and not re.fullmatch(

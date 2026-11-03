@@ -50,6 +50,7 @@ pub mod forgejo_tools;
 pub mod identity;
 pub mod mode;
 pub mod model;
+pub mod model_retry;
 pub mod naming;
 pub mod paths;
 pub mod pull_gate;

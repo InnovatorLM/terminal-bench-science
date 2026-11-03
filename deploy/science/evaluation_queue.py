@@ -124,7 +124,13 @@ def validated_template(entry, request):
     if environment.get('use_sandbox_claim') is not False or any(not re.fullmatch(image_pattern, environment.get(key, '')) for key in ['runtime_image', 'verifier_image']):
         raise ValueError('Require direct Pods and digest-pinned project ACR images')
     agent = config['agents'][0]
-    codex = (agent.get('name') == 'codex-preinstall' and not agent.get('import_path') or
+    public_codex = agent.get('name') == 'codex-preinstall' and agent.get('import_path') == 'public_codex:PublicCodex'
+    if public_codex:
+        lease = root_file(agent.get('kwargs',{}).get('public_model_lease',''))
+        if not lease.is_relative_to(W/'.state/harbor-public/runs') or lease.name != 'model-lease.json':
+            raise ValueError('Public Codex requires a service-owned model lease')
+    codex = (public_codex or
+             agent.get('name') == 'codex-preinstall' and not agent.get('import_path') or
              agent.get('name') in (None, 'codex-preinstall') and
              agent.get('import_path') == 'universe_codex:UniverseCodex')
     legacy = agent.get('import_path') == 'universe_metrics:MetadataOnlyMiniSwe'
@@ -172,6 +178,7 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
     cleanup = report.get('cleanup', {}).get('confirmed') is True
     rewards = []
     diagnostics = []
+    public=bool(config and config.get('agents',[{}])[0].get('import_path')=='public_codex:PublicCodex')
     errors = 0
     for evaluation in stats.get('evals', {}).values():
         errors += evaluation.get('n_errors', 0)
@@ -181,7 +188,7 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
     if result_path.exists():
         for path in result_path.parent.glob('*/result.json'):
             trial = json.loads(path.read_text())
-            diagnostics.append(classify_trial(trial))
+            diagnostics.append(classify_trial(trial,finite_rewards=public))
             if diagnostics[-1]['diagnostic']=='agent_timeout_requires_cause_review':
                 from timeout_review import timeout_context
                 timeout_details=timeout_context(trial,config)
@@ -205,6 +212,7 @@ def aggregate(report, result_path, config=None, snapshot_sha256=None, snapshot_u
     return {'status': status, **public_status(evidence),
             **({'timeout_review_context':timeout_details} if timeout_details is not None else {}),
             'reward': rewards[0] if len(rewards) == 1 and complete and not unscored else None,
+            **({'rewards':diagnostics[0]['reward']} if public and len(diagnostics)==1 and diagnostics[0]['scored'] else {}),
             'cleanup_confirmed': cleanup, 'n_errors': errors if stats.get('evals') else None,
             'input_tokens': stats.get('n_input_tokens'), 'output_tokens': stats.get('n_output_tokens'),
             'aggregate_metrics': metadata, 'diagnostics': diagnostics,
@@ -551,7 +559,9 @@ def main():
     args = parser.parse_args()
     config = json.loads(root_file(args.config).read_text())
     registry = json.loads(root_file(config['registry']).read_text())
-    if not isinstance(registry, dict) or not registry:
+    # A newly provisioned universe has no registered tasks yet. Keep its
+    # worker ready; individual requests still require an exact registry ID.
+    if not isinstance(registry, dict):
         raise SystemExit('An operator-registered evaluation catalog is required')
     queues = config.get('role_queues') or [{key:config[key] for key in ('inbox','results','evaluator_uid')}]
     budget = config.get('max_jobs_per_day', 0)

@@ -155,6 +155,10 @@ def finalize(state, ledger, config, jobs, lookup_execution):
                 or row.get('scientific_acceptance') is True):
             continue
         try:
+            from rollout_replacement import directory, plans
+            if directory(state,key).exists():
+                batch,_=plans(state,dict(row,key=key))
+                require(batch==requests(dict(row,key=key)), 'replacement_batch_mismatch')
             proof = verify(dict(row, key=key), config['roles'][row['role']], jobs,
                            lookup_execution(row['commit'], row['task']))
             record(state, key, 'review-dispatcher',

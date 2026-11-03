@@ -79,6 +79,20 @@ class EvidenceTests(unittest.TestCase):
    log=trial/'verifier/test-stdout.txt';log.write_text('')
    self.assertTrue(inspect(r,path,c,'f'*64,True)['complete'])
    log.unlink();self.assertFalse(inspect(r,path,c,'f'*64,True)['complete'])
+ def test_public_json_fractional_rewards_preserve_real_values(self):
+  with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+   c=self.config();c['agents'][0]['import_path']='public_codex:PublicCodex'
+   r=self.report(c);path,trial=self.fixture(Path(raw),c)
+   result=json.loads((trial/'result.json').read_text());result['verifier_result']['rewards']={'reward':0.25,'accuracy':0.75}
+   (trial/'result.json').write_text(json.dumps(result));(trial/'verifier/reward.txt').unlink()
+   (trial/'verifier/reward.json').write_text(json.dumps(result['verifier_result']['rewards']))
+   (trial/'verifier/test-stdout.txt').write_text('')
+   r['stats']['evals']['test']['reward_stats']={'reward':{'0.25':['trial']},'accuracy':{'0.75':['trial']}}
+   answer=aggregate(r,path,c,'f'*64,True)
+   self.assertEqual(answer['status'],'solver_complete');self.assertEqual(answer['reward'],0.25)
+   self.assertEqual(answer['rewards'],{'reward':0.25,'accuracy':0.75})
+   receipt=publish(trial,Path(raw)/'packet',['SECRET-CANARY'])
+   self.assertTrue(receipt['verifier_available'])
  def test_agent_timeout_remains_pending_cause_review_and_batch_unscored(self):
   from role_evaluation_batch import requests,summary
   with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

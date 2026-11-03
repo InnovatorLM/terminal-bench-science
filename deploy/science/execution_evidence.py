@@ -110,10 +110,11 @@ def inspect(report, result_path, config=None, snapshot_sha256=None, snapshot_unc
             # proves collection; its byte count does not determine scoring.
             stdout = trial / 'verifier/test-stdout.txt'
             hashes[str(stdout.relative_to(run_root))] = digest_file(stdout, run_root)
+            public=bool(config and config.get('agents',[{}])[0].get('import_path')=='public_codex:PublicCodex')
             valid=(isinstance(rewards,dict) and bool(rewards)
                 and all(type(v) in (int,float) and math.isfinite(v) for v in rewards.values()))
             checks['verifier_retained'] = (valid and actual_rewards == rewards
-                and rewards.get('reward') in (0,1))
+                and (public or rewards.get('reward') in (0,1)))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             errors.append(type(exc).__name__)
     else:

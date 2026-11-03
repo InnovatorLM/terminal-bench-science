@@ -1,6 +1,8 @@
 //! The one credentials file, and the one secret it hands out.
 //!
-//! This file is the only place a secret lives. The tool does four things with it and
+//! Ordinarily this file holds the secrets. An explicitly enabled managed science
+//! deployment can instead supply its designated model key through the environment,
+//! keeping it out of universe snapshots. The tool does four things with the file and
 //! nothing else:
 //!
 //! 1. create it, with mode 0600, when it is not there yet;
@@ -168,6 +170,11 @@ pub enum CredentialsError {
         /// The agent whose key is absent.
         agent: String,
     },
+    /// Managed deployments must use the complete designated account configuration.
+    #[error(
+        "the designated live model environment is incomplete or invalid; refusing credential fallback"
+    )]
+    InvalidLiveModelEnvironment,
     /// The file holds no Forgejo token under the key that was asked for.
     #[error("the credentials file {path} records no Forgejo value under `{key}`; add one there")]
     MissingToken {
@@ -379,7 +386,31 @@ impl fmt::Display for Secret {
 /// `model_key` at the top level is accepted as a key for every agent. An absent or
 /// empty key is a sentence naming the file and the agent, never a guess.
 pub fn model_key(path: &Path, agent: &str) -> Result<Secret, CredentialsError> {
+    model_key_with_env(path, agent, |name| std::env::var(name).ok())
+}
+
+/// Inject environment reads so tests never mutate process-global credentials.
+fn model_key_with_env(
+    path: &Path,
+    agent: &str,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Secret, CredentialsError> {
     let value = read_value(path)?;
+    if env("GEWU_LIVE_MODEL_TEST").as_deref() == Some("1") {
+        for (name, expected) in [
+            ("LLM_PROVIDER", "dawnfm"),
+            ("OPENAI_BASE_URL", "https://dawnfm.gravarc.cn/v1"),
+            ("OPENAI_MODEL", "deepseek-v4.1-flash-1017"),
+        ] {
+            if env(name).as_deref() != Some(expected) {
+                return Err(CredentialsError::InvalidLiveModelEnvironment);
+            }
+        }
+        let key = env("OPENAI_API_KEY")
+            .filter(|key| !key.trim().is_empty())
+            .ok_or(CredentialsError::InvalidLiveModelEnvironment)?;
+        return Ok(Secret::new(key));
+    }
     let key = value
         .get("model_keys")
         .and_then(|keys| keys.get(agent))
@@ -1237,6 +1268,101 @@ mod tests {
             model_key(&path, "scribe").expect("a key").expose(),
             "sk-one"
         );
+    }
+
+    fn designated_environment() -> std::collections::BTreeMap<&'static str, String> {
+        [
+            ("GEWU_LIVE_MODEL_TEST", "1"),
+            ("LLM_PROVIDER", "dawnfm"),
+            ("OPENAI_BASE_URL", "https://dawnfm.gravarc.cn/v1"),
+            ("OPENAI_MODEL", "deepseek-v4.1-flash-1017"),
+            ("OPENAI_API_KEY", "synthetic-designated-key"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, value.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn designated_environment_serves_scheduler_and_agents_without_persisting_key() {
+        let path = credentials_with(
+            "credentials-designated",
+            "forgejo_admin_token = \"synthetic-token\"\n",
+        );
+        let before = fs::read(&path).unwrap();
+        let env = designated_environment();
+        for agent in ["", "author-01", "author-30"] {
+            let secret = model_key_with_env(&path, agent, |name| env.get(name).cloned()).unwrap();
+            assert_eq!(secret.expose(), "synthetic-designated-key");
+            assert_eq!(secret.redact("synthetic-designated-key"), REDACTED);
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn designated_environment_requires_opt_in_and_overrides_stale_file_key() {
+        let path = credentials_with(
+            "credentials-designated-override",
+            "model_key = \"synthetic-stale-key\"\n",
+        );
+        let mut env = designated_environment();
+        assert_eq!(
+            model_key_with_env(&path, "author-01", |name| env.get(name).cloned())
+                .unwrap()
+                .expose(),
+            "synthetic-designated-key"
+        );
+        env.remove("GEWU_LIVE_MODEL_TEST");
+        assert_eq!(
+            model_key_with_env(&path, "author-01", |name| env.get(name).cloned())
+                .unwrap()
+                .expose(),
+            "synthetic-stale-key"
+        );
+    }
+
+    #[test]
+    fn designated_environment_refuses_partial_or_wrong_account_without_fallback() {
+        let path = credentials_with(
+            "credentials-designated-invalid",
+            "model_key = \"synthetic-stale-key\"\n",
+        );
+        for name in [
+            "LLM_PROVIDER",
+            "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
+            "OPENAI_API_KEY",
+        ] {
+            for replacement in [None, Some(" ")] {
+                let mut env = designated_environment();
+                match replacement {
+                    Some(value) => {
+                        env.insert(name, value.to_owned());
+                    }
+                    None => {
+                        env.remove(name);
+                    }
+                }
+                let error = model_key_with_env(&path, "author-01", |key| env.get(key).cloned())
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    CredentialsError::InvalidLiveModelEnvironment
+                ));
+                assert!(!error.to_string().contains("synthetic"));
+            }
+        }
+    }
+
+    #[test]
+    fn designated_environment_preserves_file_permission_checks() {
+        let path = credentials_with("credentials-designated-wide", "model_key = \"\"\n");
+        set_mode(&path, 0o644).unwrap();
+        let env = designated_environment();
+        assert!(matches!(
+            model_key_with_env(&path, "author-01", |name| env.get(name).cloned()),
+            Err(CredentialsError::WiderThanAllowed { .. })
+        ));
     }
 
     #[test]

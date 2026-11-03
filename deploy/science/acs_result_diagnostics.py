@@ -11,7 +11,7 @@ from typing import Any
 import math
 
 
-def classify_trial(result: dict[str, Any]) -> dict[str, Any]:
+def classify_trial(result: dict[str, Any], *, finite_rewards: bool = False) -> dict[str, Any]:
     """Return a stable, non-scoring diagnostic for one Harbor result."""
     if not isinstance(result, dict):
         return {'status':'infrastructure_error','diagnostic':'trial_result_parse_error','scored':False,'reward':None}
@@ -64,6 +64,11 @@ def classify_trial(result: dict[str, Any]) -> dict[str, Any]:
         return {"status": "infrastructure_error",
                 "diagnostic": "verifier_reward_parse_error", "scored": False,
                 "reward": None}
+    if finite_rewards:
+        valid=bool(rewards) and all(type(v) in (int,float) and math.isfinite(v) for v in rewards.values())
+        return {'status':'scored' if valid else 'infrastructure_error',
+                'diagnostic':'ok' if valid else 'verifier_reward_invalid',
+                'scored':valid,'reward':rewards if valid else None}
     reward=rewards.get('reward')
     if type(reward) not in (int,float) or not math.isfinite(reward) or reward not in (0,1):
         return {'status':'infrastructure_error','diagnostic':'verifier_reward_invalid','scored':False,'reward':None}

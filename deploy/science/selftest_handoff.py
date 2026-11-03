@@ -16,7 +16,7 @@ class AuthorEvidenceRequired(ValueError):
 
 def qualify(work, state, observation, template):
     from selftest_registration import prepare
-    from selftest_iteration import validate
+    from selftest_iteration import IterationEvidenceError, validate
     from selftest_budget_admission import assess_budget, assert_current_idea_active
     from selftest_review_supplement import effective_request
     status=json.loads(read_operator_file(work/'status.json'))
@@ -34,6 +34,12 @@ def qualify(work, state, observation, template):
         raise AuthorEvidenceRequired('Prior selftest, changed committed task and iteration explanation required')
     try:
         linkage=validate(request['iteration'],status,state,role)
+    except IterationEvidenceError:
+        # Keep the structured owner/code report intact.  _reconcile() turns it
+        # into an actionable waiting_author/waiting_platform disposition; a
+        # generic AuthorEvidenceRequired would incorrectly send platform
+        # receipt corruption back to the author.
+        raise
     except (ValueError,FileNotFoundError) as error:
         raise AuthorEvidenceRequired('Fix prior selftest linkage, same-task commit and iteration explanation') from error
     qualified=work/'handoff-qualified.json'
@@ -161,8 +167,27 @@ def reconcile(work, state, entry, universe):
         return _reconcile(work,state,entry,universe)
 
 
+def iteration_error_result(error):
+    """Convert typed iteration evidence into a durable handoff result.
+
+    Iteration validation is metadata-only.  Neither author repair nor platform
+    receipt recovery should cause an ACS/build retry, and a previous successful
+    container execution remains the evidence being handed off.
+    """
+    report=dict(error.report)
+    owner=report.get('failure_owner')
+    result=dict(report,
+        state='waiting_author' if owner == 'request' else 'waiting_platform',
+        reason=report.get('remediation', str(error)),
+        error_type=type(error).__name__,
+        selftest_rerun_required=False,
+        scientific_acceptance=False)
+    return result
+
+
 def _reconcile(work, state, entry, universe):
     from selftest_feedback import publish_handoff
+    from selftest_iteration import IterationEvidenceError
     work=Path(work)
     request=work/'request.json'
     if not request.exists():
@@ -217,6 +242,11 @@ def _reconcile(work, state, entry, universe):
             result=dict(state='waiting_platform',stage='base_image_resolution',
                         reason=status['remediation'],scientific_acceptance=False)
         else:result=handoff(work,Path(state),entry,universe)
+    except IterationEvidenceError as error:
+        # Do this before the broad ValueError handler: the typed report tells
+        # us whether the author supplied an invalid link or the platform lost
+        # immutable evidence.  Both are metadata waits and never rerun ACS.
+        result=iteration_error_result(error)
     except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError) as error:
         from selftest_budget import BudgetEvidenceRequired
         progress=work/'handoff-progress.json'

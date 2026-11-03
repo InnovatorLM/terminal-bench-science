@@ -33,7 +33,7 @@
 - 调度器从正式接受的账本生成作者根目录的 `post-acceptance.json`，分别列出 pending/completed。它与当前版本的 `review-feedback.json` 分开，后续失败修订不会抹掉旧版本的接受和复盘任务。
 - 通过原 PR 编号或唯一的作者/题目路径找到原讨论串；无法唯一定位时不猜测派工 issue。已绑定的讨论串在扫描全部 PR 前优先处理。
 - 作者使用 `role-forgejo comments --issue N` 查看原帖，`role-forgejo comment --issue N --body-file draft.md` 回复。评论读取支持实际 Forgejo 不分页的接口及分页实现。
-- 调度器核对评论作者、原帖、accepted key/commit/task/snapshot 和非空栏目，记录评论 ID、URL、正文 SHA256，并在新模板中附带 proposal thread 与 evaluation ID。重复扫描、历史自测结果回放均不得清空已记录的发布状态。
+- 调度器核对评论作者、原帖、正式接受时间、accepted key/commit/task/snapshot 和非空栏目，记录评论 ID、URL、正文 SHA256，并在新模板中附带 proposal thread 与 evaluation ID。验收前发布的草稿或评论不计为经验帖；重复扫描、历史自测结果回放均不得清空已记录的发布状态。
 - 经验帖状态为 `pending`、`proposal_thread_required` 或 `completed`。直派评审若没有原 proposal/PR 绑定，必须由平台补齐；作者不能按任务路径猜帖子或另开替代讨论。
 - `role-iteration start` 在仍有待发布复盘时提示先回复原帖；作者进程继续运行以完成写作。发布被记录后即允许下一题，不增加新审核。
 - 作者开始下一思路后，旧接受状态不能覆盖新题当前反馈。正式接受本身不能被历史 evaluator 状态回执反向改写。

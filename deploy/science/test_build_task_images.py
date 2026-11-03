@@ -146,6 +146,22 @@ class BuildTests(unittest.TestCase):
             self.assertFalse(details['retry_requires_task_change'])
             self.assertEqual((Path(raw)/'failure.json').stat().st_mode&0o777,0o600)
 
+    def test_pull_failure_is_recorded_before_digest_inspection(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            class FailedPull:
+                output=Path(raw)
+                step=1
+                def run(self,args,json_output=False):
+                    if args[0]!='pull':raise AssertionError('Inspection must not run after failed pull')
+                    raise ValueError('Docker step 1 failed')
+            with self.assertRaises(ValueError):resolve_base_image(FailedPull(),'python:3.13-slim-bookworm',
+                'public.ecr.aws/docker/library')
+            failure=json.loads((Path(raw)/'failure.json').read_text())
+            self.assertEqual(failure['stage'],'base_image_resolution')
+            self.assertEqual(failure['transport_image'],'public.ecr.aws/docker/library/python:3.13-slim-bookworm')
+            self.assertEqual(failure['failed_docker_step'],1)
+            self.assertFalse(failure['cloud_execution_started'])
+
     def test_registration_requires_matching_publication(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as temporary:
             snapshot=Path(temporary)

@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+set +x
+cd /mnt/data/zhanglinfeng/workspace
+umask 077
+export TMPDIR="$PWD/.tmp" XDG_CONFIG_HOME="$PWD/.config" XDG_CACHE_HOME="$PWD/.cache" XDG_STATE_HOME="$PWD/.state" PYTHONDONTWRITEBYTECODE=1
+set -a
+source .config/llm/dawnfm.env
+set +a
+exec "$PWD/acs-harbor-test/.venv/bin/python" "$PWD/gewu-multiverse/deploy/science/harbor_public_api.py" --settings "$PWD/.config/harbor-public/settings.json"

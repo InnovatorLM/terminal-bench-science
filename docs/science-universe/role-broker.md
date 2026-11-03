@@ -195,3 +195,14 @@ The registered solver queue now passes real evaluator submission, DawnFM ACS
 execution, aggregate result reading, real-Pod cancellation cleanup and installed
 launcher start/stop. See [evaluation-queue.md](evaluation-queue.md). Independent
 quality/semantic dispatch and arbitrary new-task image registration remain open.
+
+
+## Health checks and recovery
+
+The controller and broker must be upgraded together. The authenticated Unix socket accepts `{"op":"health"}` for service readiness and `{"op":"health","role":"author-01","cwd":"/workspace"}` for a role. These requests validate the registered role boundary without taking its execution lock or running a shell. They return protocol `role-health-v1`. Actual commands still enter the dedicated nonroot chroot and require verified descendant cleanup. Concurrent commands for the same role are refused immediately.
+
+A role preparation failure is local to its session. It cannot downgrade every role's isolation mode. Service recovery checks run in the background even while other roles are active; they never require the entire universe to become idle.
+
+Native model requests retry HTTP 5xx/408, 429, transport failures and timeouts with exponential delay and jitter, up to 12 attempts within 20 minutes and the remaining session deadline. Authentication and request-configuration errors fail directly. Retries resend the same model context and never repeat completed tools. If a request still fails, the controller starts another session using its existing backoff.
+
+New sessions load a bounded excerpt of their own previous conversation, the latest working-memory checkpoint, and recent tool evidence. Startup-only failures are skipped. The current instruction remains authoritative; historical system prompts and raw request bodies are excluded. `continuation.txt`, `model-retry.json`, and the immutable original transcripts provide operator evidence. Model credentials are redacted. A manual reset preserves files and receives the same continuation on its next session.

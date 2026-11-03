@@ -215,11 +215,33 @@ class DeadEndTests(unittest.TestCase):
     def test_waiting_does_not_walk_workspace(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
             root=Path(raw);(root/'workspace').mkdir()
-            (root/'review-feedback.json').write_text('{"state":"reviewing"}')
+            review=dict(key='version:task',generation=1,state='reviewing',
+                        commit='a'*40,task='tasks/example',author_must_pause=True)
+            for name in ('review-feedback.json','review-current-assignment.json'):
+                (root/name).write_text(json.dumps(review))
             with patch.object(m,'source_signature') as source:
                 got=m.observe('author-01',{'root':str(root),'uid':99999999},{'controller_uid':0},root/'sessions')
             source.assert_not_called()
             self.assertIn('review_or_platform',got['waiting'])
+
+    def test_stale_review_or_unconfirmed_assignment_does_not_disable_dead_end_detection(self):
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);(root/'workspace').mkdir()
+            run=root/'sessions/author-01/run-1';run.mkdir(parents=True)
+            (run/'transcript.jsonl').write_text('\n'.join(json.dumps(dict(
+                event='tool_result',exit_code=1,output='ValueError: same failure')) for _ in range(9)))
+            review=dict(key='version:task',generation=1,state='reviewing',
+                        commit='a'*40,task='tasks/example',author_must_pause=True)
+            (root/'review-current-assignment.json').write_text(json.dumps(review))
+            for changes in (dict(author_must_pause=False),dict(generation=0),dict(commit='b'*40),
+                            dict(task='tasks/other'),dict(state='completed')):
+                (root/'review-feedback.json').write_text(json.dumps(dict(review,**changes)))
+                with self.subTest(changes=changes),patch('iteration_lifecycle.runner_state',return_value=True):
+                    got=m.observe('author-01',{'root':str(root),'uid':99999999},{'controller_uid':0},root/'sessions')
+                self.assertEqual(got['waiting'],[])
+                self.assertTrue(got['sustained_session_failure'])
+                first=m.decision({},got,100000)
+                self.assertEqual(m.decision(first,got,103600)['action'],'reset')
 
     def test_observation_is_not_rescanned_every_watchdog_tick(self):
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

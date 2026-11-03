@@ -13,9 +13,9 @@ source = w / '.state/role-chroot-proof'
 # runtime source, while each role receives its own user site and cache.
 host_pip = Path('/usr/local/lib/python3.10/site-packages/pip')
 host_pip_info = Path('/usr/local/lib/python3.10/site-packages/pip-23.0.1.dist-info')
-if host_pip.is_dir():
+if host_pip.is_dir() and not (source / 'usr/local/lib/python3.10/site-packages/pip/__init__.py').is_file():
     shutil.copytree(host_pip, source / 'usr/local/lib/python3.10/site-packages/pip', dirs_exist_ok=True)
-if host_pip_info.is_dir():
+if host_pip_info.is_dir() and not (source / 'usr/local/lib/python3.10/site-packages/pip-23.0.1.dist-info/METADATA').is_file():
     shutil.copytree(host_pip_info, source / 'usr/local/lib/python3.10/site-packages/pip-23.0.1.dist-info', dirs_exist_ok=True)
 pip_launcher = source / 'usr/local/bin/pip'
 pip_launcher.write_text('#!/bin/sh\nexec /usr/local/bin/python3 -m pip \"$@\"\n')
@@ -29,10 +29,25 @@ agents = config_root / 'agents'
 agents.mkdir(exist_ok=True)
 os.chown(agents, 65534, 65534)
 agents.chmod(0o700)
-roles = ([f'author-{i:02d}' for i in range(1, 11)] +
-         [f'evaluator-{i:02d}' for i in range(1, 4)] + ['curator'])
+author_count = int(os.environ.get('GEWU_AUTHOR_COUNT', '10'))
+evaluator_count = int(os.environ.get('GEWU_EVALUATOR_COUNT', '3'))
+uid_base = int(os.environ.get('GEWU_ROLE_UID_BASE', '21001'))
+if not (1 <= author_count <= 100 and 1 <= evaluator_count <= 30 and uid_base >= 20000):
+    raise ValueError('Invalid role counts or isolated UID base')
+credentials_dir = Path(os.environ.get('GEWU_ROLE_CREDENTIALS_DIR', str(w / '.config/universe-roles'))).resolve()
+if not credentials_dir.is_relative_to(w):
+    raise ValueError('Role credentials must remain inside the workspace')
+roles = ([f'author-{i:02d}' for i in range(1, author_count + 1)] +
+         [f'evaluator-{i:02d}' for i in range(1, evaluator_count + 1)] + ['curator'])
+if os.environ.get('GEWU_ROLE_CREDENTIALS_DIR'):
+    # A fresh universe must never silently share a kind-level fallback account.
+    identities = [json.loads((credentials_dir / (role + '.json')).read_text())['login'] for role in roles]
+    if len(set(identities)) != len(roles):
+        raise ValueError('Every role requires its own Forgejo identity')
 for index, role in enumerate(roles):
-    uid = 21001 + index
+    if os.environ.get('GEWU_PROVISION_ROLE') and role != os.environ['GEWU_PROVISION_ROLE']:
+        continue
+    uid = uid_base + index
     root = agents / role
     root.mkdir(exist_ok=True)
     os.chown(root, 65534, 65534)
@@ -76,15 +91,17 @@ for index, role in enumerate(roles):
     os.chown(target, 65534, 65534)
     target.chmod(0o644)
     if kind == 'author':
+        from author_difficulty_policy import update as update_difficulty
+        update_difficulty(root/'instruction.md')
         from author_post_acceptance_policy import update as update_post_acceptance
         update_post_acceptance(root/'instruction.md')
         from role_policy import retire_pilot_feedback
         retire_pilot_feedback(root)
     target = root / 'home/role/git-credential.json'
     credential_name = role + '.json'
-    if not (w / '.config/universe-roles' / credential_name).is_file():
+    if not (credentials_dir / credential_name).is_file():
         credential_name = kind + '.json'
-    creds = json.loads((w / '.config/universe-roles' / credential_name).read_text())
+    creds = json.loads((credentials_dir / credential_name).read_text())
     target.write_text(json.dumps({'login': creds['login'], 'token': creds['token']}))
     os.chown(target, uid, uid)
     target.chmod(0o600)
@@ -127,7 +144,7 @@ for index, role in enumerate(roles):
         from install_author_selftest import install as install_selftest
         install_selftest(root, uid, uid)
     config['roles'][role] = dict(root=str(root), uid=uid, gid=uid)
-path = control / 'config.json'
+path = control / (('provision-' + os.environ['GEWU_PROVISION_ROLE'] + '.json') if os.environ.get('GEWU_PROVISION_ROLE') else 'config.json')
 path.write_text(json.dumps(config, indent=2))
 path.chmod(0o600)
 print(json.dumps({'config': str(path), 'roles': list(config['roles']), 'provider_key_staged': False}))

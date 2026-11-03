@@ -92,13 +92,92 @@ class ReplacementTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.record()
 
     def test_wrong_snapshot_changed_evidence_and_stale_review_are_rejected(self):
-        self.record()
+        path=self.record()
         with self.assertRaises(ValueError):m.plans(self.state,dict(self.row,snapshot_sha256='c'*64))
         self.row['state']='completed'
-        with self.assertRaises(ValueError):m.apply(self.state,self.ledger,self.config)
+        m.apply(self.state,self.ledger,self.config)
+        self.assertEqual(self.row['state'],'completed')
+        self.assertIn('rollout_replacement_error',self.row)
         self.row['state']='waiting_platform'
-        (self.queue/self.jobs[0]['job_id']/'timeout-diagnosis.json').write_text('{}')
-        with self.assertRaisesRegex(ValueError,'evidence changed'):m.apply(self.state,self.ledger,self.config)
+        item=json.loads(path.read_text())['evidence_files'][0]
+        Path(item['path']).write_text('{}')
+        with self.assertRaisesRegex(ValueError,'evidence changed'):m.plans(self.state,self.row)
+        m.apply(self.state,self.ledger,self.config)
+        self.assertEqual(self.row['stage'],'five_rollouts')
+        self.assertEqual(list((self.role/'evaluation/inbox').glob('*.json')),[])
+
+    def test_mutable_sources_do_not_change_frozen_evidence(self):
+        path=self.record();raw=path.read_bytes()
+        value=json.loads(raw)
+        self.assertEqual(value['schema_version'],2)
+        snapshots={Path(item['path']):Path(item['path']).read_bytes() for item in value['evidence_files']}
+        for item in value['evidence_sources']:
+            Path(item['path']).write_text('{"status":"cancelled"}')
+        m.apply(self.state,self.ledger,self.config)
+        self.assertNotIn('rollout_replacement_error',self.row)
+        self.assertEqual(path.read_bytes(),raw)
+        for snapshot,original in snapshots.items():
+            self.assertEqual(snapshot.read_bytes(),original)
+            self.assertEqual(snapshot.stat().st_mode&0o777,0o400)
+        self.assertEqual(len(list((self.role/'evaluation/inbox').glob('*.json'))),5)
+
+    def legacy_plan(self):
+        path=self.record()
+        value=json.loads(path.read_text())
+        value['schema_version']=1
+        value['evidence_files']=value.pop('evidence_sources')
+        self.write(path,value)
+        return path
+
+    def test_legacy_recovery_uses_exact_bytes_without_rewriting_plan_or_results(self):
+        path=self.legacy_plan();plan_raw=path.read_bytes()
+        m.apply(self.state,self.ledger,self.config)
+        batch=list(self.row['batch_job_ids'])
+        self.row.update(state='completed',review_recommendation='reject')
+        changed=self.queue/self.jobs[0]['job_id']/'result.json'
+        backup=self.root/'result.before.json';backup.write_bytes(changed.read_bytes())
+        changed.write_text('{"status":"cancelled","reward":null}')
+        m.apply(self.state,self.ledger,self.config)
+        self.assertIn('rollout_replacement_error',self.row)
+        self.assertEqual(self.row['state'],'completed')
+        receipt=m.recover_evidence(path,[backup],'Exact original result retained before evidence enrichment; restore verified bytes alongside the immutable plan.')
+        self.assertEqual(receipt,m.recover_evidence(path,[backup],'Exact original result retained before evidence enrichment; restore verified bytes alongside the immutable plan.'))
+        self.assertEqual(path.read_bytes(),plan_raw)
+        self.assertEqual(changed.read_text(),'{"status":"cancelled","reward":null}')
+        with patch.object(m,'publish_request',side_effect=AssertionError('duplicate submission')):
+            m.apply(self.state,self.ledger,self.config)
+        self.assertNotIn('rollout_replacement_error',self.row)
+        self.assertEqual(self.row['state'],'completed')
+        self.assertEqual(self.row['review_recommendation'],'reject')
+        self.assertEqual(self.row['batch_job_ids'],batch)
+        self.assertEqual(len(m.plans(self.state,self.row)[1]),1)
+        recovered=json.loads(receipt.read_text())['evidence_files'][0]
+        Path(recovered['path']).write_text('corrupt')
+        with self.assertRaisesRegex(ValueError,'evidence changed'):m.load_checked(path)
+
+    def test_missing_original_cannot_be_reconstructed_from_new_result(self):
+        path=self.legacy_plan()
+        changed=self.queue/self.jobs[0]['job_id']/'result.json'
+        changed.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'unavailable'):
+            m.recover_evidence(path,[changed],'The current altered result is not a substitute for the exact original evidence.')
+        self.assertFalse(path.with_suffix('.recovered-evidence.json').exists())
+
+    def test_one_bad_plan_does_not_block_other_assignment_status(self):
+        path=self.record()
+        item=json.loads(path.read_text())['evidence_files'][0]
+        Path(item['path']).write_text('corrupt')
+        other=dict(self.row,key='other',role='evaluator-02')
+        self.ledger['other']=other
+        config={'roles':dict(self.config['roles'],**{'evaluator-02':dict(self.config['roles']['evaluator-01'])})}
+        advanced=[]
+        with patch.object(dispatcher,'STATE',self.state),patch.object(dispatcher,'deliver_selftest_evidence',return_value=True), \
+             patch.object(dispatcher,'advance_review',side_effect=lambda key,*args,**kwargs:advanced.append(key)):
+            dispatcher.sync_direct_assignments(config,self.ledger)
+        self.assertIn('other',advanced)
+        self.assertEqual(self.row['state'],'waiting_platform')
+        self.assertEqual(self.row['stage'],'five_rollouts')
+        self.assertNotIn('rollout_replacement_error',other)
 
     def test_crash_replay_and_new_results_wake_review_without_duplicate_jobs(self):
         self.record();m.apply(self.state,self.ledger,self.config)

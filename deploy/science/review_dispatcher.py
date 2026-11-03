@@ -191,6 +191,9 @@ def _publish_author_feedback_locked(pr,row,config,root):
                   'retry_requires_task_change','selftest_rerun_required','accepted_review_job_id',
                   'reused_review_feedback','review_feedback_sha256','reviewed_job_id'):
         if field in row:payload[field]=row[field]
+    if row.get('rollout_replacement_error'):
+        error=row['rollout_replacement_error']
+        payload['rollout_replacement_error']={k:error[k] for k in ('code','owner','next_action')}
     if row.get('reused_review_feedback'):payload['next_action']=row['next_action']
     if pr.get('number') is not None or row.get('pr') is not None:
         payload['pr']=pr.get('number',row.get('pr'))
@@ -383,6 +386,7 @@ def matching_review_status(root, entry, key, generation):
 def advance_review(key,row,config,now=None,role_available=True):
     from post_acceptance import accepted
     if accepted(row):return  # A finalized decision is immutable, not a live status receipt.
+    if row.get('rollout_replacement_error'):return
     now=time.time() if now is None else now
     entry=config['roles'][row['role']];root=Path(entry['root'])
     # Legacy exact self-test handoffs have no PR fields or assigned timestamp.
@@ -757,6 +761,7 @@ def reconcile(api,config,ledger):
             issue=api.call('GET','/issues/'+str(row['issue']))
             if issue['state']=='open':api.call('PATCH','/issues/'+str(row['issue']),{'state':'closed'})
         if (row['state'] in ('waiting_author','waiting_platform') and event!=row['event']
+                and not row.get('rollout_replacement_error')
                 and row.get('stage') not in ('five_rollouts','selftest_evidence_delivery')):
             if not any(v['state']=='reviewing' and v['role']==row['role'] for k,v in ledger.items() if k!=key):
                 row.update(state='reviewing',event=event,generation=row['generation']+1,issue=None,assigned_at=time.time())

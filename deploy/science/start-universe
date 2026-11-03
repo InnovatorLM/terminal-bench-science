@@ -219,11 +219,12 @@ selftest_pid=''
 review_supplement_pid=''
 watchdog_pid=''
 controller_pid=''
+controller_wrapper_pid=''
 finish() {
     if [[ -n "${backup_pid:-}" ]]; then kill -TERM "$backup_pid" 2>/dev/null || true; wait "$backup_pid" 2>/dev/null || true; fi
     if [[ -n "$controller_pid" ]]; then
         kill -TERM "$controller_pid" 2>/dev/null || true
-        wait "$controller_pid" 2>/dev/null || true
+        wait "${controller_wrapper_pid:-$controller_pid}" 2>/dev/null || true
     fi
     if [[ -n "$watchdog_pid" ]]; then
         kill -TERM "$watchdog_pid" 2>/dev/null || true
@@ -303,7 +304,7 @@ while True:
     except OSError as error:
         # Shared storage can invalidate a ready-file handle during replacement.
         # Reopen within the existing deadline; permission and other errors fail.
-        if error.errno != errno.ESTALE:
+        if error.errno not in (errno.ESTALE, errno.EIO, errno.EINTR):
             raise
     if time.monotonic()>deadline:
         raise SystemExit('Evaluation worker failed startup; controller not started')
@@ -313,13 +314,29 @@ PY_QUEUE_CHECK
     # Forgejo may transiently be unavailable during startup. Keep the
     # dispatcher supervised so review assignments and author feedback cannot
     # silently stop when one polling cycle fails.
+    dispatcher_child=''
+    stop_dispatcher() {
+        trap '' TERM INT
+        if [[ -n "$dispatcher_child" ]]; then
+            kill -TERM "$dispatcher_child" 2>/dev/null || true
+            wait "$dispatcher_child" 2>/dev/null || true
+        fi
+        exit 0
+    }
+    trap stop_dispatcher TERM INT
     while true; do
         rc=0
         "$PY" "$W/gewu-multiverse/deploy/science/review_dispatcher.py" \
             --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/review-dispatcher" \
-            >> "$SERVICE_STATE/review-dispatcher/production.log" 2>&1 || rc=$?
+            >> "$SERVICE_STATE/review-dispatcher/production.log" 2>&1 &
+        dispatcher_child=$!
+        wait "$dispatcher_child" || rc=$?
+        dispatcher_child=''
         printf '%s dispatcher exited rc=%s; restarting\\n' "$(date -u +%FT%TZ)" "$rc" >> "$SERVICE_STATE/review-dispatcher/production.log"
-        sleep 5
+        sleep 5 &
+        dispatcher_child=$!
+        wait "$dispatcher_child" || true
+        dispatcher_child=''
     done
 ) &
 review_dispatch_pid=$!
@@ -338,11 +355,20 @@ mkdir -p "$SERVICE_STATE/command-watchdog"
     --config "$GEWU_ROLE_BROKER_CONFIG" --state "$SERVICE_STATE/command-watchdog" --session-state "$SERVICE_STATE" --owner-pid "$$" \
     > "$SERVICE_STATE/command-watchdog/production.log" 2>&1 &
 watchdog_pid=$!
+# Accepted outputs outlive individual universes. The global watcher reads only
+# formally accepted versions; archive failures never stop research scheduling.
+archive_root="$W/accepted-tasks"
+if "$PY" -B "$W/gewu-multiverse/deploy/science/accepted_task_archive.py" --root "$archive_root" register --universe "$U" >> "$SERVICE_STATE/accepted-archive-registration.log" 2>&1; then
+    "$PY" -B "$W/gewu-multiverse/deploy/science/accepted_task_archive.py" --root "$archive_root" ensure-watch >> "$SERVICE_STATE/accepted-archive-registration.log" 2>&1 || printf '%s\n' 'Accepted-task archiver unavailable; see registration log.' >&2
+else
+    printf '%s\n' 'Accepted-task archive registration failed; see registration log.' >&2
+fi
 # Refuse a controller start if any owned background service already failed.
 for service_pid in "$broker_pid" "$evaluation_pid" "$review_dispatch_pid" "$selftest_pid" "$review_supplement_pid" "$watchdog_pid"; do
     kill -0 "$service_pid" || { echo 'A required deployment service exited during startup.' >&2; exit 1; }
 done
 export USER=nobody LOGNAME=nobody
+rm -f "$SERVICE_STATE/controller.pid"
 if [[ -t 0 && -t 1 ]]; then
     setpriv --reuid=65534 --regid=65534 --clear-groups "$PRODUCT" "$@" </dev/tty >/dev/tty &
 elif [[ "${GEWU_ALLOW_NONINTERACTIVE:-}" == 1 ]]; then
@@ -358,12 +384,28 @@ elif [[ "${GEWU_ALLOW_NONINTERACTIVE:-}" == 1 ]]; then
     # ordinary pipes because its terminal UI and signal handling depend on tty
     # semantics; `script` supplies those semantics while keeping the launcher
     # suitable for nohup/service managers.
-    script -q -f -c "setpriv --reuid=65534 --regid=65534 --clear-groups '$PRODUCT' $*" \
-        "$SERVICE_STATE/controller.typescript" >>"$controller_log" 2>&1 &
+    # Record the actual controller PID inside the PTY shell before exec. Online
+    # role reset must never mistake the root-owned recorder for the controller.
+    # Explicit EOF on recorder stdin avoids SIGTTIN when a launcher is detached.
+    script -q -f -c "printf '%s\\n' \"\$\$\" > '$SERVICE_STATE/controller.pid'; exec setpriv --reuid=65534 --regid=65534 --clear-groups '$PRODUCT' $*" \
+        "$SERVICE_STATE/controller.typescript" </dev/null >>"$controller_log" 2>&1 &
 else
     echo 'The universe controller requires a terminal; set GEWU_ALLOW_NONINTERACTIVE=1 for supervised service mode.' >&2
     exit 2
 fi
-controller_pid=$!
-printf '%s\n' "$controller_pid" > "$SERVICE_STATE/controller.pid"
-wait "$controller_pid"
+controller_wrapper_pid=$!
+if [[ -t 0 && -t 1 ]]; then
+    controller_pid=$controller_wrapper_pid
+    printf '%s\n' "$controller_pid" > "$SERVICE_STATE/controller.pid"
+else
+    # The PTY child may need a moment to start on shared storage.
+    for ((attempt=0; attempt<300; attempt++)); do
+        if [[ -s "$SERVICE_STATE/controller.pid" ]]; then
+            read -r controller_pid < "$SERVICE_STATE/controller.pid"
+            [[ "$controller_pid" =~ ^[0-9]+$ ]] && kill -0 "$controller_pid" 2>/dev/null && break
+        fi
+        kill -0 "$controller_wrapper_pid" 2>/dev/null || break
+        sleep .1
+    done
+fi
+wait "$controller_wrapper_pid"

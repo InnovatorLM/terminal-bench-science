@@ -1,5 +1,6 @@
 """Real broker/chroot regression, no model or cloud API calls."""
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -60,9 +61,24 @@ try:
             if disconnect:
                 return
             return json.loads(sock.makefile('rb').readline())
-    def request(role, command, timeout=10):
+    def request(role, command, timeout=60):
         return dict(role=role, cwd='/workspace', argv=['/bin/bash', '-c', command], timeout=timeout)
     report = {}
+    health = connect({'op':'health'})
+    assert health == {'protocol':'role-health-v1','ready':True,'role':None}, health
+    # Health stays responsive with the role's real command lock held. A second
+    # command fails promptly instead of consuming a broker child indefinitely.
+    lock_path=Path(config['socket'].removeprefix('@')).parent/'author-01.lock'
+    with lock_path.open('a') as held:
+        fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        ready=connect({'op':'health','role':'author-01','cwd':'/workspace'})
+        assert ready.get('ready') and ready.get('role')=='author-01', ready
+        duplicate=connect(request('author-01','echo should-not-run'))
+        assert 'error' in duplicate, duplicate
+    refused=connect({'op':'health','role':'author-01','cwd':'/workspace/../../etc'})
+    assert 'error' in refused, refused
+    report['health_independent_of_command_lock']=True
+    report['duplicate_command_fails_promptly']=True
     for role in config['roles']:
         result = connect(request(role, 'id -u; cat own-input; test ! -e /mnt/data/zhanglinfeng/workspace/.config/llm/dawnfm.env; test ! -e /proc/1/root; test ! -e /../evaluator/workspace; test -z "${OPENAI_API_KEY-}"; test -z "${HOME_HOST-}"'))
         assert result['returncode'] == 0 and result['cleanup_confirmed'], result

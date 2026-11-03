@@ -62,5 +62,12 @@ class PrepareUniverseServicesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'role roots'):
             plan(root,broker,queue)
 
+    def test_fresh_universe_can_prepare_empty_registry(self):
+        raw,root,broker,queue=self.fixture()
+        (raw/'source-registry.json').write_text('{}')
+        apply_plan(plan(root,broker,queue))
+        self.assertEqual(require_isolated_service_config(root),root/'.state/gewu-multiverse')
+        self.assertEqual(json.loads((root/'.config/science-evaluation/registry.json').read_text()),{})
+
 
 if __name__=='__main__':unittest.main()

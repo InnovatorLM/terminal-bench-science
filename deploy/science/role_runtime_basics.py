@@ -37,10 +37,11 @@ def _install(path: Path, data: bytes, uid: int, mode: int=0o600):
 def install_comparison_tool(role_root: str|Path):
     """Supply the host's small, immutable comparison tool without touching packages."""
     root=Path(role_root)
-    source=Path('/usr/bin/cmp')
-    if not source.is_file() or source.stat().st_uid!=0 or not os.access(source,os.X_OK):
-        raise ValueError('Trusted host cmp executable unavailable')
-    _install(_safe(root,'usr/local/bin/cmp'),source.read_bytes(),0,0o755)
+    for name in ('cmp','seq','nohup'):
+        source=Path('/usr/bin')/name
+        if not source.is_file() or source.stat().st_uid!=0 or not os.access(source,os.X_OK):
+            raise ValueError('Trusted host executable unavailable: '+name)
+        _install(_safe(root,'usr/local/bin/'+name),source.read_bytes(),0,0o755)
 
 def repair_role(role_root: str|Path, role: str, workspace: str|Path, *, uid: int, controller_uid: int=65534) -> dict:
     root=Path(role_root); uid=int(uid)

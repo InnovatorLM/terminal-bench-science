@@ -28,3 +28,6 @@ def install(config, universe):
         if not re.fullmatch(r'(author|evaluator)-[0-9]+',role):continue
         for path in [Path(universe)/'.config/gewu-multiverse/agents'/role/'instruction.md',Path(entry['root'])/'instruction.md']:
             update(path)
+            if role.startswith('author-'):
+                from author_difficulty_policy import update as update_difficulty
+                update_difficulty(path)

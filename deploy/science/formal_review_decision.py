@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -50,6 +51,11 @@ def apply(state, ledger):
         row.update(scientific_acceptance=True, formal_decision='accepted',
                    acceptance_scope='completed_frozen_version_only',
                    formal_decision_sha256=hashlib.sha256(raw).hexdigest())
+        decided_at = receipt.get('decided_at')
+        if isinstance(decided_at, (int, float)) and not isinstance(decided_at, bool) and math.isfinite(decided_at):
+            row['formal_decided_at'] = float(decided_at)
+        else:
+            row.pop('formal_decided_at', None)
         row.pop('acceptance_blockers', None)
 
 

@@ -173,8 +173,30 @@ def publish_request_result(entry, identifier, result):
 
 def process_request(role, entry, source, state):
     identifier = source.stem.removeprefix('review-')
+    from selftest_iteration import IterationEvidenceError
     try:
         work = capture(role, entry, source, state)
+    except IterationEvidenceError as error:
+        # IterationEvidenceError carries an owner and stable error code.  Keep
+        # that distinction in the author-visible result: a malformed author
+        # link waits on the author, while an unreadable/changed platform
+        # receipt waits on the platform.  This path is metadata-only and never
+        # retries the already completed ACS selftest.
+        report=dict(error.report)
+        report.update(state=('waiting_author' if report.get('failure_owner') == 'request'
+                             else 'waiting_platform'),
+                      stage='review_supplement', error_type=type(error).__name__,
+                      reason=report.get('remediation', str(error)),
+                      selftest_rerun_required=False,
+                      scientific_acceptance=False)
+        if report['state'] == 'waiting_platform':
+            # A platform operator may restore the retained receipt without
+            # touching the author's request.  Permit a metadata-only retry,
+            # with a short backoff, while author-owned errors stay frozen until
+            # the author changes the request.
+            report['retry_after'] = time.time() + 60
+        publish_request_result(entry, identifier, report)
+        return None
     except (OSError, ValueError, KeyError, TypeError) as error:
         # All accepted fields are credential-free identifiers; avoid exception
         # details from arbitrary paths or Python internals in author feedback.
@@ -267,7 +289,14 @@ def consume_once(config, state, universe, now=None):
                 if record.exists():
                     previous = json.loads(read_operator_file(record))
                     if previous.get('source_signature') == signature:
-                        continue
+                        result_path = Path(entry['root'])/'selftest/results'/source.name
+                        try:
+                            previous_result = json.loads(read_operator_file(result_path))
+                        except (OSError, ValueError, TypeError, KeyError):
+                            previous_result = {}
+                        if (previous_result.get('state') != 'waiting_platform'
+                                or previous_result.get('retry_after', 0) > now):
+                            continue
                 work = process_request(role, entry, source, state)
                 atomic_json(record, dict(source_signature=signature, processed_at=now,
                             job_id=work.name if work else None))

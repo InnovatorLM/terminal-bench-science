@@ -12,6 +12,7 @@ from selftest_source import verify_source, SourceMismatchError
 from selftest_logs import credential_values, publish as publish_logs
 from selftest_upload import snapshot_upload
 from acs_result_diagnostics import classify_trial
+from selftest_iteration import IterationEvidenceError
 STATE=Path(os.environ.get('GEWU_AUTHOR_SELFTEST_STATE',W/'.state/science-author-selftest'))
 PYTHON=W/'acs-harbor-test/.venv/bin/python'
 BASE='public.ecr.aws/docker/library/python@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377'
@@ -103,7 +104,10 @@ def process(role,entry,request):
   if q.get('request_review') is not None and q['request_review'] is not True:raise ValueError('Invalid review request')
   if q.get('request_review') and not q.get('idea_id'):raise ValueError('Review request requires stable idea ID')
   if q.get('initial_review') or (q.get('request_review') and not q.get('iteration')):
-   raise ValueError('Review request requires previous selftest and result-driven iteration; initial_review bypass is not supported')
+   raise IterationEvidenceError('previous_execution_required',
+       'Review request requires previous selftest and result-driven iteration; initial_review bypass is not supported',
+       'Link an existing completed selftest and explain the resulting task changes. '
+       'If the current successful job only needs review metadata, use request-review for that job.')
   atomic_json(work/'request.json',q)
   if q['job_id']!=job or not re.fullmatch('[a-z0-9][a-z0-9._-]{0,90}',name) or not re.fullmatch('[a-f0-9]{40}',q['source_commit']):raise ValueError('Invalid request identity')
   from selftest_feedback import record_current_request
@@ -125,11 +129,13 @@ def process(role,entry,request):
   atomic_json(work/'mechanical.json',mechanical)
   status['network_preflight']=mechanical['acs_network_preflight']
   save()
-  for args in [['init','-q'],['config','user.email','operator@localhost'],['config','user.name','operator'],['add','.'],['commit','-qm','Frozen author upload']]:subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
-  commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();status.update(status='waiting_builder',stage='build_queue',source_commit=q['source_commit'],execution_commit=commit,execution_task_path=name,snapshot_sha256=digest_tree(task));save()
+  status.update(execution_task_path=name,snapshot_sha256=digest_tree(task))
   if 'iteration' in q:
    from selftest_iteration import validate
+   status.update(stage='iteration_preflight');save()
    status['iteration']=validate(q['iteration'],status,STATE,role);save()
+  for args in [['init','-q'],['config','user.email','operator@localhost'],['config','user.name','operator'],['add','.'],['commit','-qm','Frozen author upload']]:subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
+  commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip();status.update(status='waiting_builder',stage='build_queue',source_commit=q['source_commit'],execution_commit=commit);save()
   task_tmp=work/'tmp';task_home=work/'home';task_tmp.mkdir(mode=0o700,exist_ok=True);task_home.mkdir(mode=0o700,exist_ok=True)
   env=os.environ.copy();env.update(TMPDIR=str(task_tmp),PYTHONDONTWRITEBYTECODE='1',HOME=str(task_home))
   # Explicit deployment transport for public Docker official images only.
@@ -181,6 +187,10 @@ def process(role,entry,request):
   if categories:status['error_class']=categories[0]
   elif status['status']=='selftest_failed':status['error_class']=failure_classification(status)
   status['note']='Author selftest only; iteration/rerun and independent evaluation still required.'
+ except IterationEvidenceError as e:
+  from selftest_logs import sanitize
+  status.update(e.report)
+  status.update(status='failed',error=sanitize(str(e),secrets)[:600],error_type=type(e).__name__)
  except SourceMismatchError as e:
   from selftest_logs import sanitize
   status.update(status='failed',error_class='author_source_version_mismatch',stage='source_verification',

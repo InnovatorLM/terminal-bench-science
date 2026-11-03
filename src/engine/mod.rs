@@ -185,7 +185,7 @@ impl EngineOptions {
         // valid local workspace; verify the live broker directly before accepting
         // the stronger method.
         if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some()
-            && crate::role_broker::available(&workspaces)
+            && crate::role_broker::service_available()
         {
             confinement = crate::confinement::Method::RoleBroker;
         }
@@ -611,7 +611,6 @@ impl Inner {
         if configured && self.options.confinement != crate::confinement::Method::RoleBroker
             && !self.confinement_recheck_inflight
             && self.confinement_recheck_at.is_none_or(|at| now >= at)
-            && self.agents.iter().all(|agent| agent.running.is_none() && !agent.starting)
         {
             self.confinement_recheck_inflight = true;
             jobs.push(Job::ConfinementRecheck);
@@ -1760,8 +1759,13 @@ impl Inner {
         let real_home = std::env::var_os("HOME").map(PathBuf::from);
         let run_hide = crate::confinement::run_hide_roots(&hide, real_home.as_deref());
         let requested = self.options.confinement;
-        let (confinement, refusal) =
-            crate::confinement::effective_method(requested, &run_hide, &workspace);
+        // Broker work is validated by this role's child, outside the controller
+        // lock. A slow/broken role must never downgrade every other role.
+        let (confinement, refusal) = if requested == crate::confinement::Method::RoleBroker {
+            (requested, None)
+        } else {
+            crate::confinement::effective_method(requested, &run_hide, &workspace)
+        };
         if confinement != requested {
             self.options.confinement = confinement;
             if !confinement.confined() {
@@ -4076,7 +4080,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_broker_rechecks_without_duplicate_or_live_role_probes() {
+    fn unavailable_broker_rechecks_while_roles_are_busy_without_duplicate_probes() {
         use crate::engine::clock::Clock;
         let root = scratch_root("engine-broker-recheck");
         let settings = write_ready(&root, &[("agent-1", Desired::Started)]);
@@ -4091,7 +4095,7 @@ mod tests {
         assert!(jobs.is_empty());
         inner.agents[0].starting = true;
         inner.schedule_confinement_recheck(true, now, &mut jobs);
-        assert!(jobs.is_empty(), "must not queue a probe behind live role work");
+        assert_eq!(jobs.len(), 1, "control-plane recovery must run while roles are busy");
         inner.agents[0].starting = false;
         inner.schedule_confinement_recheck(true, now, &mut jobs);
         inner.schedule_confinement_recheck(true, now, &mut jobs);

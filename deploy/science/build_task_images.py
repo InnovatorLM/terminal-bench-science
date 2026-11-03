@@ -14,6 +14,7 @@ import re
 import subprocess
 import shutil
 import stat
+from build_command_logs import run_logged
 from dockerfile_bases import pin_bases, official_library_transport
 
 from evaluation_queue import W, atomic_json, digest_tree
@@ -76,11 +77,14 @@ def select_base_digest(requested,info,pull_output=''):
 
 def resolve_base_image(docker,image,mirror=None):
     transport=official_library_transport(image,mirror)
-    pulled=docker.run(['pull',transport])
-    info=docker.run(['image','inspect',transport],True)[0]
-    try:return select_base_digest(transport,info,pulled)
-    except BaseImageResolutionError:
-        atomic_json(docker.output/'failure.json',BASE_RESOLUTION_FAILURE)
+    try:
+        pulled=docker.run(['pull',transport])
+        info=docker.run(['image','inspect',transport],True)[0]
+        return select_base_digest(transport,info,pulled)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        atomic_json(docker.output/'failure.json',dict(BASE_RESOLUTION_FAILURE,
+            requested_image=image,transport_image=transport,
+            failed_docker_step=getattr(docker,'step',None)))
         raise
 
 
@@ -228,18 +232,16 @@ class Docker:
             if name in os.environ:self.env[name]=os.environ[name]
     def run(self,args,json_output=False):
         self.step+=1
-        # Logs stay root-private; do not print daemon output or registry errors.
-        path=self.output/f'docker-{self.step:02d}.log'
-        if not json_output:
-            descriptor=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-            with os.fdopen(descriptor,'wb') as log:
-                result=subprocess.run(['docker',*args],env=self.env,stdout=log,stderr=subprocess.STDOUT,timeout=1200)
-            if result.returncode:raise ValueError(f'Docker step {self.step} failed; inspect private build log')
-            return path.read_text(errors='replace')
-        result=subprocess.run(['docker',*args],env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=1200)
-        path.write_bytes(result.stdout+b'\n'+result.stderr);path.chmod(0o600)
+        prefix=self.output/f'docker-{self.step:02d}'
+        details={'step':self.step,'operation':args[0]}
+        if args[0]=='build':
+            context=Path(args[-1]).resolve()
+            details.update(context=str(context),dockerfile=str(Path(args[args.index('-f')+1]).resolve()
+                if '-f' in args else context/'Dockerfile'),dockerfile_flag_explicit='-f' in args)
+        result=run_logged(['docker',*args],prefix,env=self.env,timeout=1200,details=details)
         if result.returncode:raise ValueError(f'Docker step {self.step} failed; inspect private build log')
-        return json.loads(result.stdout) if json_output else result.stdout.decode()
+        stdout=prefix.with_name(prefix.name+'.stdout.log').read_text(errors='replace')
+        return json.loads(stdout) if json_output else stdout+'\n'+prefix.with_name(prefix.name+'.stderr.log').read_text(errors='replace')
 
 
 def publish_image(docker,tag,image_id):
@@ -291,7 +293,7 @@ def main():
         images={}
         def build(role,context,tag,context_hash,extra=()):
             labels=receipt_labels(args.commit,task_hash,context_hash,role)
-            command=['build','--force-rm','--build-arg','PYTHON_BASE='+args.python_base,'-t',tag]
+            command=['build','--force-rm','-f',str(context/'Dockerfile'),'--build-arg','PYTHON_BASE='+args.python_base,'-t',tag]
             for key,value in labels.items():command.extend(['--label',key+'='+value])
             command.extend(extra);command.append(str(context));docker.run(command)
             image=docker.run(['image','inspect',tag],True)[0]

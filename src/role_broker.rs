@@ -93,9 +93,7 @@ fn role_for<'a>(config: &'a Config, cwd: &Path) -> Result<(&'a str, PathBuf), St
         // The local-runtime launcher may expose the registered chroot workspace
         // through a symlink. Compare canonical paths so the broker preserves the
         // registered role identity while rejecting links that escape it.
-        let resolved_workspace = workspace
-            .canonicalize()
-            .map_err(|_| "role workspace is unavailable")?;
+        let Ok(resolved_workspace) = workspace.canonicalize() else { continue; };
         if resolved.starts_with(&resolved_workspace) {
             let relative = resolved
                 .strip_prefix(&resolved_workspace)
@@ -184,15 +182,43 @@ mod tests {
     }
 }
 
-/// Whether all supplied workspaces have a live, enforced broker boundary.
-pub fn available(workspaces: &[PathBuf]) -> bool {
-    if workspaces.is_empty() {
-        return false;
+/// Check control-plane readiness without contending with any role command.
+pub fn service_available() -> bool {
+    config().and_then(|config| health(&config, None)).is_ok()
+}
+
+fn health(config: &Config, cwd: Option<&Path>) -> Result<(), String> {
+    let (request, expected_role) = match cwd {
+        Some(cwd) => {
+            let (role, inside) = role_for(config, cwd)?;
+            (serde_json::json!({"op":"health", "role":role, "cwd":inside}), Some(role))
+        }
+        None => (serde_json::json!({"op":"health"}), None),
+    };
+    let mut stream = connect(config)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|_| "broker health timeout cannot be set")?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "broker health timeout cannot be set")?;
+    writeln!(stream, "{request}").map_err(|_| "broker health request failed")?;
+    let mut response = Vec::new();
+    use std::io::Read;
+    BufReader::new(stream).take(16384).read_until(b'\n', &mut response)
+        .map_err(|_| "broker health response unavailable")?;
+    let response: serde_json::Value = serde_json::from_slice(&response)
+        .map_err(|_| "invalid broker health response")?;
+    if response["protocol"] != "role-health-v1" || response["ready"] != true
+        || response["role"].as_str() != expected_role
+    {
+        return Err("broker health request refused".into());
     }
-    workspaces.iter().all(|cwd| {
-        execute(cwd, &["/bin/bash", "-c", ":"], 5)
-            .is_ok_and(|output| output.returncode == 0 && output.cleanup_confirmed)
-    })
+    Ok(())
+}
+
+/// Validate each requested role without starting or cleaning any role process.
+pub fn available(workspaces: &[PathBuf]) -> bool {
+    let Ok(config) = config() else { return false; };
+    !workspaces.is_empty() && workspaces.iter().all(|cwd| health(&config, Some(cwd)).is_ok())
 }
 
 /// A run may only use the root registered to its own role name.
@@ -209,8 +235,20 @@ pub fn validate_role(cwd: &Path, agent: &str) -> Result<(), String> {
 pub fn execute(cwd: &Path, argv: &[&str], timeout: u64) -> Result<Output, String> {
     let config = config()?;
     let (role, inside) = role_for(&config, cwd)?;
+    let stream = connect(&config)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(timeout.min(14400) + 30)))
+        .map_err(|_| "broker timeout cannot be set")?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(120)))
+        .map_err(|_| "broker timeout cannot be set")?;
+    let request = serde_json::json!({"role": role, "cwd": inside, "argv": argv, "timeout": timeout.clamp(1,14400)});
+    send_command(stream, request)
+}
+
+fn connect(config: &Config) -> Result<UnixStream, String> {
     let socket_name = config.socket.to_string_lossy();
-    let mut stream = if let Some(name) = socket_name.strip_prefix('@') {
+    let stream = if let Some(name) = socket_name.strip_prefix('@') {
         #[cfg(target_os = "linux")]
         {
             use std::os::linux::net::SocketAddrExt;
@@ -227,13 +265,10 @@ pub fn execute(cwd: &Path, argv: &[&str], timeout: u64) -> Result<Output, String
         UnixStream::connect(&config.socket)
     }
     .map_err(|_| "role broker is unavailable")?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(timeout.min(14400) + 5)))
-        .map_err(|_| "broker timeout cannot be set")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(120)))
-        .map_err(|_| "broker timeout cannot be set")?;
-    let request = serde_json::json!({"role": role, "cwd": inside, "argv": argv, "timeout": timeout.clamp(1,14400)});
+    Ok(stream)
+}
+
+fn send_command(mut stream: UnixStream, request: serde_json::Value) -> Result<Output, String> {
     let mut bytes = serde_json::to_vec(&request).map_err(|_| "broker request cannot be encoded")?;
     // Role instructions and Forgejo context can exceed the old 128 KiB cap.
     // Keep the request bounded while allowing the full assigned instruction.

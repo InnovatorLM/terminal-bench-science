@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import time
 
 from evaluation_queue import active_queue_worker, root_file
@@ -34,13 +35,91 @@ def evidence(path):
     return dict(path=str(path),sha256=digest(path.read_bytes()))
 
 
+def freeze_evidence(files, target):
+    """Copy checked bytes; a queue result remains mutable after cancellation."""
+    target.mkdir(parents=True,mode=0o700,exist_ok=True)
+    target=target.resolve()
+    frozen=[]
+    for index,item in enumerate(files):
+        source=root_file(item['path'])
+        destination=target/f'{index:04d}-{item["sha256"]}'
+        fd,name=tempfile.mkstemp(prefix='.evidence-',dir=target)
+        try:
+            checksum=hashlib.sha256()
+            with os.fdopen(fd,'wb') as output,source.open('rb') as stream:
+                os.fchmod(output.fileno(),0o400)
+                while chunk:=stream.read(1024*1024):
+                    checksum.update(chunk);output.write(chunk)
+                output.flush();os.fsync(output.fileno())
+            if checksum.hexdigest()!=item['sha256']:
+                raise ValueError('Replacement source evidence changed before snapshot')
+            try:os.link(name,destination)
+            except FileExistsError:
+                if evidence(destination)['sha256']!=item['sha256']:
+                    raise ValueError('Replacement snapshot already exists with different bytes')
+        finally:Path(name).unlink(missing_ok=True)
+        frozen.append(dict(path=str(destination),sha256=item['sha256']))
+    return frozen
+
+
 def load_checked(path):
-    raw=root_file(path).read_bytes()
+    path=root_file(path)
+    raw=path.read_bytes()
     value=json.loads(raw)
-    for item in value['evidence_files']:
+    if value.get('schema_version')==2:
+        sources=value.get('evidence_sources',[])
+        snapshots=value['evidence_files']
+        expected=Path(path).parent/'evidence'/Path(path).stem
+        if (len(sources)!=len(snapshots) or not sources
+                or any(source.get('sha256')!=snapshot.get('sha256')
+                       or Path(snapshot['path']).parent!=expected
+                       for source,snapshot in zip(sources,snapshots))):
+            raise ValueError('Replacement snapshot binding changed')
+    checked=value['evidence_files']
+    recovery=Path(path).with_suffix('.recovered-evidence.json')
+    if recovery.exists():
+        receipt=json.loads(root_file(recovery).read_bytes())
+        checked=receipt['evidence_files']
+        if (receipt.get('schema_version')!=1 or receipt.get('plan_sha256')!=digest(raw)
+                or receipt.get('evidence_sources')!=value['evidence_files']
+                or len(checked)!=len(value['evidence_files'])
+                or any(a.get('sha256')!=b.get('sha256')
+                       or Path(b['path']).parent!=Path(path).parent/'evidence'/(Path(path).stem+'-recovered')
+                       for a,b in zip(value['evidence_files'],checked))):
+            raise ValueError('Replacement evidence recovery binding changed')
+    for item in checked:
         if evidence(item['path'])!=item:
             raise ValueError('Replacement evidence changed')
     return value,digest(raw)
+
+
+def recover_evidence(path, backups, reason):
+    """Restore exact historical bytes beside a plan; never rewrite that plan."""
+    if os.geteuid()!=0:raise PermissionError('Operator required')
+    path=root_file(path)
+    if len(reason.strip())<40:raise ValueError('Explain the verified recovery')
+    with operator_lock(path.parent/'record.lock'):
+        raw=path.read_bytes();plan=json.loads(raw)
+        receipt=path.with_suffix('.recovered-evidence.json')
+        if receipt.exists():
+            load_checked(path)
+            return receipt
+        candidates={item['sha256']:item for item in map(evidence,backups)}
+        sources=[];changes=[]
+        for item in plan['evidence_files']:
+            try:current=evidence(item['path'])
+            except OSError:current=None
+            selected=item if current==item else candidates.get(item['sha256'])
+            if selected is None:
+                raise ValueError('Exact original replacement evidence is unavailable')
+            sources.append(selected)
+            if current!=item:changes.append(dict(expected=item,observed=current,recovered_from=selected))
+        snapshots=freeze_evidence(sources,path.parent/'evidence'/(path.stem+'-recovered'))
+        immutable_json(receipt,dict(schema_version=1,plan_sha256=digest(raw),
+                       recorded_at=time.time(),reason=reason,evidence_sources=plan['evidence_files'],
+                       evidence_files=snapshots,changed_sources=changes))
+        load_checked(path)
+        return receipt
 
 
 def plans(state, assignment):
@@ -49,9 +128,9 @@ def plans(state, assignment):
     base.pop('batch_job_ids',None)
     batch=requests(base)
     history=[]
-    for index,path in enumerate(sorted(directory(state,assignment['key']).glob('[0-9]*.json')),1):
+    for index,path in enumerate(sorted(directory(state,assignment['key']).glob('[0-9][0-9][0-9][0-9].json')),1):
         plan,sha=load_checked(path)
-        if (path.name!=f'{index:04d}.json' or plan.get('schema_version')!=1
+        if (path.name!=f'{index:04d}.json' or plan.get('schema_version') not in (1,2)
                 or any(plan.get(k)!=assignment.get(k) for k in IDENTITY)
                 or plan.get('batch_generation')!=assignment.get('batch_generation',assignment['generation'])
                 or plan.get('previous_jobs')!=batch or not plan.get('replacements')):
@@ -171,11 +250,13 @@ def record(state, queue_state, key, job_ids, fix_evidence, reason):
             replacement=dict(request,job_id=digest(seed)[:32])
             replacements.append(dict(slot=slot,original_job_id=job,request=replacement,
                                      classification=classification))
-        value=dict(schema_version=1,recorded_at=time.time(),reason=reason,
-                   batch_generation=assignment.get('batch_generation',assignment['generation']),
-                   previous_jobs=batch,replacements=replacements,evidence_files=files,
-                   **{k:assignment[k] for k in IDENTITY})
         path=target/f'{len(history)+1:04d}.json'
+        snapshots=freeze_evidence(files,target/'evidence'/path.stem)
+        value=dict(schema_version=2,recorded_at=time.time(),reason=reason,
+                   batch_generation=assignment.get('batch_generation',assignment['generation']),
+                   previous_jobs=batch,replacements=replacements,evidence_files=snapshots,
+                   evidence_sources=files,
+                   **{k:assignment[k] for k in IDENTITY})
         immutable_json(path,value)
         plans(state,assignment)
         return path
@@ -208,11 +289,32 @@ def apply(state, ledger, config):
     """Called only by the dispatcher single writer; preserves review ownership."""
     for key,row in ledger.items():
         if not directory(state,key).exists():continue
-        batch,history=plans(state,dict(row,key=key))
-        if not history:continue
-        receipts=[item['sha256'] for item in history]
-        if row.get('batch_replacement_receipts')==receipts:continue
-        if row.get('state')!='waiting_platform' or row.get('stage')!='five_rollouts':
+        try:
+            _apply_assignment(state,key,row,config)
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,IndexError) as error:
+            # One corrupt historical plan must not stop unrelated assignments
+            # or undo an already delivered rejection/immutable acceptance.
+            prior=row.get('rollout_replacement_error',{})
+            row['rollout_replacement_error']=dict(
+                code='replacement_evidence_or_plan_invalid',error_type=type(error).__name__,
+                owner='platform',first_seen_at=prior.get('first_seen_at',time.time()),
+                plan_directory=str(directory(state,key)),
+                next_action='Recover exact original evidence bytes from backups; preserve plan, jobs and verdict. Do not resubmit rollouts.')
+            if row.get('state')!='completed':
+                row.setdefault('replacement_resume',{
+                    field:row.get(field) for field in ('state','stage','reason')})
+                row.update(state='waiting_platform',stage='five_rollouts',
+                           reason='Replacement evidence requires platform recovery; existing jobs are preserved.')
+
+
+def _apply_assignment(state,key,row,config):
+    batch,history=plans(state,dict(row,key=key))
+    if not history:return
+    resume=row.get('replacement_resume')
+    current=resume or row
+    receipts=[item['sha256'] for item in history]
+    if row.get('batch_replacement_receipts')!=receipts:
+        if current.get('state')!='waiting_platform' or current.get('stage')!='five_rollouts':
             raise ValueError('Review changed before replacement plan was consumed')
         # Persist batch identity in the dispatcher ledger on the next normal
         # save. A crash before that save simply replays these same job IDs.
@@ -222,8 +324,11 @@ def apply(state, ledger, config):
                 publish_request(replacement['request'],entry)
         row.update(batch_job_ids=[r['job_id'] for r in batch],
                    batch_replacement_receipts=receipts,
-                   batch_generation=row.get('batch_generation',row['generation']),
-                   reason='Diagnosed platform failures replaced on the same frozen version; waiting for the replacement results.')
+                   batch_generation=row.get('batch_generation',row['generation']))
+    if resume:
+        row.update(resume)
+        row.pop('replacement_resume')
+    row.pop('rollout_replacement_error',None)
 
 
 def main():

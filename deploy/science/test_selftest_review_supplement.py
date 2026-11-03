@@ -135,6 +135,29 @@ class SupplementTests(unittest.TestCase):
             source.write_bytes(complete)
             self.assertEqual(supplement.process_request('author-01',entry,source,state),work)
 
+    def test_typed_iteration_errors_are_waits_and_do_not_rerun_acs(self):
+        for kind, expected_state, expected_owner in (
+                ('author', 'waiting_author', 'request'),
+                ('platform', 'waiting_platform', 'platform')):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+                state,work,obs,template,status,entry,base=self.fixture(Path(raw))
+                source=self.queue(work,base)
+                prior=state/('a'*32)/'status.json'
+                if kind == 'author':
+                    prior_status=json.loads(prior.read_text());prior_status['idea_id']='other-idea'
+                    prior.write_text(json.dumps(prior_status))
+                else:
+                    prior.write_text('{')
+                with patch('subprocess.run',side_effect=AssertionError('No ACS/build calls allowed')):
+                    self.assertIsNone(supplement.process_request('author-01',entry,source,state))
+                result=json.loads((base/'results'/source.name).read_text())
+                self.assertEqual(result['state'],expected_state)
+                self.assertEqual(result['failure_owner'],expected_owner)
+                self.assertFalse(result['cloud_execution_started'])
+                self.assertFalse(result['selftest_rerun_required'])
+                self.assertEqual(result['stage'],'review_supplement')
+                self.assertFalse((work/'review-supplement.json').exists())
+
     def test_wrong_owner_other_author_stale_source_missing_original_idea_are_rejected(self):
         for kind in ('owner','author','source','original_idea'):
             with self.subTest(kind=kind),tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

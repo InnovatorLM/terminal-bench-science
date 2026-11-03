@@ -83,6 +83,7 @@ class AcceptanceTests(unittest.TestCase):
         before = copy.deepcopy(self.ledger)
         self.assertEqual(self.finalize(), {})
         self.assertTrue(self.row['scientific_acceptance'])
+        self.assertGreater(self.row['formal_decided_at'], 0)
         receipt = self.root/'formal-decisions'/name_for(self.row['key'])
         original = receipt.read_bytes()
         proof = json.loads(original)['verified_evidence']
@@ -90,6 +91,7 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(len({r['run_id'] for r in proof['trials']}), 5)
         apply(self.root, before)  # Receipt exists but accepted ledger was never saved.
         self.assertTrue(before[self.row['key']]['scientific_acceptance'])
+        self.assertEqual(before[self.row['key']]['formal_decided_at'], self.row['formal_decided_at'])
         self.finalize();self.assertEqual(receipt.read_bytes(), original)
         d.publish_author_feedback({}, self.row, self.config)
         feedback = json.loads((self.root/'author-01/review-feedback.json').read_text())

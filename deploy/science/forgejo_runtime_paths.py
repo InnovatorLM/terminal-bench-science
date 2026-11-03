@@ -10,6 +10,10 @@ def normalize(instance, port):
     cfg=configparser.ConfigParser(interpolation=None,strict=False)
     cfg.optionxform=str
     cfg.read_string('[__root__]\n'+text)
+    public_url_file = instance / 'public-root-url'
+    public_url = public_url_file.read_text().strip() if public_url_file.is_file() else None
+    if public_url and (not public_url.startswith('https://') or not public_url.endswith('/')):
+        raise ValueError('Public Forgejo URL must be an absolute HTTPS URL ending in /')
     local=str(instance).startswith('/tmp/gewu-terminal-bench-science-runtime-')
     if local:
         # Never repoint a live instance at a fresh empty database/repository.
@@ -21,7 +25,7 @@ def normalize(instance, port):
         'database':{'PATH':str(instance/'data/forgejo.db')},
         'repository':{'ROOT':str(instance/'data/repositories')},
         'server':{'APP_DATA_PATH':str(instance/'data'),'HTTP_PORT':str(port),
-                  'ROOT_URL':'http://127.0.0.1:'+str(port)+'/'},
+                  'ROOT_URL':public_url or 'http://127.0.0.1:'+str(port)+'/'},
         'log':{'ROOT_PATH':str(instance/'log')},
     }.items():
         if section not in cfg:cfg.add_section(section)

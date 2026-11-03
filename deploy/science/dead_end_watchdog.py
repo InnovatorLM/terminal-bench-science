@@ -260,7 +260,7 @@ def decision(previous, observation, now):
 
 
 def observe(role, entry, config, session_state):
-    from iteration_lifecycle import runner_state
+    from iteration_lifecycle import runner_state, review_waiting
     from command_watchdog import process_info
     root = Path(entry['root']).resolve()
     workspace = root/'workspace'
@@ -268,8 +268,7 @@ def observe(role, entry, config, session_state):
         raise ValueError('Linked workspace refused')
     runs = sorted((session_state/role).glob('run-*'), key=lambda p:p.stat().st_mtime_ns)[-3:]
     waiting = []
-    feedback = root/'review-feedback.json'
-    if feedback.exists() and read_json(feedback).get('state') in WAIT_STATES:
+    if review_waiting(root):
         waiting.append('review_or_platform')
     requests = sorted((root/'selftest/inbox').glob('*.json'), key=lambda p:p.stat().st_mtime_ns)
     successes=[]

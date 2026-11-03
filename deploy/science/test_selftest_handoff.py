@@ -106,6 +106,34 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual((work/'status.json').read_bytes(),original)
             self.assertEqual((role/'selftest/results'/(work.name+'.json')).stat().st_mode&0o777,0o640)
 
+    def test_typed_iteration_request_and_platform_errors_keep_owner_and_never_rerun(self):
+        from selftest_iteration import IterationEvidenceError
+        with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:
+            root=Path(raw);state,work,obs,template,status=self.fixture(root)
+            role=root/'role';(role/'selftest/results').mkdir(parents=True)
+            entry=dict(root=str(role),gid=0)
+            original_status=(work/'status.json').read_bytes()
+            cases=(
+                ('request', 'idea_identity_mismatch', 'waiting_author'),
+                ('platform', 'prior_snapshot_changed', 'waiting_platform'),
+            )
+            for owner,code,expected in cases:
+                error=IterationEvidenceError(code, 'typed iteration evidence failure',
+                    'Repair the retained iteration evidence.', failure_owner=owner,
+                    previous_job='a'*32)
+                with self.subTest(owner=owner), patch('selftest_handoff.handoff',side_effect=error) as run:
+                    reconcile(work,state,entry,root/'universe')
+                    result=json.loads((work/'handoff.json').read_text())
+                    self.assertEqual(result['state'],expected)
+                    self.assertEqual(result['iteration_error_code'],code)
+                    self.assertEqual(result['failure_owner'],owner)
+                    self.assertFalse(result['selftest_rerun_required'])
+                    self.assertFalse(result['cloud_execution_started'])
+                    self.assertEqual(run.call_count,1)
+                    # A later disposition is allowed to replace the waiting
+                    # record, but never mutates the original ACS receipt.
+                    self.assertEqual((work/'status.json').read_bytes(),original_status)
+
     def test_platform_image_resolution_failure_is_not_sent_back_for_author_edits(self):
         from build_task_images import BASE_RESOLUTION_FAILURE
         with tempfile.TemporaryDirectory(dir=W/'.tmp') as raw:

@@ -269,6 +269,33 @@ def execute(config, request, connection):
         thread.join(timeout=5)
 
 
+def health(config, request):
+    """Readiness never takes a role command lock or starts/cleans a role process.
+
+    The execution path still enforces chroot, dedicated UID and cleanup for
+    every command. A busy role therefore cannot make the broker look dead.
+    """
+    if set(request) == {'op'} and request['op'] == 'health':
+        return {'protocol': 'role-health-v1', 'ready': True, 'role': None}
+    if set(request) != {'op', 'role', 'cwd'} or request['op'] != 'health':
+        raise ValueError('Invalid health request')
+    role = config['roles'][request['role']]
+    root = trusted(role['root'], directory=True, owner=Path(role['root']).stat().st_uid)
+    if root.stat().st_uid not in {0, config['controller_uid']}:
+        raise ValueError('Untrusted role root')
+    cwd = Path(request['cwd'])
+    if not cwd.is_absolute() or '..' in cwd.parts:
+        raise ValueError('Invalid health working directory')
+    inside = (root / str(cwd).lstrip('/')).resolve(strict=True)
+    if not inside.is_relative_to(root / 'workspace') or not inside.is_dir():
+        raise ValueError('Health working directory escaped role workspace')
+    for relative in ('bin/bash', 'usr/bin/env'):
+        binary = root / relative
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise ValueError('Role execution binary unavailable')
+    return {'protocol': 'role-health-v1', 'ready': True, 'role': request['role']}
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         request = {}
@@ -293,6 +320,10 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ValueError('Request too large or incomplete')
             request = json.loads(line)
             self.request.settimeout(None)
+            if request.get('op') == 'health':
+                response = health(self.server.config, request)
+                self.wfile.write(json.dumps(response).encode() + b'\n')
+                return
             role = request['role']
             if role not in self.server.config['roles']:
                 raise ValueError('Unknown role')
@@ -306,7 +337,9 @@ class Handler(socketserver.StreamRequestHandler):
                 lock_base = Path(self.server.config['socket'].removeprefix('@')).parent
             lock = lock_base / (role + '.lock')
             with lock.open('a') as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX)
+                # Duplicate requests must not occupy broker children forever
+                # behind a long command, including after their client leaves.
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 response = execute(self.server.config, request, self.request)
         except (ValueError, KeyError, OSError, TypeError, OverflowError) as error:
             # Persist broker refusals; otherwise the product only sees an empty
@@ -351,6 +384,9 @@ def main():
     # The workspace's FUSE storage cannot create socket inodes. Linux abstract
     # sockets keep the same SO_PEERCRED boundary without any out-of-workspace file.
     address = '\0' + str(path) if abstract else str(path)
+    # A 30-author universe has 34 roles. Leave one slot per role plus bounded
+    # control-plane headroom; the old fixed 32 could starve the last roles.
+    Server.max_children = max(32, len(config['roles']) + 8)
     server = Server(address, Handler)
     server.config = config
     if not abstract:

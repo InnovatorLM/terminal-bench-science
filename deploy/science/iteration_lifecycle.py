@@ -2,12 +2,129 @@
 import datetime
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
+import re
 import stat
 import time
-from author_iteration_clock import reconcile_session
+from author_iteration_clock import reconcile_session, transition
 from command_watchdog import process_info
+
+
+def operator_json(path):
+    from author_submission_gate import read_operator_file
+    try:
+        value = json.loads(read_operator_file(path, 1024*1024))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError('Invalid operator lifecycle evidence')
+    return value
+
+
+def review_waiting(root):
+    """Match the controller's exact author hold, not an old review state alone."""
+    root = Path(root)
+    feedback = operator_json(root/'review-feedback.json')
+    current = operator_json(root/'review-current-assignment.json')
+    if (feedback.get('author_must_pause') is not True
+            or feedback.get('state') not in ('reviewing', 'waiting_platform')
+            or type(feedback.get('generation')) is not int or feedback['generation'] < 0
+            or any(not isinstance(feedback.get(k), str) or not feedback[k]
+                   for k in ('key', 'commit', 'task'))
+            or any(current.get(k) != feedback.get(k)
+                   for k in ('state', 'key', 'generation', 'commit', 'task'))):
+        return False
+    if feedback['state'] == 'reviewing' and feedback.get('job_id') is None:
+        return True  # Legacy PR assignments have no self-test identity.
+    request = operator_json(root/'selftest/current-request.json')
+    if feedback['state'] == 'reviewing':
+        if not request:
+            return feedback.get('idea_id') is None and feedback.get('received_at') is None
+        return all(feedback.get(k) is not None and request.get(k) == feedback[k]
+                   for k in ('job_id', 'idea_id', 'commit', 'task', 'received_at'))
+    if feedback.get('stage') in ('five_rollouts', 'formal_acceptance_evidence'):
+        if (current.get('stage') != feedback['stage']
+                or any(not isinstance(feedback.get(k), str) or not feedback[k]
+                       or current.get(k) != feedback[k]
+                       for k in ('evaluation_id', 'snapshot_sha256'))):
+            return False
+    elif (feedback.get('feedback_source') != 'selftest_handoff'
+            or current.get('feedback_source') != 'selftest_handoff'):
+        return False
+    return all(feedback.get(k) is not None
+               and current.get(k) == feedback[k] and request.get(k) == feedback[k]
+               for k in ('job_id', 'idea_id', 'commit', 'task', 'received_at'))
+
+
+def terminal_selftest(sessions, role, idea, job, now):
+    """A terminal operator receipt with no unresolved cloud cleanup."""
+    if not isinstance(job, str) or not re.fullmatch('[a-f0-9]{32}', job):
+        return None
+    status = operator_json(Path(sessions)/'author-selftest'/job/'status.json')
+    if (status.get('schema_version') != 2
+            or status.get('role') != role or status.get('idea_id') != idea
+            or status.get('job_id') != job
+            or status.get('status') not in ('selftest_passed', 'selftest_failed', 'failed')):
+        return None
+    start, end = status.get('received_at'), status.get('completed_at')
+    if (any(type(v) not in (int, float) or not math.isfinite(v) for v in (start, end))
+            or not 0 < start <= end <= now or status.get('cleanup_confirmed') is False):
+        return None
+    trials = status.get('trials', [])
+    if not isinstance(trials, list) or any(not isinstance(t, dict)
+            or t.get('cleanup_confirmed') is not True for t in trials):
+        return None
+    if not trials and (status['status'] != 'failed'
+            or status.get('cloud_execution_started') is True
+            or status.get('cloud_execution_attempted') is True):
+        return None
+    source_fields = ('source_repository', 'source_task_path', 'source_commit')
+    if any(not isinstance(status.get(k), str) or not status[k] for k in source_fields):
+        # A preflight rejection can finish before the worker verifies source
+        # bytes. Its immutable captured request binds the failed attempt, not
+        # an executed/qualified task; explicit no-cloud evidence is required.
+        if (status['status'] != 'failed' or trials
+                or status.get('cloud_execution_started') is not False
+                or status.get('cloud_execution_attempted') is not False):
+            return None
+        request = operator_json(Path(sessions)/'author-selftest'/job/'request.json')
+        if (request.get('job_id') != job or request.get('idea_id') != idea
+                or any(not isinstance(request.get(k), str) or not request[k]
+                       or (status.get(k) is not None and status[k] != request[k]) for k in source_fields)):
+            return None
+        status = dict(status, **{k:request[k] for k in source_fields})
+    return status
+
+
+def resume_completed_acs_wait(state, root, role, sessions, live, now):
+    """Resume at observation time; never rewrite or refund historical intervals.
+
+    Both the clock's job and the latest accepted job must be terminal, belong to
+    this exact idea/task and have confirmed cleanup. A newer running job, an
+    unknown receipt or a current review/platform hold keeps the pause intact.
+    """
+    if not live or review_waiting(root):
+        return
+    request = operator_json(Path(root)/'selftest/current-request.json')
+    if request.get('role') != role:
+        return
+    for idea, row in state.get('ideas', {}).items():
+        if row.get('status') != 'acs_wait' or request.get('idea_id') != idea:
+            continue
+        paused = terminal_selftest(sessions, role, idea, row.get('acs_run_id'), now)
+        latest = terminal_selftest(sessions, role, idea, request.get('job_id'), now)
+        if paused is None or latest is None:
+            continue
+        if (any(latest.get(k) != paused.get(k) for k in ('source_repository', 'source_task_path'))
+                or any(not request.get(k) or latest.get(v) != request[k] for k, v in (
+                    ('commit', 'source_commit'), ('task', 'source_task_path'), ('received_at', 'received_at')))
+                or request != operator_json(Path(root)/'selftest/current-request.json')
+                or review_waiting(root)):
+            continue
+        transition(state, 'resume', idea, now,
+                   reason='operator observed current selftest terminal with confirmed cleanup and a live author')
 
 
 def runner_state(run,uid):
@@ -78,6 +195,7 @@ def _scan_clocks(config):
             end=terminal_time(max(runs,key=lambda p:p.stat().st_mtime)) if runs and not live else None
             before=json.dumps(state,sort_keys=True)
             now=time.time()
+            resume_completed_acs_wait(state,root,name,sessions,live,now)
             reconcile_session(state,live,now,end)
             if config.get('observation_root'):
                 from iteration_observation import observe

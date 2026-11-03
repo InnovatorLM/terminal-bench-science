@@ -350,7 +350,9 @@ pub fn detect(
     workspaces: &[PathBuf],
 ) -> Method {
     if std::env::var_os(crate::role_broker::CONFIG_ENV).is_some() {
-        return if crate::role_broker::available(workspaces) {
+        // Service readiness is independent of role workload or a single broken
+        // role root. Each session validates its own root before using the broker.
+        return if crate::role_broker::service_available() {
             Method::RoleBroker
         } else {
             Method::None
